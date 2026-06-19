@@ -39,6 +39,7 @@
   .corner.bl{bottom:-2px;left:-2px;border-right:0;border-top:0} .corner.br{bottom:-2px;right:-2px;border-left:0;border-top:0}
   .beam { position:absolute; left:8%; right:8%; height:2px; background:linear-gradient(90deg,transparent,var(--beam),transparent); animation:scan 2.4s ease-in-out infinite; }
   @keyframes scan { 0%,100%{top:14%} 50%{top:84%} }
+  #symbolMock { width:100%; display:flex; align-items:center; justify-content:center; }
   .bars { width:78%; height:64px; background:#d8c19a; border:3px solid #2a1c0a; border-left-width:6px; border-right-width:6px;
     background-image:repeating-linear-gradient(90deg,#1a120a 0 3px,transparent 3px 6px,#1a120a 6px 8px,transparent 8px 13px); }
   .scaleNote { color:#7dd3fc; font:11px ui-monospace,monospace; margin-top:8px; }
@@ -95,7 +96,7 @@
       <span class="stateTag" id="stateTag">SCANNING</span>
       <div class="frame">
         <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
-        <div class="beam"></div><div class="bars"></div>
+        <div class="beam" id="beam"></div><div id="symbolMock"></div>
       </div>
       <div class="scaleNote">⊞ 比例尺卡 已偵測 · 基準 26.0 mm</div>
     </div>
@@ -141,43 +142,78 @@ const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
 const SIX = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", whiteBalance:"白平衡", scaleRef:"比例尺卡", picket:"印向直立" };
 const STAGES = [["INLINE","產線"],["OUTBOUND","出貨"],["COMPLAINT","客訴"]];
 
+const SYMS = [["ITF14","ITF-14"],["GS1_128","GS1-128"],["QR","QR"],["DATAMATRIX","DM"]];
+const is2D = (s) => s === "QR" || s === "DATAMATRIX";
+const SAMPLE_DATA = {
+  ITF14:"104712345678904", GS1_128:"(01)04712345678901",
+  QR:"https://trace.acme/wo/2406A-7741", DATAMATRIX:"DM:LOT2406A-7741/S00231",
+};
+
 const state = {
   symbology:"ITF14", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
-  decoded:"104712345678904", expected:"104712345678904", canDecode:true,
+  decoded:SAMPLE_DATA.ITF14, expected:SAMPLE_DATA.ITF14, canDecode:true,
   gate:{ varLap:210, glare:0.4, wash:0.06, wb:2, picket:3, tilt:2, pxm:9, scaleRef:true },
-  grade:{ rLight:0.84, rDark:0.16, edge:0.62, dec:0.25, def:0.18 },
+  grade:{ rLight:0.84, rDark:0.16, edge:0.62, dec:0.25, def:0.18, fpd:0.05, gnu:0.1, uecUsed:2, uecTotal:10 },
 };
 const profileOf = () => SEED_SUBSTRATE_PROFILES.find(p => p.id === state.profileId);
-const policyOf  = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology) || SEED_ACCEPTANCE_POLICIES[0];
+const policyOf  = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology)
+  || { id:state.symbology.toLowerCase()+"-default", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
+
+function onSymChange() {
+  state.decoded = SAMPLE_DATA[state.symbology];
+  state.expected = state.decoded;
+  renderHud();
+}
 
 // segmented controls
-function seg(el, items, key) {
+function seg(el, items, key, after) {
   el.innerHTML = items.map(([v,l]) => `<button data-v="${v}" class="${v===state[key]?'on':''}">${l}</button>`).join("");
-  el.onclick = (e) => { const b=e.target.closest("button"); if(!b) return; state[key]=b.dataset.v; render(); recompute(); };
+  el.onclick = (e) => { const b=e.target.closest("button"); if(!b) return; state[key]=b.dataset.v; after && after(); render(); recompute(); };
 }
 function initSelectors() {
   seg($("seg-stage"), STAGES, "processStage");
-  seg($("seg-sym"), [["ITF14","ITF-14"],["GS1_128","GS1-128"]], "symbology");
+  seg($("seg-sym"), SYMS, "symbology", onSymChange);
   $("profile").innerHTML = SEED_SUBSTRATE_PROFILES.map(p => `<option value="${p.id}">${p.name}</option>`).join("");
   $("profile").value = state.profileId;
   $("profile").onchange = () => { state.profileId = $("profile").value; recompute(); };
 }
 function render() {
   seg($("seg-stage"), STAGES, "processStage");
-  seg($("seg-sym"), [["ITF14","ITF-14"],["GS1_128","GS1-128"]], "symbology");
+  seg($("seg-sym"), SYMS, "symbology", onSymChange);
+}
+
+// HUD symbol mock: 1D bars or 2D matrix
+function renderHud() { $("symbolMock").innerHTML = is2D(state.symbology) ? matrixSvg(state.symbology) : `<div class="bars"></div>`; }
+function matrixSvg(type) {
+  const N=21, c=8, sz=N*c; let cells="", r=7;
+  const finder=(x,y)=>`<rect x="${x*c}" y="${y*c}" width="${7*c}" height="${7*c}" fill="#1a120a"/>`+
+    `<rect x="${(x+1)*c}" y="${(y+1)*c}" width="${5*c}" height="${5*c}" fill="#d8c19a"/>`+
+    `<rect x="${(x+2)*c}" y="${(y+2)*c}" width="${3*c}" height="${3*c}" fill="#1a120a"/>`;
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++){ r=(r*1103515245+12345)&0x7fffffff;
+    const inFinder=(x<8&&y<8)||(x>N-9&&y<8)||(x<8&&y>N-9);
+    if(type==="QR"&&inFinder) continue;
+    if((r>>16)%2===0) cells+=`<rect x="${x*c}" y="${y*c}" width="${c}" height="${c}" fill="#1a120a"/>`;
+  }
+  let svg=`<svg viewBox="0 0 ${sz} ${sz}" width="160" height="160" style="background:#d8c19a;border:3px solid #2a1c0a">${cells}`;
+  if(type==="QR") svg+=finder(0,0)+finder(N-7,0)+finder(0,N-7);
+  else { svg+=`<rect x="0" y="0" width="${c}" height="${sz}" fill="#1a120a"/><rect x="0" y="${sz-c}" width="${sz}" height="${c}" fill="#1a120a"/>`;
+    for(let i=0;i<N;i+=2) svg+=`<rect x="${i*c}" y="0" width="${c}" height="${c}" fill="#1a120a"/><rect x="${sz-c}" y="${i*c}" width="${c}" height="${c}" fill="#1a120a"/>`; }
+  return svg+`</svg>`;
 }
 
 // scenarios (no camera)
+const GATE_OK = {varLap:200,glare:0.5,wash:0.06,wb:3,picket:3,tilt:2,pxm:9,scaleRef:true};
 const SCN = [
-  { t:"理想", a:s=>{ Object.assign(s.gate,{varLap:230,glare:0.3,wash:0.05,wb:2,picket:2,tilt:2,pxm:10,scaleRef:true}); Object.assign(s.grade,{rLight:0.87,rDark:0.12,edge:0.74,dec:0.12,def:0.1}); s.canDecode=true; } },
-  { t:"楞痕偏高", a:s=>{ Object.assign(s.gate,{varLap:195,glare:0.6,wash:0.13,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.8,rDark:0.2,edge:0.42,dec:0.4,def:0.3}); s.canDecode=true; } },
-  { t:"低對比", a:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:3,tilt:2,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.52,rDark:0.34,edge:0.3,dec:0.4,def:0.3}); s.canDecode=true; } },
+  { t:"理想", a:s=>{ Object.assign(s.gate,{varLap:230,glare:0.3,wash:0.05,wb:2,picket:2,tilt:2,pxm:10,scaleRef:true}); Object.assign(s.grade,{rLight:0.87,rDark:0.12,edge:0.74,dec:0.12,def:0.1,fpd:0.03,gnu:0.06,uecUsed:1,uecTotal:10}); s.canDecode=true; } },
+  { t:"楞痕偏高", a:s=>{ Object.assign(s.gate,{varLap:195,glare:0.6,wash:0.13,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.8,rDark:0.2,edge:0.42,dec:0.4,def:0.3,fpd:0.12,gnu:0.28,uecUsed:4,uecTotal:10}); s.canDecode=true; } },
+  { t:"低對比", a:s=>{ Object.assign(s.gate,GATE_OK); Object.assign(s.grade,{rLight:0.52,rDark:0.34,edge:0.3,dec:0.4,def:0.3,fpd:0.08,gnu:0.15,uecUsed:3,uecTotal:10}); s.canDecode=true; } },
+  { t:"套印不準(2D)", a:s=>{ s.symbology="QR"; Object.assign(s.gate,GATE_OK); Object.assign(s.grade,{rLight:0.82,rDark:0.18,edge:0.55,fpd:0.12,gnu:0.5,uecUsed:7,uecTotal:10}); s.canDecode=true; } },
   { t:"失焦", a:s=>{ s.gate.varLap=60; } },
   { t:"眩光", a:s=>{ s.gate.glare=6; } },
-  { t:"不可讀", a:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:3,tilt:2,pxm:9,scaleRef:true}); s.canDecode=false; } },
+  { t:"不可讀", a:s=>{ Object.assign(s.gate,GATE_OK); s.canDecode=false; } },
 ];
 $("scenarios").innerHTML = SCN.map((s,i)=>`<button data-i="${i}">${s.t}</button>`).join("");
-$("scenarios").onclick = (e) => { const b=e.target.closest("button"); if(!b) return; SCN[+b.dataset.i].a(state); $("profile").value=state.profileId; render(); recompute(); };
+$("scenarios").onclick = (e) => { const b=e.target.closest("button"); if(!b) return; SCN[+b.dataset.i].a(state); $("profile").value=state.profileId; onSymChange(); render(); recompute(); };
 
 // gate
 function evalGate() {
@@ -191,6 +227,7 @@ function recompute() {
   $("lights").innerHTML = gate.report.checks.filter(c => SIX[c.key]).map(c =>
     `<div class="light"><span class="dot bg-${c.status}"></span>${SIX[c.key]}<br><small style="color:#94a3b8">${c.status}</small></div>`).join("");
   const armed = gate.state === "ARMED", sh = $("shutter");
+  $("beam").style.display = armed ? "none" : "block"; // 鎖定後停止掃描光束（已對準）
   sh.className = "shutter " + (armed?"ready":""); sh.disabled = !armed;
   $("shutterLbl").textContent = armed ? "可拍 — 點按檢驗" : (gate.state==="LOCKED" ? "快門鎖死（有未過項）" : "校準中…");
   $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "六項全綠前快門鎖死，確保每次拍攝一致。";
@@ -200,15 +237,18 @@ function recompute() {
 function inspect() {
   const gate = evalGate(); if (gate.state !== "ARMED") return;
   const sym = state.symbology, g = state.grade;
-  const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded } : null };
+  const dim = sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined;
+  const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null };
   const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
-  const scan = () => ({ photometric:{ rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] },
-                        geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } });
-  const grade = buildGradeResult(sym, Array.from({length:10}, scan));
+  const photometric = { rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] };
+  // 1D: N scanlines averaged. 2D: single param set, min-takes-overall (per core lib C7.3).
+  const grade = is2D(sym)
+    ? buildGradeResult(sym, { photometric, geometric:{ finderTimingDamageRatio:g.fpd, gridDeviation:g.gnu, usedEC:g.uecUsed, totalEC:g.uecTotal } })
+    : buildGradeResult(sym, Array.from({length:10}, () => ({ photometric, geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } })));
   const acceptance = evaluateAcceptance(grade, policyOf());
 
   $("decode").innerHTML = decode.decoded
-    ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${decode.data}`
+    ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${decode.data}${decode.dimension?" · "+decode.dimension:""}`
     : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
   $("letter").textContent = grade.overall;
   $("circle").style.borderColor = GC[grade.overall]; $("letter").style.color = GC[grade.overall];
@@ -228,7 +268,7 @@ $("back").onclick = () => show("capture");
 $("reBtn").onclick = () => show("capture");
 
 // init
-initSelectors(); recompute();
+initSelectors(); renderHud(); recompute();
 </script>
 </body>
 </html>
