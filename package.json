@@ -1,0 +1,17 @@
+{
+  "name": "corrugated-barcode-qc-core",
+  "version": "0.1.0",
+  "description": "Portable TypeScript core for the corrugated-box barcode/QR relative quality screening app (engines from spec Part C). Frontend-agnostic; consumed by a Flutter/native UI.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  },
+  "license": "UNLICENSED"
+}
