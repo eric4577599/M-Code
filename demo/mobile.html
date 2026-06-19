@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>條碼品質快篩 — 手機簡易版（免費版）</title>
+<style>
+  :root { --ok:#1f9d55; --warn:#d97706; --fail:#dc2626; --ink:#0f172a; --mut:#94a3b8; --beam:#22d3ee; --hud:#0b1220; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:#334155; display:flex; justify-content:center;
+    min-height:100vh; padding:18px 0; }
+  /* phone frame (for desktop preview; on a real phone it just fills) */
+  .phone { width:390px; max-width:100vw; min-height:800px; background:#fff; border-radius:38px; overflow:hidden;
+    box-shadow:0 18px 50px rgba(0,0,0,.45); position:relative; border:10px solid #0b0f1a; display:flex; flex-direction:column; }
+  .statusbar { background:var(--ink); color:#cbd5e1; font-size:11px; padding:7px 18px; display:flex; justify-content:space-between; }
+  .appbar { background:var(--ink); color:#fff; padding:6px 16px 12px; }
+  .appbar .t { font-size:15px; font-weight:700; }
+  .appbar .s { font-size:11px; color:var(--mut); }
+  .free { display:inline-block; background:#0ea5e9; color:#fff; font-size:10px; padding:1px 7px; border-radius:999px; margin-left:6px; }
+
+  .view { display:none; flex:1; flex-direction:column; }
+  .view.active { display:flex; }
+
+  /* selectors */
+  .selrow { display:flex; gap:6px; padding:10px 14px 4px; overflow-x:auto; }
+  .selrow .seg { display:flex; border:1px solid #e2e8f0; border-radius:999px; overflow:hidden; flex:0 0 auto; }
+  .seg button { border:0; background:#fff; padding:6px 12px; font-size:12px; color:#475569; }
+  .seg button.on { background:var(--ink); color:#fff; }
+  .profSel { padding:6px 14px; }
+  .profSel select { width:100%; font:inherit; padding:9px 10px; border:1px solid #e2e8f0; border-radius:10px; background:#fff; }
+
+  /* HUD */
+  .hud { margin:10px 14px; background:var(--hud); border-radius:18px; padding:14px; position:relative; min-height:230px; display:flex; flex-direction:column; }
+  .hud .stateTag { position:absolute; top:10px; right:12px; font:700 11px ui-monospace,monospace; padding:3px 9px; border-radius:999px; }
+  .stateTag.ARMED{ background:rgba(34,197,94,.2); color:#4ade80 } .stateTag.LOCKED{ background:rgba(239,68,68,.2); color:#f87171 } .stateTag.SCANNING{ background:rgba(148,163,184,.2); color:#cbd5e1 }
+  .frame { flex:1; border:2px solid #1e3a5f; border-radius:12px; position:relative; display:flex; align-items:center; justify-content:center; }
+  .corner { position:absolute; width:20px; height:20px; border:3px solid var(--beam); }
+  .corner.tl{top:-2px;left:-2px;border-right:0;border-bottom:0} .corner.tr{top:-2px;right:-2px;border-left:0;border-bottom:0}
+  .corner.bl{bottom:-2px;left:-2px;border-right:0;border-top:0} .corner.br{bottom:-2px;right:-2px;border-left:0;border-top:0}
+  .beam { position:absolute; left:8%; right:8%; height:2px; background:linear-gradient(90deg,transparent,var(--beam),transparent); animation:scan 2.4s ease-in-out infinite; }
+  @keyframes scan { 0%,100%{top:14%} 50%{top:84%} }
+  .bars { width:78%; height:64px; background:#d8c19a; border:3px solid #2a1c0a; border-left-width:6px; border-right-width:6px;
+    background-image:repeating-linear-gradient(90deg,#1a120a 0 3px,transparent 3px 6px,#1a120a 6px 8px,transparent 8px 13px); }
+  .scaleNote { color:#7dd3fc; font:11px ui-monospace,monospace; margin-top:8px; }
+
+  /* lights */
+  .lights { display:grid; grid-template-columns:1fr 1fr 1fr; gap:7px; padding:4px 14px 0; }
+  .light { border:1px solid #e2e8f0; border-radius:11px; padding:8px 4px; text-align:center; font-size:11px; }
+  .light .dot { width:10px; height:10px; border-radius:50%; display:block; margin:0 auto 4px; }
+  .bg-OK{ background:var(--ok) } .bg-WARN{ background:var(--warn) } .bg-FAIL{ background:var(--fail) }
+  .gateNote { font-size:11px; color:#64748b; padding:8px 16px 0; }
+
+  /* shutter */
+  .shutterWrap { margin-top:auto; padding:14px; display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .shutter { width:74px; height:74px; border-radius:50%; border:5px solid #cbd5e1; background:#94a3b8; cursor:not-allowed; }
+  .shutter.ready { background:var(--ok); border-color:#bbf7d0; box-shadow:0 0 0 4px rgba(34,197,94,.25); cursor:pointer; }
+  .shutterLbl { font-size:12px; color:#64748b; }
+  .demoPick { padding:4px 14px 12px; }
+  .demoPick summary { font-size:12px; color:#0ea5e9; cursor:pointer; }
+  .demoPick .row { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .demoPick .row button { border:1px solid #e2e8f0; background:#fff; border-radius:9px; padding:7px 10px; font-size:12px; }
+
+  /* result */
+  .res { padding:16px; display:flex; flex-direction:column; align-items:center; text-align:center; flex:1; overflow-y:auto; }
+  .back { align-self:flex-start; background:none; border:0; color:#0ea5e9; font-size:14px; padding:0 0 8px; }
+  .decode { font-size:13px; margin-bottom:6px; }
+  .circle { width:150px; height:150px; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; border:10px solid var(--ok); margin:6px 0; }
+  .circle .l { font-size:62px; font-weight:800; line-height:1; } .circle .s { font-size:11px; color:#64748b; }
+  .legal { color:var(--fail); font-size:11px; line-height:1.5; margin:4px 10px; }
+  .verdict { font-size:15px; font-weight:700; margin:10px 0 4px; padding:7px 16px; border-radius:999px; }
+  .verdict.pass { background:#dcfce7; color:#166534; } .verdict.fail { background:#fee2e2; color:#991b1b; }
+  .margin { font-size:12px; color:#64748b; }
+  .params { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin:14px 0 4px; }
+  .pchip { border:1px solid #e2e8f0; border-radius:8px; padding:5px 9px; font-size:12px; }
+  .pchip b { font-weight:800; margin-right:4px; }
+  .upsell { margin-top:16px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:12px; padding:12px; font-size:12px; color:#075985; }
+  .upsell b { display:block; margin-bottom:4px; }
+  .reBtn { margin-top:14px; width:100%; padding:13px; border:0; border-radius:12px; background:var(--ink); color:#fff; font-size:15px; }
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="statusbar"><span>9:41</span><span>▦ ▦ 100%</span></div>
+  <div class="appbar"><div class="t">條碼品質快篩 <span class="free">免費版</span></div><div class="s">相對品質篩檢 · 非 ISO 合規驗證</div></div>
+
+  <!-- ════ 拍攝 ════ -->
+  <div class="view active" id="v-capture">
+    <div class="selrow">
+      <div class="seg" id="seg-stage"></div>
+      <div class="seg" id="seg-sym"></div>
+    </div>
+    <div class="profSel"><select id="profile"></select></div>
+
+    <div class="hud">
+      <span class="stateTag" id="stateTag">SCANNING</span>
+      <div class="frame">
+        <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+        <div class="beam"></div><div class="bars"></div>
+      </div>
+      <div class="scaleNote">⊞ 比例尺卡 已偵測 · 基準 26.0 mm</div>
+    </div>
+
+    <div class="lights" id="lights"></div>
+    <p class="gateNote" id="gateNote"></p>
+
+    <div class="shutterWrap">
+      <button class="shutter" id="shutter" disabled></button>
+      <span class="shutterLbl" id="shutterLbl">校準中…</span>
+    </div>
+
+    <details class="demoPick">
+      <summary>示範情境（無相機時用）</summary>
+      <div class="row" id="scenarios"></div>
+    </details>
+  </div>
+
+  <!-- ════ 結果 ════ -->
+  <div class="view" id="v-result">
+    <div class="res">
+      <button class="back" id="back">‹ 重新拍攝</button>
+      <div class="decode" id="decode"></div>
+      <div class="circle" id="circle"><div class="l" id="letter">–</div><div class="s">參考等級</div></div>
+      <div class="legal">相對值・非 ISO 合規證書<br>本工具不出具 ISO 證書，合規驗證請用合規 verifier。</div>
+      <div class="verdict" id="verdict"></div>
+      <div class="margin" id="margin"></div>
+      <div class="params" id="params"></div>
+      <div class="upsell"><b>升級付費版可解鎖</b>完整參數報告 · 尺寸量測（X寬/BWR/Quiet Zone）· 印刷掉級診斷 · CSV 匯出 · ERP 回寫 · 趨勢監控</div>
+      <button class="reBtn" id="reBtn">↻ 再拍一張</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import {
+  evaluateGate, runDecode, buildGradeResult, evaluateAcceptance,
+  SEED_SUBSTRATE_PROFILES, SEED_ACCEPTANCE_POLICIES,
+} from "../dist/index.js";
+
+const $ = (id) => document.getElementById(id);
+const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
+const SIX = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", whiteBalance:"白平衡", scaleRef:"比例尺卡", picket:"印向直立" };
+const STAGES = [["INLINE","產線"],["OUTBOUND","出貨"],["COMPLAINT","客訴"]];
+
+const state = {
+  symbology:"ITF14", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
+  decoded:"104712345678904", expected:"104712345678904", canDecode:true,
+  gate:{ varLap:210, glare:0.4, wash:0.06, wb:2, picket:3, tilt:2, pxm:9, scaleRef:true },
+  grade:{ rLight:0.84, rDark:0.16, edge:0.62, dec:0.25, def:0.18 },
+};
+const profileOf = () => SEED_SUBSTRATE_PROFILES.find(p => p.id === state.profileId);
+const policyOf  = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology) || SEED_ACCEPTANCE_POLICIES[0];
+
+// segmented controls
+function seg(el, items, key) {
+  el.innerHTML = items.map(([v,l]) => `<button data-v="${v}" class="${v===state[key]?'on':''}">${l}</button>`).join("");
+  el.onclick = (e) => { const b=e.target.closest("button"); if(!b) return; state[key]=b.dataset.v; render(); recompute(); };
+}
+function initSelectors() {
+  seg($("seg-stage"), STAGES, "processStage");
+  seg($("seg-sym"), [["ITF14","ITF-14"],["GS1_128","GS1-128"]], "symbology");
+  $("profile").innerHTML = SEED_SUBSTRATE_PROFILES.map(p => `<option value="${p.id}">${p.name}</option>`).join("");
+  $("profile").value = state.profileId;
+  $("profile").onchange = () => { state.profileId = $("profile").value; recompute(); };
+}
+function render() {
+  seg($("seg-stage"), STAGES, "processStage");
+  seg($("seg-sym"), [["ITF14","ITF-14"],["GS1_128","GS1-128"]], "symbology");
+}
+
+// scenarios (no camera)
+const SCN = [
+  { t:"理想", a:s=>{ Object.assign(s.gate,{varLap:230,glare:0.3,wash:0.05,wb:2,picket:2,tilt:2,pxm:10,scaleRef:true}); Object.assign(s.grade,{rLight:0.87,rDark:0.12,edge:0.74,dec:0.12,def:0.1}); s.canDecode=true; } },
+  { t:"楞痕偏高", a:s=>{ Object.assign(s.gate,{varLap:195,glare:0.6,wash:0.13,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.8,rDark:0.2,edge:0.42,dec:0.4,def:0.3}); s.canDecode=true; } },
+  { t:"低對比", a:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:3,tilt:2,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.52,rDark:0.34,edge:0.3,dec:0.4,def:0.3}); s.canDecode=true; } },
+  { t:"失焦", a:s=>{ s.gate.varLap=60; } },
+  { t:"眩光", a:s=>{ s.gate.glare=6; } },
+  { t:"不可讀", a:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:3,tilt:2,pxm:9,scaleRef:true}); s.canDecode=false; } },
+];
+$("scenarios").innerHTML = SCN.map((s,i)=>`<button data-i="${i}">${s.t}</button>`).join("");
+$("scenarios").onclick = (e) => { const b=e.target.closest("button"); if(!b) return; SCN[+b.dataset.i].a(state); $("profile").value=state.profileId; render(); recompute(); };
+
+// gate
+function evalGate() {
+  return evaluateGate({ symbolDetected:true, varLap:state.gate.varLap, glareRatio:state.gate.glare/100,
+    washboardAmpRatio:state.gate.wash, wbGainDeviation:state.gate.wb/100, scaleRefDetected:state.gate.scaleRef,
+    picketAngleDeg:state.gate.picket, perspectiveTiltDeg:state.gate.tilt, gsdMmPerPx:0.12, pxPerModule:state.gate.pxm });
+}
+function recompute() {
+  const gate = evalGate();
+  $("stateTag").textContent = gate.state; $("stateTag").className = "stateTag " + gate.state;
+  $("lights").innerHTML = gate.report.checks.filter(c => SIX[c.key]).map(c =>
+    `<div class="light"><span class="dot bg-${c.status}"></span>${SIX[c.key]}<br><small style="color:#94a3b8">${c.status}</small></div>`).join("");
+  const armed = gate.state === "ARMED", sh = $("shutter");
+  sh.className = "shutter " + (armed?"ready":""); sh.disabled = !armed;
+  $("shutterLbl").textContent = armed ? "可拍 — 點按檢驗" : (gate.state==="LOCKED" ? "快門鎖死（有未過項）" : "校準中…");
+  $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "六項全綠前快門鎖死，確保每次拍攝一致。";
+}
+
+// inspect (free tier: decode + relative grade + basic params; no measurement/diagnosis/csv)
+function inspect() {
+  const gate = evalGate(); if (gate.state !== "ARMED") return;
+  const sym = state.symbology, g = state.grade;
+  const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded } : null };
+  const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
+  const scan = () => ({ photometric:{ rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] },
+                        geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } });
+  const grade = buildGradeResult(sym, Array.from({length:10}, scan));
+  const acceptance = evaluateAcceptance(grade, policyOf());
+
+  $("decode").innerHTML = decode.decoded
+    ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${decode.data}`
+    : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
+  $("letter").textContent = grade.overall;
+  $("circle").style.borderColor = GC[grade.overall]; $("letter").style.color = GC[grade.overall];
+  const v = $("verdict");
+  v.className = "verdict " + (acceptance.pass?"pass":"fail");
+  v.textContent = (acceptance.pass ? "通過" : "未通過") + ` ｜ 門檻 ≥ ${policyOf().requiredGrade}`;
+  $("margin").textContent = "margin " + acceptance.marginScore.toFixed(2);
+  $("params").innerHTML = grade.parameters.map(p =>
+    `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`).join("");
+  show("result");
+}
+
+// view switch
+function show(v) { document.querySelectorAll(".view").forEach(x=>x.classList.remove("active")); $("v-"+v).classList.add("active"); }
+$("shutter").onclick = inspect;
+$("back").onclick = () => show("capture");
+$("reBtn").onclick = () => show("capture");
+
+// init
+initSelectors(); recompute();
+</script>
+</body>
+</html>

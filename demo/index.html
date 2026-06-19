@@ -3,236 +3,451 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>瓦楞箱條碼 QC 核心 — 互動測試台</title>
+<title>瓦楞箱條碼 / QR 品質檢驗 — 現場檢測 Demo</title>
 <style>
-  :root { --ok:#1f9d55; --warn:#d97706; --fail:#dc2626; --ink:#111827; --mut:#6b7280; --line:#e5e7eb; }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family: "Segoe UI", system-ui, sans-serif; color:var(--ink); background:#f3f4f6; }
-  header { background:#0f172a; color:#e2e8f0; padding:14px 20px; }
-  header h1 { font-size:17px; margin:0; }
-  header p { margin:4px 0 0; font-size:12px; color:#94a3b8; }
-  .wrap { display:grid; grid-template-columns: 360px 1fr; gap:16px; padding:16px; align-items:start; }
-  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
-  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--mut); margin:0 0 10px; }
-  label { display:flex; justify-content:space-between; align-items:center; font-size:13px; margin:7px 0; gap:8px; }
-  label span.v { font-family: ui-monospace, "Consolas", monospace; color:var(--mut); min-width:48px; text-align:right; }
-  input[type=range] { width:150px; }
-  input[type=text], input[type=number], select { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px; width:150px; }
-  button { background:#0f172a; color:#fff; border:0; border-radius:8px; padding:10px 16px; font-size:14px; cursor:pointer; width:100%; margin-top:6px; }
-  button:hover { background:#1e293b; }
-  .lights { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
-  .light { border:1px solid var(--line); border-radius:8px; padding:8px; font-size:12px; text-align:center; }
-  .light .dot { width:12px; height:12px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle; }
-  .OK { background:var(--ok); } .WARN { background:var(--warn); } .FAIL { background:var(--fail); }
-  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
-  .state-ARMED { color:var(--ok); } .state-LOCKED { color:var(--fail); } .state-SCANNING { color:var(--mut); }
-  .grade-circle { width:120px; height:120px; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; margin:0 auto; border:8px solid var(--ok); }
-  .grade-circle .letter { font-size:46px; font-weight:800; line-height:1; }
-  .grade-circle .sub { font-size:10px; color:var(--mut); }
-  .legal { color:var(--fail); font-size:11px; text-align:center; margin-top:6px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  td, th { padding:5px 6px; border-bottom:1px solid var(--line); text-align:left; }
-  .tag { font-size:10px; padding:1px 6px; border-radius:4px; }
-  .tag.GEOMETRIC { background:#dcfce7; color:#166534; }
-  .tag.PHOTOMETRIC { background:#fef3c7; color:#92400e; }
-  .quad { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  .quad div { border:1px solid var(--line); border-radius:8px; padding:8px; font-size:12px; }
-  .quad b { display:block; font-family:ui-monospace,monospace; font-size:15px; }
-  .diag { border-left:4px solid var(--warn); background:#fffbeb; padding:8px 10px; border-radius:6px; margin:6px 0; font-size:13px; }
-  .diag.sev3 { border-left-color:var(--fail); background:#fef2f2; }
-  .csv { font-family:ui-monospace,monospace; font-size:11px; word-break:break-all; background:#0f172a; color:#86efac; padding:10px; border-radius:8px; }
-  .accept-pass { color:var(--ok); font-weight:700; } .accept-fail { color:var(--fail); font-weight:700; }
+  :root {
+    --ok:#1f9d55; --warn:#d97706; --fail:#dc2626; --ink:#0f172a; --mut:#64748b;
+    --line:#e2e8f0; --bg:#f1f5f9; --hud:#0b1220; --beam:#22d3ee;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; color:var(--ink); background:var(--bg); }
+
+  /* ── top bar ── */
+  .topbar { background:var(--ink); color:#e2e8f0; padding:10px 18px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .topbar h1 { font-size:15px; margin:0; flex:1 1 auto; }
+  .tabs { display:flex; gap:4px; }
+  .tab { background:transparent; color:#94a3b8; border:1px solid #334155; padding:6px 14px; border-radius:8px; cursor:pointer; font-size:13px; }
+  .tab.active { background:#1e293b; color:#fff; border-color:#475569; }
+  .modeToggle { display:flex; align-items:center; gap:6px; font-size:12px; color:#94a3b8; }
+  .switch { position:relative; width:120px; height:28px; background:#1e293b; border-radius:999px; border:1px solid #334155; cursor:pointer; font-size:11px; }
+  .switch span { position:absolute; top:0; height:100%; display:flex; align-items:center; justify-content:center; width:50%; color:#94a3b8; z-index:1; }
+  .switch .knob { position:absolute; top:2px; left:2px; width:calc(50% - 2px); height:calc(100% - 4px); background:#0ea5e9; border-radius:999px; transition:left .15s; }
+  body.mode-eng .switch .knob { left:calc(50%); }
+  body.mode-demo .switch .demoLbl, body.mode-eng .switch .engLbl { color:#fff; font-weight:600; }
+
+  .page { display:none; padding:16px; }
+  .page.active { display:block; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 12px; }
   .muted { color:var(--mut); font-size:12px; }
+
+  /* ── chips ── */
+  .chiprow { margin:8px 0; }
+  .chiprow .lbl { font-size:11px; color:var(--mut); margin-right:6px; }
+  .chip { display:inline-block; padding:5px 12px; margin:3px 4px 3px 0; border:1px solid var(--line); border-radius:999px; font-size:13px; cursor:pointer; background:#fff; }
+  .chip.active { background:var(--ink); color:#fff; border-color:var(--ink); }
+
+  /* ── capture page ── */
+  .captureGrid { display:grid; grid-template-columns:minmax(280px,1fr) 1fr; gap:14px; align-items:start; }
+  .hud { background:var(--hud); border-radius:12px; padding:18px; position:relative; overflow:hidden; min-height:300px; display:flex; flex-direction:column; }
+  .hud .frame { flex:1; border:2px solid #1e3a5f; border-radius:8px; position:relative; display:flex; align-items:center; justify-content:center; margin:6px 0 10px; }
+  .hud .corner { position:absolute; width:22px; height:22px; border:3px solid var(--beam); }
+  .hud .corner.tl{top:-2px;left:-2px;border-right:0;border-bottom:0} .hud .corner.tr{top:-2px;right:-2px;border-left:0;border-bottom:0}
+  .hud .corner.bl{bottom:-2px;left:-2px;border-right:0;border-top:0} .hud .corner.br{bottom:-2px;right:-2px;border-left:0;border-top:0}
+  .beam { position:absolute; left:6%; right:6%; height:2px; background:linear-gradient(90deg,transparent,var(--beam),transparent); animation:scan 2.4s ease-in-out infinite; }
+  @keyframes scan { 0%,100%{ top:12% } 50%{ top:86% } }
+  .barcode { width:74%; }
+  .barcode .bars { height:78px; background:#d8c19a; border:3px solid #2a1c0a; border-left-width:6px; border-right-width:6px;
+    background-image:repeating-linear-gradient(90deg,#1a120a 0 3px,transparent 3px 6px,#1a120a 6px 8px,transparent 8px 13px); }
+  .barcode .gtin { text-align:center; color:#d8c19a; font:12px ui-monospace,monospace; margin-top:4px; }
+  .hud .scaleNote { color:#7dd3fc; font:11px ui-monospace,monospace; }
+  .hud .stateTag { position:absolute; top:12px; right:14px; font:600 12px ui-monospace,monospace; padding:3px 10px; border-radius:999px; }
+  .stateTag.ARMED{ background:rgba(34,197,94,.2); color:#4ade80 } .stateTag.LOCKED{ background:rgba(239,68,68,.2); color:#f87171 } .stateTag.SCANNING{ background:rgba(148,163,184,.2); color:#cbd5e1 }
+
+  .lights { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  .light { border:1px solid var(--line); border-radius:10px; padding:9px; font-size:12px; text-align:center; }
+  .light .dot { width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle; }
+  .light .nm { font-weight:600; } .light .det { font-size:11px; color:var(--mut); margin-top:2px; }
+  .bg-OK{ background:var(--ok) } .bg-WARN{ background:var(--warn) } .bg-FAIL{ background:var(--fail) }
+
+  .shutter { width:100%; padding:14px; font-size:16px; font-weight:700; border:0; border-radius:12px; margin-top:12px; cursor:pointer; color:#fff; }
+  .shutter.ready { background:var(--ok); } .shutter.locked { background:#94a3b8; cursor:not-allowed; }
+
+  /* scenario (demo) vs sliders (eng) */
+  .scenarios button { display:block; width:100%; text-align:left; border:1px solid var(--line); background:#fff; border-radius:9px; padding:9px 12px; margin:6px 0; cursor:pointer; font-size:13px; }
+  .scenarios button:hover { border-color:var(--ink); }
+  .scenarios button b { display:block; }
+  .scenarios button small { color:var(--mut); }
+  label.sl { display:flex; justify-content:space-between; align-items:center; font-size:13px; margin:8px 0; gap:8px; }
+  label.sl .v { font-family:ui-monospace,monospace; color:var(--mut); min-width:46px; text-align:right; }
+  input[type=range]{ width:150px; } input[type=text]{ font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px; width:160px; }
+  .demoOnly{ display:block } .engOnly{ display:none }
+  body.mode-eng .demoOnly{ display:none } body.mode-eng .engOnly{ display:block }
+
+  /* ── result page ── */
+  .resultGrid { display:grid; grid-template-columns:260px 1fr; gap:14px; align-items:start; }
+  .grade-circle { width:140px; height:140px; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; margin:6px auto; border:9px solid var(--ok); }
+  .grade-circle .letter { font-size:54px; font-weight:800; line-height:1; }
+  .grade-circle .sub { font-size:11px; color:var(--mut); }
+  .legal { color:var(--fail); font-size:11px; text-align:center; margin-top:6px; line-height:1.4; }
+  .gradebar { display:flex; gap:3px; margin:10px 0; } .gradebar div { flex:1; text-align:center; padding:4px 0; border-radius:5px; font-size:12px; font-weight:700; background:#f1f5f9; color:#94a3b8; }
+  table { width:100%; border-collapse:collapse; font-size:13px; } td,th { padding:6px; border-bottom:1px solid var(--line); text-align:left; }
+  .tag { font-size:10px; padding:1px 6px; border-radius:4px; } .tag.GEOMETRIC{ background:#dcfce7; color:#166534 } .tag.PHOTOMETRIC{ background:#fef3c7; color:#92400e }
+  .quad { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .quad div { border:1px solid var(--line); border-radius:9px; padding:9px; font-size:12px; } .quad b { display:block; font:600 16px ui-monospace,monospace; }
+  .quad .spec { font-size:11px; } .spec.ok{ color:var(--ok) } .spec.bad{ color:var(--fail) }
+  .diag { border-left:4px solid var(--warn); background:#fffbeb; padding:9px 11px; border-radius:7px; margin:7px 0; font-size:13px; } .diag.sev3{ border-left-color:var(--fail); background:#fef2f2 }
+  .csv { font-family:ui-monospace,monospace; font-size:11px; word-break:break-all; background:var(--hud); color:#86efac; padding:11px; border-radius:9px; }
+  .accept-pass{ color:var(--ok); font-weight:800 } .accept-fail{ color:var(--fail); font-weight:800 }
+  .actions button { border:1px solid var(--line); background:#fff; border-radius:8px; padding:8px 14px; margin-right:8px; cursor:pointer; font-size:13px; }
+  .engBox { background:#f8fafc; border:1px dashed var(--line); border-radius:8px; padding:10px; font:12px ui-monospace,monospace; color:#475569; white-space:pre-wrap; }
+
+  /* ── trend page ── */
+  .stat { display:inline-block; border:1px solid var(--line); border-radius:10px; padding:10px 16px; margin:0 10px 10px 0; text-align:center; }
+  .stat .n { font:700 22px ui-monospace,monospace; } .stat .l { font-size:11px; color:var(--mut); }
+  svg .gridline { stroke:var(--line); stroke-width:1; } svg .thresh { stroke:var(--fail); stroke-width:1.5; stroke-dasharray:5 4; }
+  svg .curve { fill:none; stroke:#0ea5e9; stroke-width:2.5; } svg text { font:11px ui-monospace,monospace; fill:var(--mut); }
+  .corner-note { font-size:11px; color:var(--mut); float:right; }
 </style>
 </head>
-<body>
-<header>
-  <h1>瓦楞箱條碼 / QR 品質檢驗 — 核心引擎互動測試台</h1>
-  <p>調整輸入 → 跑完整 pipeline（C4 閘門 → C5 解碼 → C6 量測 → C7 分級 → C8 診斷 → 驗收 → CSV）。所有數值由核心庫即時運算。</p>
-</header>
-<div class="wrap">
-  <!-- ───────── Inputs ───────── -->
-  <div>
-    <div class="card">
-      <h2>工單 / 製程</h2>
-      <label>符號別 <select id="symbology"><option>ITF14</option><option>GS1_128</option></select></label>
-      <label>基準檔（楞型）<select id="profile"></select></label>
-      <label>驗收政策 <select id="policy"></select></label>
-      <label>解碼字串 <input type="text" id="decoded" value="104712345678904" /></label>
-      <label>預期 GTIN <input type="text" id="expected" value="104712345678904" /></label>
-      <label>可解碼 <input type="checkbox" id="canDecode" checked /></label>
-    </div>
-    <div class="card">
-      <h2>C4 拍攝品質閘門</h2>
-      <label>對焦 varLap <input type="range" id="varLap" min="0" max="300" value="200"><span class="v" id="varLap_v"></span></label>
-      <label>眩光 glare% <input type="range" id="glare" min="0" max="10" step="0.1" value="0.5"><span class="v" id="glare_v"></span></label>
-      <label>楞痕 ampRatio <input type="range" id="wash" min="0" max="0.3" step="0.01" value="0.06"><span class="v" id="wash_v"></span></label>
-      <label>白平衡 Δgain% <input type="range" id="wb" min="0" max="15" step="0.5" value="3"><span class="v" id="wb_v"></span></label>
-      <label>印向夾角° <input type="range" id="picket" min="0" max="30" value="4"><span class="v" id="picket_v"></span></label>
-      <label>透視傾斜° <input type="range" id="tilt" min="0" max="15" value="3"><span class="v" id="tilt_v"></span></label>
-      <label>px/module <input type="range" id="pxm" min="0" max="15" value="9"><span class="v" id="pxm_v"></span></label>
-      <label>比例尺卡偵測 <input type="checkbox" id="scaleRef" checked /></label>
-    </div>
-    <div class="card">
-      <h2>C7 分級 proxy / C6 量測</h2>
-      <label>R_light <input type="range" id="rLight" min="0" max="1" step="0.01" value="0.8"><span class="v" id="rLight_v"></span></label>
-      <label>R_dark <input type="range" id="rDark" min="0" max="1" step="0.01" value="0.2"><span class="v" id="rDark_v"></span></label>
-      <label>最小邊緣對比 <input type="range" id="edge" min="0" max="1" step="0.01" value="0.55"><span class="v" id="edge_v"></span></label>
-      <label>條寬偏差/容差 <input type="range" id="dec" min="0" max="1" step="0.01" value="0.4"><span class="v" id="dec_v"></span></label>
-      <label>元素反射不均(DEF) <input type="range" id="def" min="0" max="1" step="0.01" value="0.3"><span class="v" id="def_v"></span></label>
-      <label>條寬增益 BWR mm <input type="number" id="bwr" step="0.01" value="0.08"></label>
-    </div>
-    <button id="run">▶ 檢驗（跑 pipeline）</button>
-  </div>
+<body class="mode-demo">
 
-  <!-- ───────── Outputs ───────── -->
-  <div>
-    <div class="card">
-      <h2>拍攝閘門 — 狀態 <span id="gateState" class="pill"></span></h2>
-      <div class="lights" id="lights"></div>
-      <p class="muted" id="gateNote"></p>
-    </div>
-    <div class="card" id="resultCard" style="display:none">
-      <h2>結果 — 解碼 <span id="decodeStatus"></span></h2>
-      <div class="grade-circle" id="circle">
-        <div class="letter" id="gradeLetter">–</div>
-        <div class="sub">參考等級</div>
-      </div>
-      <div class="legal">相對值・非 ISO 合規證書（本工具不出具 ISO 證書）</div>
-      <p style="text-align:center; margin:8px 0;">驗收門檻 ≥ <b id="reqGrade"></b>：
-        <span id="acceptResult"></span>（margin <span id="margin"></span>）</p>
-      <h2 style="margin-top:14px">分級參數</h2>
-      <table id="params"></table>
-      <h2 style="margin-top:14px">尺寸量測</h2>
-      <div class="quad" id="quad"></div>
-      <h2 style="margin-top:14px">印刷掉級診斷</h2>
-      <div id="diagnosis"></div>
-      <h2 style="margin-top:14px">CSV（C9.4）</h2>
-      <div class="csv" id="csv"></div>
+<div class="topbar">
+  <h1>瓦楞箱條碼 / QR 品質檢驗 — 現場檢測 Demo</h1>
+  <div class="tabs">
+    <button class="tab active" data-page="capture">① 拍攝</button>
+    <button class="tab" data-page="result">② 結果</button>
+    <button class="tab" data-page="trend">③ 趨勢</button>
+  </div>
+  <div class="modeToggle">
+    <div class="switch" id="modeSwitch" title="切換展示 / 工程模式">
+      <span class="demoLbl">展示</span><span class="engLbl">工程</span>
+      <div class="knob"></div>
     </div>
   </div>
 </div>
+
+<!-- ════════ ① 拍攝 ════════ -->
+<section class="page active" id="page-capture">
+  <div class="card">
+    <div class="chiprow"><span class="lbl">製程環節</span><span id="chips-stage"></span></div>
+    <div class="chiprow"><span class="lbl">工法 / 楞型</span><span id="chips-profile"></span></div>
+    <div class="chiprow"><span class="lbl">符號別</span><span id="chips-symbology"></span></div>
+  </div>
+  <div class="captureGrid">
+    <div class="hud">
+      <span class="stateTag" id="stateTag">SCANNING</span>
+      <div class="frame">
+        <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+        <div class="beam" id="beam"></div>
+        <div class="barcode"><div class="bars"></div><div class="gtin" id="hudGtin">1 04712 345678 9</div></div>
+      </div>
+      <div class="scaleNote">⊞ 比例尺卡 已偵測 · 基準 26.0 mm</div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>六項品質燈號</h2>
+        <div class="lights" id="lights"></div>
+        <button class="shutter locked" id="shutter" disabled>● 校準中…</button>
+        <p class="muted" id="gateNote"></p>
+      </div>
+      <div class="card demoOnly">
+        <h2>情境（點選套用）</h2>
+        <div class="scenarios" id="scenarios"></div>
+      </div>
+      <div class="card engOnly">
+        <h2>工程參數 — 拍攝閘門</h2>
+        <div id="gateSliders"></div>
+        <h2 style="margin-top:14px">工程參數 — 分級 proxy / 量測</h2>
+        <div id="gradeSliders"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════ ② 結果 ════════ -->
+<section class="page" id="page-result">
+  <div id="noResult" class="card muted">尚無檢驗結果。請到「① 拍攝」全綠後按快門。</div>
+  <div id="resultBody" style="display:none">
+    <div class="card">
+      <h2>解碼 <span id="decodeStatus"></span></h2>
+      <div class="resultGrid">
+        <div>
+          <div class="grade-circle" id="circle"><div class="letter" id="gradeLetter">–</div><div class="sub">參考等級</div></div>
+          <div class="legal">相對值・非 ISO 合規證書<br>本工具不出具 ISO 證書，合規驗證請用合規 verifier。</div>
+          <p style="text-align:center;margin:10px 0">門檻 ≥ <b id="reqGrade"></b>：<span id="acceptResult"></span><br><span class="muted">margin <span id="margin"></span></span></p>
+          <div class="gradebar" id="gradebar"></div>
+        </div>
+        <div>
+          <h2>分級參數</h2>
+          <table id="params"></table>
+          <h2 style="margin-top:14px">尺寸量測（以比例尺卡）</h2>
+          <div class="quad" id="quad"></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>印刷掉級診斷</h2>
+      <div id="diagnosis"></div>
+    </div>
+    <div class="card">
+      <h2>動作</h2>
+      <div class="actions">
+        <button onclick="document.querySelector('[data-page=capture]').click()">↻ 重拍</button>
+        <button id="markBtn">⚑ 標記製程</button>
+        <button id="csvBtn">⬇ 存成 CSV</button>
+      </div>
+      <div class="csv" id="csv" style="margin-top:10px"></div>
+    </div>
+    <div class="card engOnly">
+      <h2>工程明細（pipeline 物件）</h2>
+      <div class="engBox" id="engDump"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════ ③ 趨勢 ════════ -->
+<section class="page" id="page-trend">
+  <div class="card">
+    <span class="corner-note">進階版 · 需後台</span>
+    <div class="chiprow"><span class="lbl">製程環節</span><span id="trend-stage"></span></div>
+    <div class="chiprow"><span class="lbl">工法 / 楞型基準檔</span><span id="trend-profile"></span></div>
+  </div>
+  <div class="card">
+    <h2>統計</h2>
+    <div id="trendStats"></div>
+  </div>
+  <div class="card">
+    <h2>近 10 批 參考等級走勢（紅虛線＝門檻 C，趨近門檻以紅圈預警）</h2>
+    <div id="trendChart"></div>
+    <p class="muted">切換楞型基準檔：粗楞貼著門檻跑、細楞抬高、表貼/標籤穩在 A——驗證「楞越粗越易掉級」，支撐高階訂單導向細楞/表貼的業務話術。每按一次快門即累積一批。</p>
+  </div>
+</section>
 
 <script type="module">
 import {
   evaluateGate, runDecode, buildMeasurement, buildGradeResult,
   evaluateDiagnosis, evaluateAcceptance, toCsvRow,
   SEED_DIAGNOSIS_RULES, SEED_SUBSTRATE_PROFILES, SEED_ACCEPTANCE_POLICIES,
+  scoreToLetter, letterToNominalScore,
 } from "../dist/index.js";
 
 const $ = (id) => document.getElementById(id);
-const GRADE_COLOR = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
+const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
+const STAGES = [["INLINE","產線抽檢"],["OUTBOUND","出貨檢驗"],["COMPLAINT","客訴複驗"]];
 
-// populate profile / policy selectors from seed data
-SEED_SUBSTRATE_PROFILES.forEach(p => $("profile").add(new Option(p.name, p.id)));
-SEED_ACCEPTANCE_POLICIES.forEach(p => $("policy").add(new Option(`${p.id} (≥${p.requiredGrade})`, p.id)));
+// ── single source of truth ──
+const state = {
+  symbology: "ITF14",
+  profileId: SEED_SUBSTRATE_PROFILES[0].id,
+  processStage: "OUTBOUND",
+  decoded: "104712345678904", expected: "104712345678904", canDecode: true,
+  gate: { varLap:200, glare:0.5, wash:0.06, wb:3, picket:4, tilt:3, pxm:9, scaleRef:true },
+  grade:{ rLight:0.82, rDark:0.18, edge:0.6, dec:0.3, def:0.2, bwr:0.03 },
+};
+let lastResult = null;
 
-// live range value labels
-const ranges = ["varLap","glare","wash","wb","picket","tilt","pxm","rLight","rDark","edge","dec","def"];
-ranges.forEach(id => {
-  const upd = () => { const el = $(id+"_v"); if (el) el.textContent = $(id).value; };
-  $(id).addEventListener("input", upd); upd();
-});
+const profileOf = (id) => SEED_SUBSTRATE_PROFILES.find(p => p.id === id);
+const policyOf = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology) || SEED_ACCEPTANCE_POLICIES[0];
 
-function run() {
-  const symbology = $("symbology").value;
-  const profile = SEED_SUBSTRATE_PROFILES.find(p => p.id === $("profile").value);
-  const policy = SEED_ACCEPTANCE_POLICIES.find(p => p.id === $("policy").value);
-
-  // ── C4 gate ──
-  const gate = evaluateGate({
-    symbolDetected: true,
-    varLap: +$("varLap").value,
-    glareRatio: +$("glare").value / 100,
-    washboardAmpRatio: +$("wash").value,
-    wbGainDeviation: +$("wb").value / 100,
-    scaleRefDetected: $("scaleRef").checked,
-    picketAngleDeg: +$("picket").value,
-    perspectiveTiltDeg: +$("tilt").value,
-    gsdMmPerPx: 0.12,
-    pxPerModule: +$("pxm").value,
+// ───────────────────────── chips ─────────────────────────
+function chipHtml(items, activeVal) {
+  return items.map(([v,l]) => `<span class="chip ${v===activeVal?'active':''}" data-v="${v}">${l}</span>`).join("");
+}
+function renderChips() {
+  $("chips-stage").innerHTML = chipHtml(STAGES, state.processStage);
+  $("chips-profile").innerHTML = chipHtml(SEED_SUBSTRATE_PROFILES.map(p=>[p.id,p.name]), state.profileId);
+  $("chips-symbology").innerHTML = chipHtml([["ITF14","ITF-14 · 直印"],["GS1_128","GS1-128 · 標籤"]], state.symbology);
+}
+function bindChips(containerId, key, after) {
+  $(containerId).addEventListener("click", (e) => {
+    const c = e.target.closest(".chip"); if (!c) return;
+    state[key] = c.dataset.v; renderChips(); recompute(); after && after();
   });
-
-  // gate UI
-  $("gateState").textContent = gate.state;
-  $("gateState").className = "pill state-" + gate.state;
-  $("lights").innerHTML = gate.report.checks.map(c =>
-    `<div class="light"><span class="dot ${c.status}"></span>${c.key}<br><span class="muted">${c.status} · ${(+c.value).toFixed?.(2) ?? c.value}</span></div>`
-  ).join("");
-  $("gateNote").textContent = gate.state === "LOCKED"
-    ? "有 FAIL 項 → 快門鎖死，無法檢驗（強制每次拍攝條件一致）。"
-    : "全綠/黃 → 快門解鎖。WARN 仍可拍但數值會標註。";
-
-  if (gate.state === "LOCKED") { $("resultCard").style.display = "none"; return; }
-
-  // ── C5 decode ──
-  const canDecode = $("canDecode").checked;
-  const decoder = { decode: () => canDecode ? { symbology, data: $("decoded").value } : null };
-  const decode = runDecode(decoder, { declaredSymbology: symbology, handle: {} }, { expectedGtin: $("expected").value });
-
-  // ── C6 measurement ──
-  const measurement = buildMeasurement({
-    scaleRef: { type:"CARD", nominalMm:26, resolvedPx:260 },
-    narrowestElementPx: 11, quietZonePixels: 110,
-    measuredBarWidthMm: 1.016 + +$("bwr").value, nominalBarWidthMm: 1.016,
-    washboardPeriodMm: 7.4, washboardAmplitudeRatio: +$("wash").value,
-    expectedFlutePitchMm: profile.expectedFlutePitchMm,
-  });
-
-  // ── C7 grade (1D: 10 scanlines) ──
-  const scan = () => ({
-    photometric: { rLight:+$("rLight").value, rDark:+$("rDark").value, rDarkMin:+$("rDark").value, edgeContrasts:[+$("edge").value] },
-    geometric: { maxWidthDeviation:+$("dec").value, tolerance:1, maxElementReflectanceNonUniformity:+$("def").value },
-  });
-  const grade = buildGradeResult(symbology, Array.from({length:10}, scan));
-
-  // ── C8 diagnosis ──
-  const metrics = { barWidthGainMm:+$("bwr").value, quietZoneX:measurement.quietZoneX, decoded: decode.decoded?1:0 };
-  grade.parameters.forEach(p => metrics[`${p.code}.score`] = p.score);
-  const diagnosis = evaluateDiagnosis(SEED_DIAGNOSIS_RULES, { symbology, substrateCategory: profile.category, metrics });
-
-  // ── acceptance ──
-  const acceptance = evaluateAcceptance(grade, policy);
-
-  // ── render results ──
-  $("resultCard").style.display = "block";
-  $("decodeStatus").innerHTML = decode.decoded
-    ? `<span style="color:var(--ok)">✓ 成功</span> · ${decode.data} · 比對 ${decode.expectedDataMatch ? "符合" : "不符"}`
-    : `<span style="color:var(--fail)">✗ 不可讀</span>`;
-
-  $("gradeLetter").textContent = grade.overall;
-  $("circle").style.borderColor = GRADE_COLOR[grade.overall];
-  $("gradeLetter").style.color = GRADE_COLOR[grade.overall];
-  $("reqGrade").textContent = policy.requiredGrade;
-  $("acceptResult").innerHTML = acceptance.pass
-    ? '<span class="accept-pass">通過</span>' : '<span class="accept-fail">未通過</span>';
-  $("margin").textContent = acceptance.marginScore.toFixed(2);
-
-  $("params").innerHTML = "<tr><th>等級</th><th>參數</th><th>分數</th><th>類別</th></tr>" +
-    grade.parameters.map(p =>
-      `<tr><td style="color:${GRADE_COLOR[p.letter]};font-weight:700">${p.letter}</td><td>${p.label} (${p.code})</td><td>${p.score.toFixed(2)}</td><td><span class="tag ${p.kind}">${p.kind==="GEOMETRIC"?"幾何·穩":"光線·相對"}</span></td></tr>`
-    ).join("");
-
-  $("quad").innerHTML = `
-    <div>X-dimension<b>${measurement.xDimMm.toFixed(3)} mm</b></div>
-    <div>條寬增益 BWR<b>${(measurement.barWidthGainMm??0).toFixed(3)} mm</b></div>
-    <div>Quiet Zone<b>${measurement.quietZoneX.toFixed(1)} X</b></div>
-    <div>楞痕週期<b>${measurement.washboard?.periodMm?.toFixed(1) ?? "–"} mm ${measurement.washboard?.detected?"⚠":""}</b></div>`;
-
-  $("diagnosis").innerHTML = diagnosis.matched.length
-    ? diagnosis.matched.map(h => `<div class="diag sev${h.severity}"><b>[${h.ruleId}] ${h.cause}</b><br>處方：${h.remedy}（severity ${h.severity}）</div>`).join("")
-    : '<p class="muted">無命中規則。</p>';
-
-  const session = {
-    id:"sess-demo", createdAt:new Date().toISOString(), plantId:"P1", lineId:"L3",
-    processStage:"OUTBOUND", workOrderId:"WO-DEMO", substrateProfileId:profile.id,
-    symbology, capture:gate.report, decode, measurement, grade, diagnosis, acceptance, syncState:"LOCAL",
-  };
-  $("csv").textContent = toCsvRow(session, { customer:"ACME" });
 }
 
-$("run").addEventListener("click", run);
-run();
+// ───────────────────────── sliders (eng) ─────────────────────────
+const GATE_SL = [
+  ["varLap","對焦 varLap",0,300,1],["glare","眩光 glare%",0,10,0.1],["wash","楞痕 ampRatio",0,0.3,0.01],
+  ["wb","白平衡 Δgain%",0,15,0.5],["picket","印向夾角°",0,30,1],["tilt","透視傾斜°",0,15,1],["pxm","px/module",0,15,1],
+];
+const GRADE_SL = [
+  ["rLight","R_light",0,1,0.01],["rDark","R_dark",0,1,0.01],["edge","最小邊緣對比",0,1,0.01],
+  ["dec","條寬偏差/容差",0,1,0.01],["def","元素反射不均(DEF)",0,1,0.01],["bwr","條寬增益 BWR mm",0,0.3,0.01],
+];
+function sliderRow(group, [id,label,min,max,step]) {
+  return `<label class="sl">${label}<span><input type="range" data-g="${group}" data-k="${id}" min="${min}" max="${max}" step="${step}" value="${state[group][id]}"><span class="v" id="${group}_${id}_v">${state[group][id]}</span></span></label>`;
+}
+function renderSliders() {
+  $("gateSliders").innerHTML = GATE_SL.map(s => sliderRow("gate", s)).join("");
+  $("gradeSliders").innerHTML = GRADE_SL.map(s => sliderRow("grade", s)).join("");
+  document.querySelectorAll('input[type=range]').forEach(inp => {
+    inp.addEventListener("input", () => {
+      state[inp.dataset.g][inp.dataset.k] = +inp.value;
+      $(`${inp.dataset.g}_${inp.dataset.k}_v`).textContent = inp.value;
+      recompute();
+    });
+  });
+}
+
+// ───────────────────────── scenarios (demo) ─────────────────────────
+const SCENARIOS = [
+  { t:"理想樣本", d:"全綠、等級佳", apply:s=>{ Object.assign(s.gate,{varLap:230,glare:0.4,wash:0.05,wb:2,picket:3,tilt:2,pxm:10,scaleRef:true}); Object.assign(s.grade,{rLight:0.86,rDark:0.12,edge:0.72,dec:0.15,def:0.1,bwr:0.02}); s.canDecode=true; } },
+  { t:"楞痕偏高（粗楞透印）", d:"黃燈仍可拍，觸發 WASHBOARD", apply:s=>{ s.profileId="direct-c-flute"; Object.assign(s.gate,{varLap:190,glare:0.6,wash:0.13,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.78,rDark:0.2,edge:0.4,dec:0.4,def:0.45,bwr:0.05}); s.canDecode=true; } },
+  { t:"墨量過多（條寬增益）", d:"觸發 BWR_GAIN", apply:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.8,rDark:0.2,edge:0.35,dec:0.5,def:0.3,bwr:0.09}); s.canDecode=true; } },
+  { t:"牛皮吃光（低對比）", d:"觸發 LOW_CONTRAST", apply:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.5,rDark:0.36,edge:0.3,dec:0.4,def:0.3,bwr:0.04}); s.canDecode=true; } },
+  { t:"失焦", d:"對焦 FAIL → 快門鎖死", apply:s=>{ Object.assign(s.gate,{varLap:60,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); } },
+  { t:"眩光過強", d:"眩光 FAIL → 快門鎖死", apply:s=>{ s.gate.glare=6; } },
+  { t:"不可讀", d:"解碼失敗 → NO_DECODE 診斷", apply:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); s.canDecode=false; } },
+];
+function renderScenarios() {
+  $("scenarios").innerHTML = SCENARIOS.map((sc,i)=>`<button data-i="${i}"><b>${sc.t}</b><small>${sc.d}</small></button>`).join("");
+  $("scenarios").addEventListener("click",(e)=>{ const b=e.target.closest("button"); if(!b) return; SCENARIOS[+b.dataset.i].apply(state); renderChips(); renderSliders(); recompute(); });
+}
+
+// ───────────────────────── pipeline ─────────────────────────
+function evalGate() {
+  return evaluateGate({
+    symbolDetected:true, varLap:state.gate.varLap, glareRatio:state.gate.glare/100,
+    washboardAmpRatio:state.gate.wash, wbGainDeviation:state.gate.wb/100, scaleRefDetected:state.gate.scaleRef,
+    picketAngleDeg:state.gate.picket, perspectiveTiltDeg:state.gate.tilt, gsdMmPerPx:0.12, pxPerModule:state.gate.pxm,
+  });
+}
+const LIGHT_LABEL = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", whiteBalance:"白平衡", scaleRef:"比例尺卡", picket:"印向直立", perspective:"透視", resolution:"解析度" };
+
+function recompute() {
+  const gate = evalGate();
+  $("stateTag").textContent = gate.state; $("stateTag").className = "stateTag " + gate.state;
+  $("lights").innerHTML = gate.report.checks.map(c => {
+    const val = (typeof c.value === "number") ? c.value.toFixed(2) : c.value;
+    return `<div class="light"><span class="dot bg-${c.status}"></span><span class="nm">${LIGHT_LABEL[c.key]||c.key}</span><div class="det">${c.status}<span class="engOnly"> · ${c.key}=${val}</span></div></div>`;
+  }).join("");
+  const armed = gate.state === "ARMED";
+  const sh = $("shutter");
+  sh.className = "shutter " + (armed ? "ready" : "locked"); sh.disabled = !armed;
+  sh.textContent = armed ? "● 可拍 — 按下檢驗" : (gate.state==="LOCKED" ? "✕ 快門鎖死（有 FAIL）" : "● 校準中…");
+  $("gateNote").textContent = armed ? "全綠/黃 → 快門解鎖。WARN 仍可拍但數值會標註「受楞痕影響」。" : "六項全綠前快門鎖死，強制每次拍攝條件一致（穩 > 準）。";
+}
+
+function runInspection() {
+  const gate = evalGate(); if (gate.state !== "ARMED") return;
+  const sym = state.symbology, profile = profileOf(state.profileId), policy = policyOf();
+  const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded } : null };
+  const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
+  const measurement = buildMeasurement({
+    scaleRef:{ type:"CARD", nominalMm:26, resolvedPx:260 }, narrowestElementPx:11, quietZonePixels:110,
+    measuredBarWidthMm:1.016 + state.grade.bwr, nominalBarWidthMm:1.016,
+    washboardPeriodMm:profile.expectedFlutePitchMm||7.4, washboardAmplitudeRatio:state.gate.wash,
+    expectedFlutePitchMm:profile.expectedFlutePitchMm,
+  });
+  const g = state.grade;
+  const scan = () => ({ photometric:{ rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] },
+                        geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } });
+  const grade = buildGradeResult(sym, Array.from({length:10}, scan));
+  const metrics = { barWidthGainMm:state.grade.bwr, quietZoneX:measurement.quietZoneX, decoded:decode.decoded?1:0, "washboard.amplitudeRatio":state.gate.wash };
+  grade.parameters.forEach(p => metrics[`${p.code}.score`] = p.score);
+  const diagnosis = evaluateDiagnosis(SEED_DIAGNOSIS_RULES, { symbology:sym, substrateCategory:profile.category, metrics });
+  const acceptance = evaluateAcceptance(grade, policy);
+  const session = { id:"sess-"+Date.now(), createdAt:new Date().toISOString(), plantId:"P1", lineId:"L3",
+    processStage:state.processStage, workOrderId:"WO-DEMO", substrateProfileId:profile.id, symbology:sym,
+    capture:gate.report, decode, measurement, grade, diagnosis, acceptance, syncState:"LOCAL" };
+
+  lastResult = { session, decode, grade, measurement, diagnosis, acceptance, policy };
+  pushHistory(profile.id, state.processStage, grade.overallScore);
+  renderResult(); renderTrend();
+  document.querySelector('[data-page=result]').click();
+}
+
+// ───────────────────────── result render ─────────────────────────
+function renderResult() {
+  if (!lastResult) return;
+  $("noResult").style.display="none"; $("resultBody").style.display="block";
+  const { decode, grade, measurement, diagnosis, acceptance, policy, session } = lastResult;
+  $("decodeStatus").innerHTML = decode.decoded
+    ? `<span style="color:var(--ok)">✓ 成功</span> · ${session.symbology} · ${decode.data} · 比對${decode.expectedDataMatch?"符合":"不符"}`
+    : `<span style="color:var(--fail)">✗ 不可讀</span>`;
+  $("gradeLetter").textContent = grade.overall;
+  $("circle").style.borderColor = GC[grade.overall]; $("gradeLetter").style.color = GC[grade.overall];
+  $("reqGrade").textContent = policy.requiredGrade;
+  $("acceptResult").innerHTML = acceptance.pass ? '<span class="accept-pass">通過</span>' : '<span class="accept-fail">未通過</span>';
+  $("margin").textContent = acceptance.marginScore.toFixed(2);
+  $("gradebar").innerHTML = ["A","B","C","D","F"].map(L => `<div style="${L===grade.overall?`background:${GC[L]};color:#fff`:''}">${L}</div>`).join("");
+  $("params").innerHTML = "<tr><th>級</th><th>參數</th><th>分數</th><th>類別</th></tr>" + grade.parameters.map(p =>
+    `<tr><td style="color:${GC[p.letter]};font-weight:700">${p.letter}</td><td>${p.label} (${p.code})</td><td>${p.score.toFixed(2)}</td><td><span class="tag ${p.kind}">${p.kind==="GEOMETRIC"?"幾何·穩":"光線·相對"}</span></td></tr>`).join("");
+  const qz = measurement.quietZoneX, bwr = measurement.barWidthGainMm ?? 0, wb = measurement.washboard;
+  $("quad").innerHTML = `
+    <div>X-dimension<b>${measurement.xDimMm.toFixed(3)} mm</b><span class="spec ok">規格 ${policy.xDimSpecMm} mm</span></div>
+    <div>條寬增益 BWR<b>${bwr.toFixed(3)} mm</b><span class="spec ${bwr>0.04?'bad':'ok'}">${bwr>0.04?'偏高':'正常'}</span></div>
+    <div>Quiet Zone<b>${qz.toFixed(1)} X</b><span class="spec ${qz<policy.quietZoneMinX?'bad':'ok'}">≥ ${policy.quietZoneMinX} X</span></div>
+    <div>楞痕週期<b>${wb?wb.periodMm.toFixed(1):'–'} mm</b><span class="spec ${wb&&wb.detected?'bad':'ok'}">${wb&&wb.detected?'偵測到楞痕':'正常'}</span></div>`;
+  $("diagnosis").innerHTML = diagnosis.matched.length
+    ? diagnosis.matched.map(h => `<div class="diag sev${h.severity}"><b>[${h.ruleId}] ${h.cause}</b><br>處方：${h.remedy}（severity ${h.severity}）</div>`).join("")
+    : '<p class="muted">無命中規則 — 品質良好。</p>';
+  $("csv").textContent = toCsvRow(session, { customer:"ACME" });
+  $("engDump").textContent = JSON.stringify({ grade, measurement, acceptance, diagnosis }, null, 2);
+}
+
+// ───────────────────────── trend ─────────────────────────
+const history = {}; // profileId -> [{score, stage}]
+let rng = 1;
+function rand() { rng = (rng*9301 + 49297) % 233280; return rng/233280; } // deterministic-ish
+function gauss(mean, std) { return mean + std * (rand()+rand()+rand()-1.5)*1.4; }
+function pushHistory(pid, stage, score) { (history[pid] ||= []).push({ score, stage }); if (history[pid].length > 120) history[pid].shift(); }
+function seedHistory() {
+  SEED_SUBSTRATE_PROFILES.forEach(p => {
+    history[p.id] = [];
+    STAGES.forEach(([st]) => { for (let i=0;i<10;i++) history[p.id].push({ score:Math.max(0,Math.min(4,gauss(p.baseline.meanScore,p.baseline.stdScore))), stage:st }); });
+  });
+}
+let trendProfileId = SEED_SUBSTRATE_PROFILES[0].id, trendStage = "OUTBOUND";
+function renderTrendChips() {
+  $("trend-stage").innerHTML = chipHtml(STAGES, trendStage);
+  $("trend-profile").innerHTML = chipHtml(SEED_SUBSTRATE_PROFILES.map(p=>[p.id,p.name]), trendProfileId);
+}
+function renderTrend() {
+  renderTrendChips();
+  const pts = (history[trendProfileId]||[]).filter(p=>p.stage===trendStage).slice(-10);
+  const req = letterToNominalScore(policyOf().requiredGrade); // 門檻分數 (C=2)
+  // stats
+  const scores = pts.map(p=>p.score);
+  const avg = scores.length ? scores.reduce((a,b)=>a+b,0)/scores.length : 0;
+  const nearPct = scores.length ? Math.round(100*scores.filter(s=>s-req<0.3).length/scores.length) : 0;
+  const last3 = scores.slice(-3), prev3 = scores.slice(-6,-3);
+  const m=a=>a.length?a.reduce((x,y)=>x+y,0)/a.length:0;
+  const arrow = !prev3.length ? "→" : (m(last3)>m(prev3)+0.05?"↑":(m(last3)<m(prev3)-0.05?"↓":"→"));
+  $("trendStats").innerHTML =
+    `<div class="stat"><div class="n" style="color:${GC[scoreToLetter(avg)]}">${scoreToLetter(avg)}</div><div class="l">平均參考等級 (${avg.toFixed(2)})</div></div>
+     <div class="stat"><div class="n">${nearPct}%</div><div class="l">趨近門檻批次比例</div></div>
+     <div class="stat"><div class="n">${arrow}</div><div class="l">近 3 批走勢</div></div>`;
+  // svg chart
+  const W=560,H=220,PL=34,PR=14,PT=14,PB=24, iw=W-PL-PR, ih=H-PT-PB;
+  const x=i=>PL + (pts.length<=1?iw/2:iw*i/(pts.length-1));
+  const y=s=>PT + ih*(1 - s/4);
+  let g="";
+  for(let s=0;s<=4;s++){ g+=`<line class="gridline" x1="${PL}" y1="${y(s)}" x2="${W-PR}" y2="${y(s)}"/><text x="6" y="${y(s)+4}">${["F","D","C","B","A"][s]}</text>`; }
+  g+=`<line class="thresh" x1="${PL}" y1="${y(req)}" x2="${W-PR}" y2="${y(req)}"/><text x="${W-PR-40}" y="${y(req)-4}" fill="#dc2626">門檻 ${policyOf().requiredGrade}</text>`;
+  if(pts.length){
+    g+=`<polyline class="curve" points="${pts.map((p,i)=>`${x(i)},${y(p.score)}`).join(" ")}"/>`;
+    g+=pts.map((p,i)=>{ const near=p.score-req<0.3; return `<circle cx="${x(i)}" cy="${y(p.score)}" r="${near?5:3.5}" fill="${near?'#dc2626':'#0ea5e9'}" ${near?'stroke="#dc2626" stroke-width="2" fill="#fff"':''}/>`; }).join("");
+  } else { g+=`<text x="${W/2-40}" y="${H/2}">尚無批次資料</text>`; }
+  $("trendChart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">${g}</svg>`;
+}
+
+// ───────────────────────── wiring ─────────────────────────
+// tabs
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
+  document.querySelectorAll(".page").forEach(x=>x.classList.remove("active"));
+  t.classList.add("active"); $("page-"+t.dataset.page).classList.add("active");
+  if (t.dataset.page==="trend") renderTrend();
+}));
+// mode switch (demo <-> eng, mutually exclusive body classes)
+$("modeSwitch").addEventListener("click", () => {
+  const eng = document.body.classList.toggle("mode-eng");
+  document.body.classList.toggle("mode-demo", !eng);
+});
+// chips
+bindChips("chips-stage","processStage");
+bindChips("chips-profile","profileId");
+bindChips("chips-symbology","symbology", ()=>{ state.decoded = state.symbology==="GS1_128" ? "(01)04712345678901" : "104712345678904"; state.expected = state.decoded; });
+$("trend-stage").addEventListener("click",(e)=>{ const c=e.target.closest(".chip"); if(c){ trendStage=c.dataset.v; renderTrend(); }});
+$("trend-profile").addEventListener("click",(e)=>{ const c=e.target.closest(".chip"); if(c){ trendProfileId=c.dataset.v; renderTrend(); }});
+// shutter & actions
+$("shutter").addEventListener("click", runInspection);
+$("markBtn").addEventListener("click", (e)=>{ const b=e.target; const o=b.textContent; b.textContent="✓ 已標記 "+state.processStage; setTimeout(()=>b.textContent=o,1200); });
+$("csvBtn").addEventListener("click", ()=>{ if(!lastResult) return; const blob=new Blob([toCsvRow(lastResult.session,{customer:"ACME"})],{type:"text/csv"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="inspection.csv"; a.click(); });
+
+// init
+renderChips(); renderSliders(); renderScenarios(); seedHistory(); recompute(); renderTrendChips();
 </script>
 </body>
 </html>
