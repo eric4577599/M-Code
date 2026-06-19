@@ -46,7 +46,7 @@
   .hud .corner.bl{bottom:-2px;left:-2px;border-right:0;border-top:0} .hud .corner.br{bottom:-2px;right:-2px;border-left:0;border-top:0}
   .beam { position:absolute; left:6%; right:6%; height:2px; background:linear-gradient(90deg,transparent,var(--beam),transparent); animation:scan 2.4s ease-in-out infinite; }
   @keyframes scan { 0%,100%{ top:12% } 50%{ top:86% } }
-  .barcode { width:74%; }
+  .barcode { width:74%; text-align:center; } .barcode svg { display:inline-block; }
   .barcode .bars { height:78px; background:#d8c19a; border:3px solid #2a1c0a; border-left-width:6px; border-right-width:6px;
     background-image:repeating-linear-gradient(90deg,#1a120a 0 3px,transparent 3px 6px,#1a120a 6px 8px,transparent 8px 13px); }
   .barcode .gtin { text-align:center; color:#d8c19a; font:12px ui-monospace,monospace; margin-top:4px; }
@@ -129,7 +129,7 @@
       <div class="frame">
         <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
         <div class="beam" id="beam"></div>
-        <div class="barcode"><div class="bars"></div><div class="gtin" id="hudGtin">1 04712 345678 9</div></div>
+        <div class="barcode" id="symbolMock"><div class="bars"></div><div class="gtin" id="hudGtin">1 04712 345678 9</div></div>
       </div>
       <div class="scaleNote">⊞ 比例尺卡 已偵測 · 基準 26.0 mm</div>
     </div>
@@ -226,18 +226,51 @@ const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
 const STAGES = [["INLINE","產線抽檢"],["OUTBOUND","出貨檢驗"],["COMPLAINT","客訴複驗"]];
 
 // ── single source of truth ──
+const SYMS = [["ITF14","ITF-14 · 直印"],["GS1_128","GS1-128 · 標籤"],["QR","QR · 溯源"],["DATAMATRIX","DataMatrix · 自動倉"]];
+const is2D = (s) => s === "QR" || s === "DATAMATRIX";
+const SAMPLE_DATA = {
+  ITF14:"104712345678904", GS1_128:"(01)04712345678901",
+  QR:"https://trace.acme/wo/2406A-7741", DATAMATRIX:"DM:LOT2406A-7741/S00231",
+};
+
 const state = {
   symbology: "ITF14",
   profileId: SEED_SUBSTRATE_PROFILES[0].id,
   processStage: "OUTBOUND",
-  decoded: "104712345678904", expected: "104712345678904", canDecode: true,
+  decoded: SAMPLE_DATA.ITF14, expected: SAMPLE_DATA.ITF14, canDecode: true,
   gate: { varLap:200, glare:0.5, wash:0.06, wb:3, picket:4, tilt:3, pxm:9, scaleRef:true },
-  grade:{ rLight:0.82, rDark:0.18, edge:0.6, dec:0.3, def:0.2, bwr:0.03 },
+  grade:{ rLight:0.82, rDark:0.18, edge:0.6, dec:0.3, def:0.2, bwr:0.03, fpd:0.05, gnu:0.1, uecUsed:2, uecTotal:10 },
 };
 let lastResult = null;
 
 const profileOf = (id) => SEED_SUBSTRATE_PROFILES.find(p => p.id === id);
-const policyOf = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology) || SEED_ACCEPTANCE_POLICIES[0];
+const policyOf = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology)
+  || { id:state.symbology.toLowerCase()+"-default", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
+
+function syncSymbol() { state.decoded = SAMPLE_DATA[state.symbology]; state.expected = state.decoded; renderHud(); }
+
+// HUD symbol mock: 1D barcode or 2D matrix
+function renderHud() {
+  $("symbolMock").innerHTML = is2D(state.symbology)
+    ? matrixSvg(state.symbology)
+    : `<div class="bars"></div><div class="gtin">1 04712 345678 9</div>`;
+}
+function matrixSvg(type) {
+  const N=21, c=9, sz=N*c; let cells="", r=7;
+  const finder=(x,y)=>`<rect x="${x*c}" y="${y*c}" width="${7*c}" height="${7*c}" fill="#1a120a"/>`+
+    `<rect x="${(x+1)*c}" y="${(y+1)*c}" width="${5*c}" height="${5*c}" fill="#d8c19a"/>`+
+    `<rect x="${(x+2)*c}" y="${(y+2)*c}" width="${3*c}" height="${3*c}" fill="#1a120a"/>`;
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++){ r=(r*1103515245+12345)&0x7fffffff;
+    const inFinder=(x<8&&y<8)||(x>N-9&&y<8)||(x<8&&y>N-9);
+    if(type==="QR"&&inFinder) continue;
+    if((r>>16)%2===0) cells+=`<rect x="${x*c}" y="${y*c}" width="${c}" height="${c}" fill="#1a120a"/>`;
+  }
+  let svg=`<svg viewBox="0 0 ${sz} ${sz}" width="180" height="180" style="background:#d8c19a;border:3px solid #2a1c0a">${cells}`;
+  if(type==="QR") svg+=finder(0,0)+finder(N-7,0)+finder(0,N-7);
+  else { svg+=`<rect x="0" y="0" width="${c}" height="${sz}" fill="#1a120a"/><rect x="0" y="${sz-c}" width="${sz}" height="${c}" fill="#1a120a"/>`;
+    for(let i=0;i<N;i+=2) svg+=`<rect x="${i*c}" y="0" width="${c}" height="${c}" fill="#1a120a"/><rect x="${sz-c}" y="${i*c}" width="${c}" height="${c}" fill="#1a120a"/>`; }
+  return svg+`</svg>`;
+}
 
 // ───────────────────────── chips ─────────────────────────
 function chipHtml(items, activeVal) {
@@ -246,7 +279,7 @@ function chipHtml(items, activeVal) {
 function renderChips() {
   $("chips-stage").innerHTML = chipHtml(STAGES, state.processStage);
   $("chips-profile").innerHTML = chipHtml(SEED_SUBSTRATE_PROFILES.map(p=>[p.id,p.name]), state.profileId);
-  $("chips-symbology").innerHTML = chipHtml([["ITF14","ITF-14 · 直印"],["GS1_128","GS1-128 · 標籤"]], state.symbology);
+  $("chips-symbology").innerHTML = chipHtml(SYMS, state.symbology);
 }
 function bindChips(containerId, key, after) {
   $(containerId).addEventListener("click", (e) => {
@@ -281,17 +314,18 @@ function renderSliders() {
 
 // ───────────────────────── scenarios (demo) ─────────────────────────
 const SCENARIOS = [
-  { t:"理想樣本", d:"全綠、等級佳", apply:s=>{ Object.assign(s.gate,{varLap:230,glare:0.4,wash:0.05,wb:2,picket:3,tilt:2,pxm:10,scaleRef:true}); Object.assign(s.grade,{rLight:0.86,rDark:0.12,edge:0.72,dec:0.15,def:0.1,bwr:0.02}); s.canDecode=true; } },
-  { t:"楞痕偏高（粗楞透印）", d:"黃燈仍可拍，觸發 WASHBOARD", apply:s=>{ s.profileId="direct-c-flute"; Object.assign(s.gate,{varLap:190,glare:0.6,wash:0.13,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.78,rDark:0.2,edge:0.4,dec:0.4,def:0.45,bwr:0.05}); s.canDecode=true; } },
-  { t:"墨量過多（條寬增益）", d:"觸發 BWR_GAIN", apply:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.8,rDark:0.2,edge:0.35,dec:0.5,def:0.3,bwr:0.09}); s.canDecode=true; } },
+  { t:"理想樣本", d:"全綠、等級佳", apply:s=>{ Object.assign(s.gate,{varLap:230,glare:0.4,wash:0.05,wb:2,picket:3,tilt:2,pxm:10,scaleRef:true}); Object.assign(s.grade,{rLight:0.86,rDark:0.12,edge:0.72,dec:0.15,def:0.1,bwr:0.02,fpd:0.03,gnu:0.06,uecUsed:1,uecTotal:10}); s.canDecode=true; } },
+  { t:"楞痕偏高（粗楞透印）", d:"黃燈仍可拍，觸發 WASHBOARD", apply:s=>{ s.profileId="direct-c-flute"; Object.assign(s.gate,{varLap:190,glare:0.6,wash:0.13,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.78,rDark:0.2,edge:0.4,dec:0.4,def:0.45,bwr:0.05,fpd:0.12,gnu:0.28,uecUsed:4,uecTotal:10}); s.canDecode=true; } },
+  { t:"墨量過多（條寬增益）", d:"1D 觸發 BWR_GAIN", apply:s=>{ s.symbology="ITF14"; Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.8,rDark:0.2,edge:0.35,dec:0.5,def:0.3,bwr:0.09}); s.canDecode=true; } },
   { t:"牛皮吃光（低對比）", d:"觸發 LOW_CONTRAST", apply:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.5,rDark:0.36,edge:0.3,dec:0.4,def:0.3,bwr:0.04}); s.canDecode=true; } },
+  { t:"套印不準（2D）", d:"切 QR，觸發 QR_REGISTRATION", apply:s=>{ s.symbology="QR"; Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); Object.assign(s.grade,{rLight:0.82,rDark:0.18,edge:0.55,fpd:0.12,gnu:0.5,uecUsed:7,uecTotal:10}); s.canDecode=true; } },
   { t:"失焦", d:"對焦 FAIL → 快門鎖死", apply:s=>{ Object.assign(s.gate,{varLap:60,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); } },
   { t:"眩光過強", d:"眩光 FAIL → 快門鎖死", apply:s=>{ s.gate.glare=6; } },
   { t:"不可讀", d:"解碼失敗 → NO_DECODE 診斷", apply:s=>{ Object.assign(s.gate,{varLap:200,glare:0.5,wash:0.06,wb:3,picket:4,tilt:3,pxm:9,scaleRef:true}); s.canDecode=false; } },
 ];
 function renderScenarios() {
   $("scenarios").innerHTML = SCENARIOS.map((sc,i)=>`<button data-i="${i}"><b>${sc.t}</b><small>${sc.d}</small></button>`).join("");
-  $("scenarios").addEventListener("click",(e)=>{ const b=e.target.closest("button"); if(!b) return; SCENARIOS[+b.dataset.i].apply(state); renderChips(); renderSliders(); recompute(); });
+  $("scenarios").addEventListener("click",(e)=>{ const b=e.target.closest("button"); if(!b) return; SCENARIOS[+b.dataset.i].apply(state); syncSymbol(); renderChips(); renderSliders(); recompute(); });
 }
 
 // ───────────────────────── pipeline ─────────────────────────
@@ -312,6 +346,7 @@ function recompute() {
     return `<div class="light"><span class="dot bg-${c.status}"></span><span class="nm">${LIGHT_LABEL[c.key]||c.key}</span><div class="det">${c.status}<span class="engOnly"> · ${c.key}=${val}</span></div></div>`;
   }).join("");
   const armed = gate.state === "ARMED";
+  $("beam").style.display = armed ? "none" : "block"; // 鎖定後停止掃描光束（已對準）
   const sh = $("shutter");
   sh.className = "shutter " + (armed ? "ready" : "locked"); sh.disabled = !armed;
   sh.textContent = armed ? "● 可拍 — 按下檢驗" : (gate.state==="LOCKED" ? "✕ 快門鎖死（有 FAIL）" : "● 校準中…");
@@ -321,18 +356,22 @@ function recompute() {
 function runInspection() {
   const gate = evalGate(); if (gate.state !== "ARMED") return;
   const sym = state.symbology, profile = profileOf(state.profileId), policy = policyOf();
-  const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded } : null };
+  const dim = sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined;
+  const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null };
   const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
+  const g = state.grade;
   const measurement = buildMeasurement({
     scaleRef:{ type:"CARD", nominalMm:26, resolvedPx:260 }, narrowestElementPx:11, quietZonePixels:110,
-    measuredBarWidthMm:1.016 + state.grade.bwr, nominalBarWidthMm:1.016,
+    measuredBarWidthMm: is2D(sym) ? undefined : 1.016 + g.bwr, nominalBarWidthMm: is2D(sym) ? undefined : 1.016,
+    modulePixels: is2D(sym) ? 11 : undefined,
     washboardPeriodMm:profile.expectedFlutePitchMm||7.4, washboardAmplitudeRatio:state.gate.wash,
     expectedFlutePitchMm:profile.expectedFlutePitchMm,
   });
-  const g = state.grade;
-  const scan = () => ({ photometric:{ rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] },
-                        geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } });
-  const grade = buildGradeResult(sym, Array.from({length:10}, scan));
+  const photometric = { rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] };
+  // 1D: N 條掃描線取平均。2D: 單一參數集、取最低為總級 (C7.3)。
+  const grade = is2D(sym)
+    ? buildGradeResult(sym, { photometric, geometric:{ finderTimingDamageRatio:g.fpd, gridDeviation:g.gnu, usedEC:g.uecUsed, totalEC:g.uecTotal } })
+    : buildGradeResult(sym, Array.from({length:10}, () => ({ photometric, geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } })));
   const metrics = { barWidthGainMm:state.grade.bwr, quietZoneX:measurement.quietZoneX, decoded:decode.decoded?1:0, "washboard.amplitudeRatio":state.gate.wash };
   grade.parameters.forEach(p => metrics[`${p.code}.score`] = p.score);
   const diagnosis = evaluateDiagnosis(SEED_DIAGNOSIS_RULES, { symbology:sym, substrateCategory:profile.category, metrics });
@@ -353,7 +392,7 @@ function renderResult() {
   $("noResult").style.display="none"; $("resultBody").style.display="block";
   const { decode, grade, measurement, diagnosis, acceptance, policy, session } = lastResult;
   $("decodeStatus").innerHTML = decode.decoded
-    ? `<span style="color:var(--ok)">✓ 成功</span> · ${session.symbology} · ${decode.data} · 比對${decode.expectedDataMatch?"符合":"不符"}`
+    ? `<span style="color:var(--ok)">✓ 成功</span> · ${session.symbology}${decode.dimension?" · "+decode.dimension:""} · ${decode.data} · 比對${decode.expectedDataMatch?"符合":"不符"}`
     : `<span style="color:var(--fail)">✗ 不可讀</span>`;
   $("gradeLetter").textContent = grade.overall;
   $("circle").style.borderColor = GC[grade.overall]; $("gradeLetter").style.color = GC[grade.overall];
@@ -364,11 +403,16 @@ function renderResult() {
   $("params").innerHTML = "<tr><th>級</th><th>參數</th><th>分數</th><th>類別</th></tr>" + grade.parameters.map(p =>
     `<tr><td style="color:${GC[p.letter]};font-weight:700">${p.letter}</td><td>${p.label} (${p.code})</td><td>${p.score.toFixed(2)}</td><td><span class="tag ${p.kind}">${p.kind==="GEOMETRIC"?"幾何·穩":"光線·相對"}</span></td></tr>`).join("");
   const qz = measurement.quietZoneX, bwr = measurement.barWidthGainMm ?? 0, wb = measurement.washboard;
-  $("quad").innerHTML = `
+  const wbCell = `<div>楞痕週期<b>${wb?wb.periodMm.toFixed(1):'–'} mm</b><span class="spec ${wb&&wb.detected?'bad':'ok'}">${wb&&wb.detected?'偵測到楞痕':'正常'}</span></div>`;
+  $("quad").innerHTML = is2D(session.symbology) ? `
+    <div>模組尺寸<b>${(measurement.moduleSizeMm??0).toFixed(3)} mm</b><span class="spec ok">2D 模組邊長</span></div>
+    <div>解碼維度<b>${decode.dimension||'–'}</b><span class="spec ok">${session.symbology}</span></div>
+    <div>Quiet Zone<b>${qz.toFixed(1)} X</b><span class="spec ok">2D 靜空區</span></div>
+    ${wbCell}` : `
     <div>X-dimension<b>${measurement.xDimMm.toFixed(3)} mm</b><span class="spec ok">規格 ${policy.xDimSpecMm} mm</span></div>
     <div>條寬增益 BWR<b>${bwr.toFixed(3)} mm</b><span class="spec ${bwr>0.04?'bad':'ok'}">${bwr>0.04?'偏高':'正常'}</span></div>
     <div>Quiet Zone<b>${qz.toFixed(1)} X</b><span class="spec ${qz<policy.quietZoneMinX?'bad':'ok'}">≥ ${policy.quietZoneMinX} X</span></div>
-    <div>楞痕週期<b>${wb?wb.periodMm.toFixed(1):'–'} mm</b><span class="spec ${wb&&wb.detected?'bad':'ok'}">${wb&&wb.detected?'偵測到楞痕':'正常'}</span></div>`;
+    ${wbCell}`;
   $("diagnosis").innerHTML = diagnosis.matched.length
     ? diagnosis.matched.map(h => `<div class="diag sev${h.severity}"><b>[${h.ruleId}] ${h.cause}</b><br>處方：${h.remedy}（severity ${h.severity}）</div>`).join("")
     : '<p class="muted">無命中規則 — 品質良好。</p>';
@@ -438,7 +482,7 @@ $("modeSwitch").addEventListener("click", () => {
 // chips
 bindChips("chips-stage","processStage");
 bindChips("chips-profile","profileId");
-bindChips("chips-symbology","symbology", ()=>{ state.decoded = state.symbology==="GS1_128" ? "(01)04712345678901" : "104712345678904"; state.expected = state.decoded; });
+bindChips("chips-symbology","symbology", syncSymbol);
 $("trend-stage").addEventListener("click",(e)=>{ const c=e.target.closest(".chip"); if(c){ trendStage=c.dataset.v; renderTrend(); }});
 $("trend-profile").addEventListener("click",(e)=>{ const c=e.target.closest(".chip"); if(c){ trendProfileId=c.dataset.v; renderTrend(); }});
 // shutter & actions
@@ -447,7 +491,7 @@ $("markBtn").addEventListener("click", (e)=>{ const b=e.target; const o=b.textCo
 $("csvBtn").addEventListener("click", ()=>{ if(!lastResult) return; const blob=new Blob([toCsvRow(lastResult.session,{customer:"ACME"})],{type:"text/csv"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="inspection.csv"; a.click(); });
 
 // init
-renderChips(); renderSliders(); renderScenarios(); seedHistory(); recompute(); renderTrendChips();
+renderChips(); renderSliders(); renderScenarios(); seedHistory(); renderHud(); recompute(); renderTrendChips();
 </script>
 </body>
 </html>
