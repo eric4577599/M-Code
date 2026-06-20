@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  M-Code demo static web server launchd daemon — template.
+
+  This is a TEMPLATE: the @PLACEHOLDERS@ are substituted by setup-macmini.sh
+  with the real clone path / python3 / runtime user before it is copied to
+  /Library/LaunchDaemons. Do not load this file directly.
+
+  Serves the repo directory over http://[::]:8765 so the built demo is reachable:
+    https://m-code.ericchh.work/demo/index.html   (and dist/*.js ESM imports)
+
+  Bind is dual-stack (::) on purpose: the Cloudflare tunnel dials "localhost",
+  which resolves to ::1 first — an IPv4-only server would give the edge a 502.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ericchh.mcode-web</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@PYTHON3@</string>
+        <string>-m</string>
+        <string>http.server</string>
+        <string>8765</string>
+        <string>--bind</string>
+        <string>::</string>
+        <string>--directory</string>
+        <string>@REPO_DIR@</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@REPO_DIR@</string>
+
+    <!-- Run as the normal user (not root). -->
+    <key>UserName</key>
+    <string>@RUN_USER@</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if it ever exits (the laptop-sleep/crash case we are fixing). -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>@LOG_DIR@/mcode-web.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG_DIR@/mcode-web.err.log</string>
+</dict>
+</plist>

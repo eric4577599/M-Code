@@ -1,0 +1,4 @@
+# Shell scripts and launchd plists must keep LF endings so they run on macOS
+# (a CRLF shebang breaks with "bad interpreter").
+*.sh    text eol=lf
+*.plist text eol=lf
