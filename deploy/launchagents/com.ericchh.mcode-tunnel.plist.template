@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  M-Code cloudflared tunnel — 使用者層 LaunchAgent(免 sudo)。
+  這是「模板」:@TUNNEL_TOKEN@ 為機密,絕不 commit 進 repo。安裝時替換成真 token,
+  寫到 ~/Library/LaunchAgents/com.ericchh.mcode-tunnel.plist 並設權限 600:
+
+    TOKEN='<你的 m-code tunnel token,eyJ... 開頭>'
+    sed "s#@TUNNEL_TOKEN@#${TOKEN}#" \
+      deploy/launchagents/com.ericchh.mcode-tunnel.plist.template \
+      > ~/Library/LaunchAgents/com.ericchh.mcode-tunnel.plist
+    chmod 600 ~/Library/LaunchAgents/com.ericchh.mcode-tunnel.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ericchh.mcode-tunnel.plist
+
+  token 來源:Cloudflare Zero Trust > Networks > Tunnels > m-code (2cad6e8b-…)
+  > Configure / Refresh token。輪替後重跑上面步驟即可換掉。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ericchh.mcode-tunnel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/cloudflared</string>
+        <string>tunnel</string>
+        <string>--no-autoupdate</string>
+        <string>run</string>
+        <string>--token</string>
+        <string>@TUNNEL_TOKEN@</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/hezhaoxing/Library/Logs/m-code/cloudflared.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hezhaoxing/Library/Logs/m-code/cloudflared.log</string>
+</dict>
+</plist>

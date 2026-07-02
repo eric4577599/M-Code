@@ -125,4 +125,28 @@ describe("toCsvRow", () => {
     expect(row).toContain('"a,b""c\nd"');
     expect(row).toContain('"Smith, Inc"');
   });
+
+  it("清除浮點表示誤差,不改動合理數值", () => {
+    // 模擬上游分數/量測算出的浮點雜訊(2.56 → 2.5599999999999 等)
+    const row = toCsvRow(
+      makeSession({
+        grade: { overall: "B", overallScore: 2.5599999999999, isRelative: true, parameters: [] },
+        acceptance: { policyId: "pol-1", requiredGrade: "C", pass: true, marginScore: 0.5599999999999992 },
+        measurement: {
+          scaleRef: { type: "CARD", nominalMm: 85.6, resolvedPx: 1000 },
+          xDimMm: 1.016,
+          barWidthGainMm: 0.030000000000000027,
+          quietZoneX: 12,
+          washboard: { detected: true, periodMm: 6.5, amplitudeRatio: 0.12 },
+        },
+      }),
+    );
+    const cells = row.split(",");
+    expect(cells[11]).toBe("2.56"); // overall_score:雜訊收斂
+    expect(cells[14]).toBe("0.56"); // margin_score:雜訊收斂
+    expect(cells[16]).toBe("0.03"); // bwr_gain_mm:雜訊收斂
+    expect(cells[15]).toBe("1.016"); // x_dim_mm:合理值原封不動
+    expect(cells[18]).toBe("6.5"); // washboard_period_mm:原封不動
+    expect(cells[19]).toBe("0.12"); // washboard_amp_ratio:原封不動
+  });
 });

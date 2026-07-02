@@ -30,10 +30,21 @@ export const CSV_COLUMNS: readonly string[] = [
   "diagnosis_ids",
 ];
 
+/**
+ * 把數字轉成乾淨字串:只清除二進位浮點的表示誤差(如 2.56 被算成
+ * 2.5599999999999、0.03 被算成 0.030000000000000027),不強加領域精度。
+ * 用 toPrecision(10) 再轉回 Number —— 本模型的量測/分數皆遠少於 10 位有效
+ * 數字,故合理值原封不動,只有尾端浮點雜訊被收斂。非有限值(NaN/Inf)回退原樣。
+ */
+function formatNumber(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  return String(Number(n.toPrecision(10)));
+}
+
 /** Render one cell: empty for null/undefined, escaped when it contains , " or newline. */
 function escapeField(value: string | number | boolean | undefined | null): string {
   if (value === undefined || value === null) return "";
-  const s = String(value);
+  const s = typeof value === "number" ? formatNumber(value) : String(value);
   if (/[",\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }

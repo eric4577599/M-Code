@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  M-Code demo 靜態 web — 使用者層 LaunchAgent(免 sudo)。
+  跑 m-code-serve.py(送 no-store 標頭、雙協議綁 ::)serve 內接碟 docroot。
+  安裝到 ~/Library/LaunchAgents/ 後:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ericchh.mcode-web.plist
+  與 setup-macmini.sh 的「系統 LaunchDaemon」版互斥:轉系統常駐前先卸載本 agent。
+  路徑為現行 Mac 部署值,換機請一併調整 m-code-serve.py 內的 DIRECTORY。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ericchh.mcode-web</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/hezhaoxing/m-code-serve.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/hezhaoxing/m-code-site</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/hezhaoxing/Library/Logs/m-code/mcode-web.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hezhaoxing/Library/Logs/m-code/mcode-web.err.log</string>
+</dict>
+</plist>
