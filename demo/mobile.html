@@ -230,6 +230,8 @@
 <!-- 列印報告(輸出 PDF 用),置於 .phone 之外 -->
 <div id="printReport"></div>
 
+<!-- ZXing 條碼解碼引擎(vendored UMD,離線可用;全域名 ZXing) -->
+<script src="./vendor/zxing.min.js"></script>
 <script type="module">
 import {
   evaluateGate, runDecode, buildGradeResult, evaluateAcceptance,
@@ -340,9 +342,13 @@ function recompute() {
 function inspect() {
   const gate = evalGate(); if (gate.state !== "ARMED") return;
   const sym = state.symbology, g = state.grade;
-  const dim = sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined;
-  const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null };
-  const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
+  // 3 秒內的 ZXing 即時辨識視為有效:快門當下用真實解碼結果;否則用情境模擬值
+  const live = liveScan && (Date.now() - liveScan.at < 3000) ? liveScan : null;
+  const dim = live ? undefined : (sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined);
+  const decoder = { decode:() => live
+    ? { symbology: live.sym, data: live.text }
+    : (state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null) };
+  const decode = runDecode(decoder, { declaredSymbology: live ? live.sym : sym, handle:{} }, { expectedGtin: live ? live.text : state.expected });
   const photometric = { rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] };
   // 1D: N scanlines averaged. 2D: single param set, min-takes-overall (per core lib C7.3).
   const grade = is2D(sym)
@@ -418,7 +424,8 @@ async function initCamera(userGesture) {
     const v = $("cam"); v.srcObject = stream; await v.play().catch(()=>{});
     $("frame").classList.add("live"); camVideo = v;
     const label = (stream.getVideoTracks()[0] || {}).label || "";
-    setCamStatus("● 相機已開啟" + (label?("："+label):"（後鏡頭）"), "ok");
+    setCamStatus("● 相機已開啟" + (label?("："+label):"（後鏡頭）") + " · 對準條碼即自動辨識", "ok");
+    startZxLoop(); // 相機就緒後開始 ZXing 即時解碼
   } catch (e) {
     const map = { NotAllowedError:"相機權限被拒 — 請到 iPhone 設定→Safari→相機 允許，或點網址列 ⒜A→網站設定",
       NotFoundError:"找不到相機", NotReadableError:"相機被其他 App 佔用（關掉相機/其他相機頁）",
@@ -441,6 +448,49 @@ function captureImage() {
 }
 const imgMarkup = (img, fit="cover") => img.type==="img"
   ? `<img src="${img.data}" style="width:100%;height:100%;object-fit:${fit};display:block">` : img.data;
+
+// ── ZXing 真實解碼:相機開啟後每 300ms 取一幀嘗試辨識 ──
+// 輸入:相機 video 當前畫面;輸出:liveScan = { text, sym, at },並同步 state
+// (符號別自動切換、decoded/expected 帶真實字串),供快門當下取用。
+let zxReader = null, liveScan = null, zxTimer = null;
+const zxCanvas = document.createElement("canvas");
+const ZX_FORMAT_TO_SYM = { ITF:"ITF14", CODE_128:"GS1_128", QR_CODE:"QR", DATA_MATRIX:"DATAMATRIX" };
+function initZxing() {
+  if (zxReader || !window.ZXing) return;
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+    ZXing.BarcodeFormat.ITF, ZXing.BarcodeFormat.CODE_128,
+    ZXing.BarcodeFormat.QR_CODE, ZXing.BarcodeFormat.DATA_MATRIX,
+  ]);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  zxReader = new ZXing.MultiFormatReader();
+  zxReader.setHints(hints);
+}
+function scanFrame() {
+  const v = camVideo;
+  if (!zxReader || !v || !v.videoWidth) return;
+  const w = Math.min(800, v.videoWidth), h = Math.round(w * v.videoHeight / v.videoWidth);
+  zxCanvas.width = w; zxCanvas.height = h;
+  zxCanvas.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0, w, h);
+  try {
+    const res = zxReader.decode(new ZXing.BinaryBitmap(
+      new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(zxCanvas))));
+    const sym = ZX_FORMAT_TO_SYM[ZXing.BarcodeFormat[res.getBarcodeFormat()]];
+    if (!sym) return;
+    liveScan = { text: res.getText(), sym, at: Date.now() };
+    if (state.symbology !== sym) { state.symbology = sym; render(); }
+    state.decoded = liveScan.text; state.expected = liveScan.text; state.canDecode = true;
+    setCamStatus(`✓ 已辨識（${sym}）：${liveScan.text.slice(0, 42)}${liveScan.text.length > 42 ? "…" : ""}`, "ok");
+  } catch (e) {
+    // NotFoundException:這一幀沒有條碼,屬正常;維持上次狀態
+  } finally {
+    zxReader.reset();
+  }
+}
+function startZxLoop() {
+  initZxing();
+  if (zxReader && !zxTimer) zxTimer = setInterval(scanFrame, 300);
+}
 
 function saveScan(decode, grade, acceptance) {
   scans.push({
