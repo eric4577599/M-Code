@@ -327,7 +327,10 @@ const SCN = [
   { t:"不可讀", a:s=>{ Object.assign(s.gate,GATE_OK); s.canDecode=false; } },
 ];
 $("scenarios").innerHTML = SCN.map((s,i)=>`<button data-i="${i}">${s.t}</button>`).join("");
-$("scenarios").onclick = (e) => { const b=e.target.closest("button"); if(!b) return; SCN[+b.dataset.i].a(state); $("profile").value=state.profileId; onSymChange(); render(); recompute(); };
+$("scenarios").onclick = (e) => { const b=e.target.closest("button"); if(!b) return; SCN[+b.dataset.i].a(state);
+  // 相機已開時以實況為準:情境不得把 scaleRef 演回「已偵測」(scaleNote 文字才不會失真)
+  if (camVideo) state.gate.scaleRef = false;
+  $("profile").value=state.profileId; onSymChange(); render(); recompute(); };
 
 // gate
 function evalGate() {
@@ -344,7 +347,7 @@ function recompute() {
   $("beam").style.display = armed ? "none" : "block"; // 鎖定後停止掃描光束（已對準）
   sh.className = "shutter " + (armed?"ready":""); sh.disabled = !armed;
   $("shutterLbl").textContent = armed ? "可拍 — 點按檢驗" : (gate.state==="LOCKED" ? "快門鎖死（有未過項）" : "校準中…");
-  $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "六項全綠前快門鎖死，確保每次拍攝一致。";
+  $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "有 FAIL 燈時快門鎖死（比例尺卡除外—未偵測僅停用量測），確保每次拍攝一致。";
 }
 
 // inspect:快門入口。有相機 → 對拍到的照片做真實解碼與實測評分;無相機 → 情境模擬。
