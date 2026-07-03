@@ -97,6 +97,42 @@
   svg .gridline { stroke:var(--line); stroke-width:1; } svg .thresh { stroke:var(--fail); stroke-width:1.5; stroke-dasharray:5 4; }
   svg .curve { fill:none; stroke:#0ea5e9; stroke-width:2.5; } svg text { font:11px ui-monospace,monospace; fill:var(--mut); }
   .corner-note { font-size:11px; color:var(--mut); float:right; }
+
+  /* ── scan badge (topbar) ── */
+  .scanBadge { background:#0ea5e9; color:#fff; font-size:12px; font-weight:700; padding:4px 10px; border-radius:999px; cursor:pointer; white-space:nowrap; }
+  .scanBadge.zero { background:#334155; color:#94a3b8; }
+
+  /* ── list / export page ── */
+  .exportForm { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+  .exportForm label { font-size:12px; color:var(--mut); display:block; }
+  .exportForm input { width:100%; margin-top:4px; }
+  .listTable td, .listTable th { font-size:13px; }
+  .listTable .gcell { font-weight:800; }
+  .listTable .pass { color:var(--ok); font-weight:700; } .listTable .fail { color:var(--fail); font-weight:700; }
+  .btn-primary { background:var(--ink); color:#fff; border:0; border-radius:8px; padding:10px 18px; font-size:14px; font-weight:600; cursor:pointer; margin-right:8px; }
+  .btn-primary:disabled { background:#cbd5e1; cursor:not-allowed; }
+  .btn-ghost { background:#fff; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:10px 16px; font-size:14px; cursor:pointer; }
+  .thumb { width:120px; height:64px; object-fit:contain; background:#d8c19a; border:1px solid var(--line); border-radius:6px; }
+
+  /* ── print report (PDF via 瀏覽器列印 / 另存 PDF) ── */
+  #printReport { display:none; }
+  .rptHead { display:flex; justify-content:space-between; align-items:flex-end; border-bottom:2px solid #0f172a; padding-bottom:8px; margin-bottom:14px; }
+  .rptHead h1 { font-size:20px; margin:0; }
+  .rptMeta { display:grid; grid-template-columns:1fr 1fr; gap:4px 24px; font-size:13px; margin:12px 0 16px; }
+  .rptMeta b { display:inline-block; min-width:72px; color:#475569; }
+  table.rpt { width:100%; border-collapse:collapse; font-size:12px; }
+  table.rpt th, table.rpt td { border:1px solid #cbd5e1; padding:6px 8px; text-align:left; }
+  table.rpt th { background:#f1f5f9; }
+  .scanPage { page-break-before:always; padding-top:8px; }
+  .scanPage .sp-grid { display:grid; grid-template-columns:300px 1fr; gap:18px; align-items:start; }
+  .scanPage img.orig { width:100%; background:#d8c19a; border:1px solid #94a3b8; border-radius:6px; }
+  .rptLegal { color:#dc2626; font-size:11px; margin-top:6px; }
+  @media print {
+    body { background:#fff; }
+    body > .topbar, body > .page { display:none !important; }
+    #printReport { display:block !important; padding:0; color:#0f172a; }
+    @page { margin:14mm; }
+  }
 </style>
 </head>
 <body class="mode-demo">
@@ -106,8 +142,10 @@
   <div class="tabs">
     <button class="tab active" data-page="capture">① 拍攝</button>
     <button class="tab" data-page="result">② 結果</button>
-    <button class="tab" data-page="trend">③ 趨勢</button>
+    <button class="tab" data-page="list">③ 清單 / 輸出</button>
+    <button class="tab" data-page="trend">④ 趨勢</button>
   </div>
+  <span class="scanBadge zero" id="scanBadge" title="前往清單 / 輸出">已掃描 0 筆</span>
   <div class="modeToggle">
     <div class="switch" id="modeSwitch" title="切換展示 / 工程模式">
       <span class="demoLbl">展示</span><span class="engLbl">工程</span>
@@ -212,6 +250,32 @@
     <p class="muted">切換楞型基準檔：粗楞貼著門檻跑、細楞抬高、表貼/標籤穩在 A——驗證「楞越粗越易掉級」，支撐高階訂單導向細楞/表貼的業務話術。每按一次快門即累積一批。</p>
   </div>
 </section>
+
+<!-- ════════ ③ 清單 / 輸出 ════════ -->
+<section class="page" id="page-list">
+  <div class="card">
+    <h2>輸出資訊（列印 / 匯出前填寫）</h2>
+    <div class="exportForm">
+      <div><label>客戶名稱</label><input type="text" id="f-customer" placeholder="例：ACME 食品" /></div>
+      <div><label>品名</label><input type="text" id="f-product" placeholder="例：早餐脆片 500g 外箱" /></div>
+      <div><label>工單號</label><input type="text" id="f-workorder" placeholder="例：WO-2406A-7741" /></div>
+      <div><label>掃描總數</label><input type="text" id="f-total" readonly /></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>掃描結果 / 判定清單 <span class="muted" id="listCount"></span></h2>
+    <table class="listTable" id="listTable"></table>
+    <div style="margin-top:14px">
+      <button class="btn-primary" id="exportPdfBtn">🖨 輸出 PDF</button>
+      <button class="btn-primary" id="exportXlsBtn">⬇ 輸出 Excel</button>
+      <button class="btn-ghost" id="clearListBtn">清除清單</button>
+    </div>
+    <p class="muted" style="margin-top:8px">每按一次「檢驗」即自動存入本清單。PDF 首頁為表頭與判定清單，次頁起為每次掃描原圖與判定結果。</p>
+  </div>
+</section>
+
+<!-- 隱藏的列印報告：輸出 PDF 時 window.print() -->
+<div id="printReport"></div>
 
 <script type="module">
 import {
@@ -382,6 +446,7 @@ function runInspection() {
 
   lastResult = { session, decode, grade, measurement, diagnosis, acceptance, policy };
   pushHistory(profile.id, state.processStage, grade.overallScore);
+  saveScan(lastResult);
   renderResult(); renderTrend();
   document.querySelector('[data-page=result]').click();
 }
@@ -466,6 +531,118 @@ function renderTrend() {
   $("trendChart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">${g}</svg>`;
 }
 
+// ───────────────────────── scan list / export ─────────────────────────
+const scans = []; // 每次檢驗累積一筆
+const fmtTime = d => `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}`;
+
+// 掃描原圖快照(可縮放 SVG,供清單縮圖與 PDF 原圖用)
+function snapMatrix(type) {
+  const N=21, c=9, sz=N*c; let cells="", r=7;
+  const finder=(x,y)=>`<rect x="${x*c}" y="${y*c}" width="${7*c}" height="${7*c}" fill="#1a120a"/>`+
+    `<rect x="${(x+1)*c}" y="${(y+1)*c}" width="${5*c}" height="${5*c}" fill="#d8c19a"/>`+
+    `<rect x="${(x+2)*c}" y="${(y+2)*c}" width="${3*c}" height="${3*c}" fill="#1a120a"/>`;
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++){ r=(r*1103515245+12345)&0x7fffffff;
+    const inFinder=(x<8&&y<8)||(x>N-9&&y<8)||(x<8&&y>N-9);
+    if(type==="QR"&&inFinder) continue;
+    if((r>>16)%2===0) cells+=`<rect x="${x*c}" y="${y*c}" width="${c}" height="${c}" fill="#1a120a"/>`;
+  }
+  let inner=cells;
+  if(type==="QR") inner+=finder(0,0)+finder(N-7,0)+finder(0,N-7);
+  else { inner+=`<rect x="0" y="0" width="${c}" height="${sz}" fill="#1a120a"/><rect x="0" y="${sz-c}" width="${sz}" height="${c}" fill="#1a120a"/>`;
+    for(let i=0;i<N;i+=2) inner+=`<rect x="${i*c}" y="0" width="${c}" height="${c}" fill="#1a120a"/><rect x="${sz-c}" y="${i*c}" width="${c}" height="${c}" fill="#1a120a"/>`; }
+  return `<svg viewBox="0 0 ${sz} ${sz}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="background:#d8c19a">${inner}</svg>`;
+}
+function snapBarcode(dataText) {
+  const W=320, H=110; let seed=0; for(const ch of String(dataText)) seed=(seed*31+ch.charCodeAt(0))&0x7fffffff;
+  const rnd=()=>{ seed=(seed*1103515245+12345)&0x7fffffff; return ((seed>>16)&0x7fff)/0x7fff; };
+  const top=10, bh=H-42; let x=16, bars="";
+  while(x<W-16){ const w=2+Math.floor(rnd()*3); if(rnd()>0.4) bars+=`<rect x="${x}" y="${top}" width="${w}" height="${bh}" fill="#1a120a"/>`; x+=w+(rnd()>0.6?1:0); }
+  const bearer=`<rect x="8" y="4" width="${W-16}" height="3" fill="#1a120a"/><rect x="8" y="${top+bh+2}" width="${W-16}" height="3" fill="#1a120a"/>`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="background:#d8c19a">${bearer}${bars}<text x="${W/2}" y="${H-10}" text-anchor="middle" font-family="ui-monospace,monospace" font-size="14" fill="#1a120a">1 04712 345678 9</text></svg>`;
+}
+const symbolSnapshot = (sym) => is2D(sym) ? snapMatrix(sym) : snapBarcode(SAMPLE_DATA[sym]);
+
+function saveScan(lr) {
+  const { session, decode, grade, acceptance, diagnosis, policy } = lr;
+  scans.push({
+    n: scans.length+1, ts: new Date(), symbology: session.symbology,
+    symLabel: (SYMS.find(([v])=>v===session.symbology)||[,session.symbology])[1],
+    data: decode.decoded ? decode.data : "(不可讀)", decoded: decode.decoded,
+    grade: grade.overall, pass: acceptance.pass, reqGrade: policy.requiredGrade,
+    margin: acceptance.marginScore, svg: symbolSnapshot(session.symbology),
+    params: grade.parameters.map(p=>({ letter:p.letter, code:p.code, label:p.label, score:p.score })),
+    diag: diagnosis.matched.map(h=>`[${h.ruleId}] ${h.cause}`),
+    profileName: (profileOf(session.substrateProfileId)||{}).name || "", stage: session.processStage,
+  });
+  updateScanBadge(); renderList();
+}
+function updateScanBadge() {
+  const b=$("scanBadge"); b.textContent=`已掃描 ${scans.length} 筆`; b.classList.toggle("zero", scans.length===0);
+}
+function renderList() {
+  $("f-total").value = String(scans.length);
+  $("listCount").textContent = `（共 ${scans.length} 筆）`;
+  if (!scans.length) { $("listTable").innerHTML = `<tr><td class="muted">尚無掃描紀錄。到「① 拍攝」按檢驗即會累積。</td></tr>`; }
+  else {
+    $("listTable").innerHTML = `<tr><th>#</th><th>時間</th><th>符號別</th><th>解碼</th><th>等級</th><th>判定</th><th>原圖</th></tr>` +
+      scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.symLabel}</td>
+        <td style="font-family:ui-monospace,monospace">${s.data}</td>
+        <td class="gcell" style="color:${GC[s.grade]}">${s.grade}</td>
+        <td class="${s.pass?"pass":"fail"}">${s.pass?"通過":"未通過"}</td>
+        <td><div class="thumb">${s.svg}</div></td></tr>`).join("");
+  }
+  const has = scans.length>0;
+  $("exportPdfBtn").disabled=!has; $("exportXlsBtn").disabled=!has;
+}
+function metaFields() {
+  return { customer:$("f-customer").value.trim()||"—", product:$("f-product").value.trim()||"—", wo:$("f-workorder").value.trim()||"—" };
+}
+function buildPrintReport() {
+  const m = metaFields(), dateStr = new Date().toLocaleString("zh-TW");
+  const passCount = scans.filter(s=>s.pass).length;
+  const summary = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.symLabel}</td>
+    <td>${s.data}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.profileName}</td></tr>`).join("");
+  const page1 = `
+    <div class="rptHead"><h1>瓦楞箱條碼 / QR 品質檢驗報告</h1>
+      <div style="text-align:right;font-size:12px;color:#475569">相對品質篩檢<br>${dateStr}</div></div>
+    <div class="rptMeta">
+      <div><b>客戶名稱</b>${m.customer}</div><div><b>品名</b>${m.product}</div>
+      <div><b>工單號</b>${m.wo}</div><div><b>掃描總數</b>${scans.length} 筆</div>
+      <div><b>判定通過</b>${passCount} / ${scans.length}</div><div><b>報告時間</b>${dateStr}</div></div>
+    <table class="rpt"><tr><th>#</th><th>時間</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>工法/楞型</th></tr>${summary}</table>
+    <p class="rptLegal">※ 本報告為相對品質篩檢參考值，非 ISO 合規證書；合規驗證請使用具固定照明幾何之合規 verifier。</p>`;
+  const details = scans.map(s=>`
+    <div class="scanPage">
+      <h2 style="font-size:15px;margin:0 0 12px">掃描 #${s.n} · ${fmtTime(s.ts)} · ${s.symLabel}</h2>
+      <div class="sp-grid">
+        <div><div style="width:100%;height:190px">${s.svg}</div><p style="text-align:center;color:#64748b;font-size:12px;margin-top:4px">掃描原圖</p></div>
+        <div>
+          <p style="margin:0 0 8px"><b>參考等級：</b><span style="color:${GC[s.grade]};font-weight:800;font-size:20px">${s.grade}</span>
+            　<b>判定：</b>${s.pass?"通過":"未通過"}（門檻 ≥ ${s.reqGrade}，margin ${s.margin.toFixed(2)}）</p>
+          <p style="margin:0 0 8px"><b>解碼：</b>${s.decoded?"成功":"不可讀"} · ${s.data}</p>
+          <table class="rpt"><tr><th>級</th><th>參數</th><th>分數</th></tr>
+            ${s.params.map(p=>`<tr><td>${p.letter}</td><td>${p.label} (${p.code})</td><td>${p.score.toFixed(2)}</td></tr>`).join("")}</table>
+          <p style="margin-top:8px"><b>診斷：</b>${s.diag.length?s.diag.join("；"):"無命中規則，品質良好"}</p>
+        </div>
+      </div>
+    </div>`).join("");
+  $("printReport").innerHTML = page1 + details;
+}
+function exportPdf() { if (!scans.length) return; buildPrintReport(); window.print(); }
+function exportXls() {
+  if (!scans.length) return;
+  const m = metaFields(), dateStr = new Date().toLocaleString("zh-TW");
+  const head = `<tr><td>客戶名稱</td><td>${m.customer}</td><td>品名</td><td>${m.product}</td></tr>
+    <tr><td>工單號</td><td>${m.wo}</td><td>掃描總數</td><td>${scans.length}</td></tr>
+    <tr><td>報告時間</td><td>${dateStr}</td><td></td><td></td></tr><tr><td></td></tr>`;
+  const cols = `<tr><th>#</th><th>時間</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>門檻</th><th>margin</th><th>工法/楞型</th><th>診斷</th></tr>`;
+  const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.symLabel}</td><td>${s.data}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.reqGrade}</td><td>${s.margin.toFixed(2)}</td><td>${s.profileName}</td><td>${s.diag.join("；")}</td></tr>`).join("");
+  const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1">${head}${cols}${body}</table></body></html>`;
+  const blob = new Blob(["﻿"+html], { type:"application/vnd.ms-excel" });
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=`檢驗報告_${$("f-workorder").value.trim()||"export"}.xls`; a.click();
+}
+function clearList() { if (!scans.length) return; scans.length=0; updateScanBadge(); renderList(); }
+
 // ───────────────────────── wiring ─────────────────────────
 // tabs
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
@@ -473,6 +650,7 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
   document.querySelectorAll(".page").forEach(x=>x.classList.remove("active"));
   t.classList.add("active"); $("page-"+t.dataset.page).classList.add("active");
   if (t.dataset.page==="trend") renderTrend();
+  if (t.dataset.page==="list") renderList();
 }));
 // mode switch (demo <-> eng, mutually exclusive body classes)
 $("modeSwitch").addEventListener("click", () => {
@@ -489,9 +667,15 @@ $("trend-profile").addEventListener("click",(e)=>{ const c=e.target.closest(".ch
 $("shutter").addEventListener("click", runInspection);
 $("markBtn").addEventListener("click", (e)=>{ const b=e.target; const o=b.textContent; b.textContent="✓ 已標記 "+state.processStage; setTimeout(()=>b.textContent=o,1200); });
 $("csvBtn").addEventListener("click", ()=>{ if(!lastResult) return; const blob=new Blob([toCsvRow(lastResult.session,{customer:"ACME"})],{type:"text/csv"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="inspection.csv"; a.click(); });
+// list / export
+$("scanBadge").addEventListener("click", ()=>document.querySelector('[data-page=list]').click());
+$("exportPdfBtn").addEventListener("click", exportPdf);
+$("exportXlsBtn").addEventListener("click", exportXls);
+$("clearListBtn").addEventListener("click", clearList);
 
 // init
 renderChips(); renderSliders(); renderScenarios(); seedHistory(); renderHud(); recompute(); renderTrendChips();
+updateScanBadge(); renderList();
 </script>
 </body>
 </html>
