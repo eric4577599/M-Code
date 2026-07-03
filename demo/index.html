@@ -234,8 +234,10 @@
         <button onclick="document.querySelector('[data-page=capture]').click()">↻ 重拍</button>
         <button id="markBtn">⚑ 標記製程</button>
         <button id="csvBtn">⬇ 存成 CSV</button>
+        <button id="erpBtn">⇪ 回寫 ERP（模擬）· 付費版</button>
       </div>
       <div class="csv" id="csv" style="margin-top:10px"></div>
+      <div class="engBox" id="erpMock" style="display:none;margin-top:10px"></div>
     </div>
     <div class="card engOnly">
       <h2>工程明細（pipeline 物件）</h2>
@@ -247,7 +249,7 @@
 <!-- ════════ ④ 趨勢 ════════ -->
 <section class="page" id="page-trend">
   <div class="card">
-    <span class="corner-note">進階版 · 需後台</span>
+    <span class="corner-note">付費版 · 需後台</span>
     <div class="chiprow"><span class="lbl">製程環節</span><span id="trend-stage"></span></div>
     <div class="chiprow"><span class="lbl">工法 / 楞型基準檔</span><span id="trend-profile"></span></div>
   </div>
@@ -722,6 +724,23 @@ $("trend-profile").addEventListener("click",(e)=>{ const c=e.target.closest(".ch
 $("shutter").addEventListener("click", runInspection);
 $("markBtn").addEventListener("click", (e)=>{ const b=e.target; const o=b.textContent; b.textContent="✓ 已標記 "+state.processStage; setTimeout(()=>b.textContent=o,1200); });
 $("csvBtn").addEventListener("click", ()=>{ if(!lastResult) return; const blob=new Blob([toCsvRow(lastResult.session,{customer:"ACME"})],{type:"text/csv"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="inspection.csv"; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000); });
+// ERP 回寫模擬(付費版殺手鐧展示):以最近一筆檢驗演示 C9 工單帶門檻 → 回寫 → 佇列語意
+$("erpBtn").addEventListener("click", () => {
+  if (!lastResult) return;
+  const { session, grade, acceptance, decode } = lastResult;
+  $("erpMock").style.display = "block";
+  $("erpMock").textContent = [
+    `① GET /api/v1/workorders/WO-2406A-7741                → 200 OK`,
+    `   客戶 ACME · symbology ${session.symbology} · 門檻 ≥ ${acceptance.requiredGrade} · expectedGtin 14712345678907`,
+    `② POST /api/v1/inspections   (Bearer · Idempotency-Key: ${session.id})`,
+    `   { grade:"${grade.overall}", pass:${acceptance.pass}, margin:${acceptance.marginScore.toFixed(2)}, decoded:"${decode.decoded ? decode.data : "(不可讀)"}" }`,
+    `                                                       → 201 Created · inspectionId: INSP-88231`,
+    `③ syncState: LOCAL → SYNCED ✓`,
+    ``,
+    `※ 模擬畫面 — 付費版透過 C9 REST API 直連客戶 ERP:工單自動帶允收門檻、`,
+    `   結果即時回寫;離線自動入佇列,連線後以同一 Idempotency-Key 重送不重複建檔。`,
+  ].join("\n");
+});
 // list / export
 $("scanBadge").addEventListener("click", ()=>document.querySelector('[data-page=list]').click());
 $("exportPdfBtn").addEventListener("click", exportPdf);

@@ -83,6 +83,10 @@
   .params { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin:14px 0 4px; }
   .pchip { border:1px solid #e2e8f0; border-radius:8px; padding:5px 9px; font-size:12px; }
   .pchip b { font-weight:800; margin-right:4px; }
+  /* 免費版鎖定的付費參數(C10 full_parameters):只露代號不露分數 */
+  .pchip.locked { color:#94a3b8; background:#f8fafc; border-style:dashed; }
+  /* 付費功能標註(清單/報告輸出 demo 試用) */
+  .tierNote { font-size:11px; color:#92400e; background:#fffbeb; border:1px solid #fde68a; border-radius:9px; padding:7px 10px; margin-bottom:10px; }
   .upsell { margin-top:16px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:12px; padding:12px; font-size:12px; color:#075985; }
   .upsell b { display:block; margin-bottom:4px; }
   .reBtn { margin-top:14px; width:100%; padding:13px; border:0; border-radius:12px; background:var(--ink); color:#fff; font-size:15px; }
@@ -169,7 +173,7 @@
         <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
         <div class="beam" id="beam"></div><div id="symbolMock"></div>
       </div>
-      <div class="scaleNote">⊞ 比例尺卡 已偵測 · 基準 26.0 mm</div>
+      <div class="scaleNote" id="scaleNote">⊞ 比例尺卡（示意）· 基準 26.0 mm</div>
       <div class="camStatus" id="camStatus">開啟相機中…</div>
     </div>
 
@@ -211,6 +215,7 @@
   <div class="view" id="v-list">
     <div class="listView">
       <button class="back" id="listBack">‹ 返回拍攝</button>
+      <p class="tierNote">🔒 清單留存與 PDF / Excel 報告為<b>付費版</b>功能（免費版單機不留存）— 此畫面為 Demo 試用展示</p>
       <div class="fld"><label>客戶名稱</label><input type="text" id="f-customer" placeholder="例：ACME 食品"></div>
       <div class="fld"><label>品名</label><input type="text" id="f-product" placeholder="例：早餐脆片 500g 外箱"></div>
       <div class="fld"><label>工單號</label><input type="text" id="f-workorder" placeholder="例：WO-2406A-7741"></div>
@@ -423,8 +428,10 @@ function presentResult(decode, grade, acceptance, img) {
   v.className = "verdict " + (acceptance.pass?"pass":"fail");
   v.textContent = (acceptance.pass ? "通過" : "未通過") + ` ｜ 門檻 ≥ ${policyOf().requiredGrade}`;
   $("margin").textContent = "margin " + acceptance.marginScore.toFixed(2);
-  $("params").innerHTML = grade.parameters.map(p =>
-    `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`).join("");
+  // 免費版只露光度基本參數;幾何參數屬付費 full_parameters,以鎖定樣式呈現(C10)
+  $("params").innerHTML = grade.parameters.map(p => p.kind === "PHOTOMETRIC"
+    ? `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`
+    : `<span class="pchip locked">🔒 ${p.code}</span>`).join("");
   const symLabelR = (SYMS.find(([sv])=>sv===state.symbology)||[,state.symbology])[1];
   $("resultText").value = [
     `製程環節：${stageLabelOf(state.processStage)}`,
@@ -432,7 +439,8 @@ function presentResult(decode, grade, acceptance, img) {
     `解碼：${decode.decoded ? "成功 · "+decode.data : "不可讀（綜合崩壞）"}`,
     `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
     `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policyOf().requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
-    `分級參數：${grade.parameters.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
+    `基本參數（免費版·光度）：${grade.parameters.filter(p=>p.kind==="PHOTOMETRIC").map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
+    `完整參數報告（幾何 ${grade.parameters.filter(p=>p.kind!=="PHOTOMETRIC").map(p=>p.code).join("/") || "DEC/DEF/FPD/GNU"} 等）：付費版解鎖`,
   ].join("\n");
   saveScan(decode, grade, acceptance, img);
   show("result");
@@ -482,6 +490,9 @@ async function initCamera(userGesture) {
     $("frame").classList.add("live"); camVideo = v;
     const label = (stream.getVideoTracks()[0] || {}).label || "";
     setCamStatus("● 相機已開啟" + (label?("："+label):"（後鏡頭）") + " · 對準條碼後按快門檢驗", "ok");
+    // 誠實化:實機尚無比例尺卡偵測 → scaleRef 標未偵測(C4.2:量測停用、仍可拍攝)
+    state.gate.scaleRef = false;
+    $("scaleNote").textContent = "⊞ 比例尺卡 未偵測 — 尺寸量測停用（不影響拍攝與分級）";
     startMetricsLoop(); // 相機就緒後開始即時影像量測(六燈號真實化;不做解碼)
   } catch (e) {
     const map = { NotAllowedError:"相機權限被拒 — 請到 iPhone 設定→Safari→相機 允許，或點網址列 ⒜A→網站設定",
