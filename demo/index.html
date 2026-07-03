@@ -237,7 +237,7 @@
   </div>
 </section>
 
-<!-- ════════ ③ 趨勢 ════════ -->
+<!-- ════════ ④ 趨勢 ════════ -->
 <section class="page" id="page-trend">
   <div class="card">
     <span class="corner-note">進階版 · 需後台</span>
@@ -290,6 +290,10 @@ import {
 } from "../dist/index.js";
 
 const $ = (id) => document.getElementById(id);
+// HTML 跳脫:輸入任意字串,輸出可安全放入 innerHTML 的字串(防使用者輸入弄壞報告版面)
+const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
+// 檔名清理:移除檔案系統不允許的字元,輸出可安全當下載檔名的字串
+const safeFileName = (s) => String(s).replace(/[\\/:*?"<>|]/g, "_");
 const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
 const STAGES = [["INLINE","產線抽檢"],["OUTBOUND","出貨檢驗"],["COMPLAINT","客訴複驗"]];
 
@@ -461,7 +465,7 @@ function renderResult() {
   $("noResult").style.display="none"; $("resultBody").style.display="block";
   const { decode, grade, measurement, diagnosis, acceptance, policy, session } = lastResult;
   $("decodeStatus").innerHTML = decode.decoded
-    ? `<span style="color:var(--ok)">✓ 成功</span> · ${session.symbology}${decode.dimension?" · "+decode.dimension:""} · ${decode.data} · 比對${decode.expectedDataMatch?"符合":"不符"}`
+    ? `<span style="color:var(--ok)">✓ 成功</span> · ${session.symbology}${decode.dimension?" · "+esc(decode.dimension):""} · ${esc(decode.data)} · 比對${decode.expectedDataMatch?"符合":"不符"}`
     : `<span style="color:var(--fail)">✗ 不可讀</span>`;
   $("gradeLetter").textContent = grade.overall;
   $("circle").style.borderColor = GC[grade.overall]; $("gradeLetter").style.color = GC[grade.overall];
@@ -609,7 +613,7 @@ function renderList() {
   else {
     $("listTable").innerHTML = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼</th><th>等級</th><th>判定</th><th>原圖</th></tr>` +
       scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td>
-        <td style="font-family:ui-monospace,monospace">${s.data}</td>
+        <td style="font-family:ui-monospace,monospace">${esc(s.data)}</td>
         <td class="gcell" style="color:${GC[s.grade]}">${s.grade}</td>
         <td class="${s.pass?"pass":"fail"}">${s.pass?"通過":"未通過"}</td>
         <td><div class="thumb">${s.svg}</div></td></tr>`).join("");
@@ -617,14 +621,15 @@ function renderList() {
   const has = scans.length>0;
   $("exportPdfBtn").disabled=!has; $("exportXlsBtn").disabled=!has;
 }
+// 輸出用表頭欄位:讀取三個輸入框,回傳「已 HTML 跳脫」的值(只供 innerHTML / XLS-HTML 場景)
 function metaFields() {
-  return { customer:$("f-customer").value.trim()||"—", product:$("f-product").value.trim()||"—", wo:$("f-workorder").value.trim()||"—" };
+  return { customer:esc($("f-customer").value.trim()||"—"), product:esc($("f-product").value.trim()||"—"), wo:esc($("f-workorder").value.trim()||"—") };
 }
 function buildPrintReport() {
   const m = metaFields(), dateStr = new Date().toLocaleString("zh-TW");
   const passCount = scans.filter(s=>s.pass).length;
   const summary = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td>
-    <td>${s.data}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.profileName}</td></tr>`).join("");
+    <td>${esc(s.data)}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${esc(s.profileName)}</td></tr>`).join("");
   const page1 = `
     <div class="rptHead"><h1>瓦楞箱條碼 / QR 品質檢驗報告</h1>
       <div style="text-align:right;font-size:12px;color:#475569">相對品質篩檢<br>${dateStr}</div></div>
@@ -642,7 +647,7 @@ function buildPrintReport() {
         <div>
           <p style="margin:0 0 8px"><b>參考等級：</b><span style="color:${GC[s.grade]};font-weight:800;font-size:20px">${s.grade}</span>
             　<b>判定：</b>${s.pass?"通過":"未通過"}（門檻 ≥ ${s.reqGrade}，margin ${s.margin.toFixed(2)}）</p>
-          <p style="margin:0 0 8px"><b>解碼：</b>${s.decoded?"成功":"不可讀"} · ${s.data}</p>
+          <p style="margin:0 0 8px"><b>解碼：</b>${s.decoded?"成功":"不可讀"} · ${esc(s.data)}</p>
           <table class="rpt"><tr><th>級</th><th>參數</th><th>分數</th></tr>
             ${s.params.map(p=>`<tr><td>${p.letter}</td><td>${p.label} (${p.code})</td><td>${p.score.toFixed(2)}</td></tr>`).join("")}</table>
           <p style="margin-top:8px"><b>診斷：</b>${s.diag.length?s.diag.join("；"):"無命中規則，品質良好"}</p>
@@ -659,10 +664,12 @@ function exportXls() {
     <tr><td>工單號</td><td>${m.wo}</td><td>掃描總數</td><td>${scans.length}</td></tr>
     <tr><td>報告時間</td><td>${dateStr}</td><td></td><td></td></tr><tr><td></td></tr>`;
   const cols = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>門檻</th><th>margin</th><th>工法/楞型</th><th>診斷</th></tr>`;
-  const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${s.data}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.reqGrade}</td><td>${s.margin.toFixed(2)}</td><td>${s.profileName}</td><td>${s.diag.join("；")}</td></tr>`).join("");
+  const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${esc(s.data)}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.reqGrade}</td><td>${s.margin.toFixed(2)}</td><td>${esc(s.profileName)}</td><td>${esc(s.diag.join("；"))}</td></tr>`).join("");
   const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1">${head}${cols}${body}</table></body></html>`;
   const blob = new Blob(["﻿"+html], { type:"application/vnd.ms-excel" });
-  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=`檢驗報告_${$("f-workorder").value.trim()||"export"}.xls`; a.click();
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+  a.download=`檢驗報告_${safeFileName($("f-workorder").value.trim())||"export"}.xls`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1000); // 下載觸發後釋放物件 URL
 }
 function clearList() { if (!scans.length) return; scans.length=0; updateScanBadge(); renderList(); }
 
@@ -689,7 +696,7 @@ $("trend-profile").addEventListener("click",(e)=>{ const c=e.target.closest(".ch
 // shutter & actions
 $("shutter").addEventListener("click", runInspection);
 $("markBtn").addEventListener("click", (e)=>{ const b=e.target; const o=b.textContent; b.textContent="✓ 已標記 "+state.processStage; setTimeout(()=>b.textContent=o,1200); });
-$("csvBtn").addEventListener("click", ()=>{ if(!lastResult) return; const blob=new Blob([toCsvRow(lastResult.session,{customer:"ACME"})],{type:"text/csv"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="inspection.csv"; a.click(); });
+$("csvBtn").addEventListener("click", ()=>{ if(!lastResult) return; const blob=new Blob([toCsvRow(lastResult.session,{customer:"ACME"})],{type:"text/csv"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="inspection.csv"; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000); });
 // list / export
 $("scanBadge").addEventListener("click", ()=>document.querySelector('[data-page=list]').click());
 $("exportPdfBtn").addEventListener("click", exportPdf);
