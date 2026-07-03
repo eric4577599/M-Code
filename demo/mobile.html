@@ -237,6 +237,10 @@ import {
   evaluateGate, runDecode, buildGradeResult, evaluateAcceptance,
   SEED_SUBSTRATE_PROFILES, SEED_ACCEPTANCE_POLICIES,
 } from "../dist/index.js";
+import {
+  toGray, varianceOfLaplacian, glareRatio, grayWorldWbDeviation, washboardAmpRatio,
+  roiPhotometric, roi1DGeometry, quadGeometry, lineAngleDeg, finderDamageProxy,
+} from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
 // HTML 跳脫:輸入任意字串,輸出可安全放入 innerHTML 的字串(防使用者輸入弄壞報告版面)
@@ -338,24 +342,77 @@ function recompute() {
   $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "六項全綠前快門鎖死，確保每次拍攝一致。";
 }
 
-// inspect (free tier: decode + relative grade + basic params; no measurement/diagnosis/csv)
+// inspect:快門入口。有相機 → 對拍到的照片做真實解碼與實測評分;無相機 → 情境模擬。
 function inspect() {
   const gate = evalGate(); if (gate.state !== "ARMED") return;
+  const photo = capturePhoto();
+  if (photo) inspectReal(photo); else inspectSim();
+}
+
+// 真實檢驗:輸入快門照片 canvas;ZXing 單次解碼 + 影像量測算分級參數(C7 proxy 實算)
+function inspectReal(photo) {
+  const w = photo.width, h = photo.height;
+  const img = photo.getContext("2d").getImageData(0, 0, w, h);
+  const gray = toGray(img.data, w, h);
+  const zx = zxDecodeCanvas(photo);
+  const sym = zx ? zx.sym : state.symbology;
+  if (zx && state.symbology !== sym) { state.symbology = sym; render(); }
+  // ROI:解碼成功 → result points 外框外擴 25%;失敗 → 取中央 70% 區域
+  let roi;
+  if (zx && zx.points.length >= 2) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of zx.points) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    const mx = Math.max(24, (x1 - x0) * 0.25), my = Math.max(24, (y1 - y0) * 0.25);
+    roi = { x0: Math.max(0, Math.floor(x0 - mx)), y0: Math.max(0, Math.floor(y0 - my)),
+            x1: Math.min(w, Math.ceil(x1 + mx)), y1: Math.min(h, Math.ceil(y1 + my)) };
+  } else {
+    roi = { x0: Math.floor(w * 0.15), y0: Math.floor(h * 0.15), x1: Math.ceil(w * 0.85), y1: Math.ceil(h * 0.85) };
+  }
+  const pm = roiPhotometric(gray, w, roi);
+  const photometric = { rLight: pm.rLight, rDark: pm.rDark, rDarkMin: pm.rDarkMin, edgeContrasts: pm.edgeContrasts };
+  let grade;
+  if (is2D(sym)) {
+    // 2D:GNU 由 finder 幾何、FPD 由暗模組反射發散 proxy;UEC 無 RS 解碼資訊,誠實省略
+    const q = zx ? quadGeometry(zx.points) : { gridDeviation: 0.5, picketAngleDeg: 0, tiltDeg: 0 };
+    grade = buildGradeResult(sym, { photometric,
+      geometric: { finderTimingDamageRatio: finderDamageProxy(gray, w, roi, pm), gridDeviation: q.gridDeviation } });
+    if (zx) { state.gate.picket = +q.picketAngleDeg.toFixed(1); state.gate.tilt = +q.tiltDeg.toFixed(1); }
+  } else {
+    // 1D:10 條掃描線的 DEC/DEF 實測;全部掃描線不可用時給最差半模組偏差
+    const g1 = roi1DGeometry(gray, w, roi);
+    grade = buildGradeResult(sym, g1.scanlines.length
+      ? g1.scanlines.map((geo) => ({ photometric, geometric: geo }))
+      : [{ photometric, geometric: { maxWidthDeviation: 0.5, tolerance: 0.5, maxElementReflectanceNonUniformity: 0.5 } }]);
+    if (g1.modulePx) state.gate.pxm = g1.modulePx;
+    if (zx) state.gate.picket = +lineAngleDeg(zx.points).toFixed(1);
+  }
+  const decoder = { decode: () => (zx ? { symbology: sym, data: zx.text } : null) };
+  const decode = runDecode(decoder, { declaredSymbology: sym, handle: {} }, { expectedGtin: zx ? zx.text : state.expected });
+  const acceptance = evaluateAcceptance(grade, policyOf());
+  // 清單縮圖/報告原圖:分析照縮成 320px 寬 jpeg
+  const tc = document.createElement("canvas");
+  tc.width = 320; tc.height = Math.round((320 * h) / w);
+  tc.getContext("2d").drawImage(photo, 0, 0, tc.width, tc.height);
+  presentResult(decode, grade, acceptance, { type: "img", data: tc.toDataURL("image/jpeg", 0.7) });
+}
+
+// 模擬檢驗(無相機):沿用示範情境設定的 gate/grade 模擬值
+function inspectSim() {
   const sym = state.symbology, g = state.grade;
-  // 3 秒內的 ZXing 即時辨識視為有效:快門當下用真實解碼結果;否則用情境模擬值
-  const live = liveScan && (Date.now() - liveScan.at < 3000) ? liveScan : null;
-  const dim = live ? undefined : (sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined);
-  const decoder = { decode:() => live
-    ? { symbology: live.sym, data: live.text }
-    : (state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null) };
-  const decode = runDecode(decoder, { declaredSymbology: live ? live.sym : sym, handle:{} }, { expectedGtin: live ? live.text : state.expected });
+  const dim = sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined;
+  const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null };
+  const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
   const photometric = { rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] };
   // 1D: N scanlines averaged. 2D: single param set, min-takes-overall (per core lib C7.3).
   const grade = is2D(sym)
     ? buildGradeResult(sym, { photometric, geometric:{ finderTimingDamageRatio:g.fpd, gridDeviation:g.gnu, usedEC:g.uecUsed, totalEC:g.uecTotal } })
     : buildGradeResult(sym, Array.from({length:10}, () => ({ photometric, geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } })));
   const acceptance = evaluateAcceptance(grade, policyOf());
+  presentResult(decode, grade, acceptance, null);
+}
 
+// 共用結果呈現:更新結果頁 DOM、存入清單(img 為 null 時退回 SVG 快照)、切頁
+function presentResult(decode, grade, acceptance, img) {
   $("decode").innerHTML = decode.decoded
     ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${esc(decode.data)}${decode.dimension?" · "+esc(decode.dimension):""}`
     : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
@@ -368,7 +425,7 @@ function inspect() {
   $("margin").textContent = "margin " + acceptance.marginScore.toFixed(2);
   $("params").innerHTML = grade.parameters.map(p =>
     `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`).join("");
-  const symLabelR = (SYMS.find(([v])=>v===sym)||[,sym])[1];
+  const symLabelR = (SYMS.find(([sv])=>sv===state.symbology)||[,state.symbology])[1];
   $("resultText").value = [
     `製程環節：${stageLabelOf(state.processStage)}`,
     `符號別：${symLabelR}`,
@@ -377,7 +434,7 @@ function inspect() {
     `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policyOf().requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
     `分級參數：${grade.parameters.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
   ].join("\n");
-  saveScan(decode, grade, acceptance);
+  saveScan(decode, grade, acceptance, img);
   show("result");
 }
 
@@ -424,8 +481,8 @@ async function initCamera(userGesture) {
     const v = $("cam"); v.srcObject = stream; await v.play().catch(()=>{});
     $("frame").classList.add("live"); camVideo = v;
     const label = (stream.getVideoTracks()[0] || {}).label || "";
-    setCamStatus("● 相機已開啟" + (label?("："+label):"（後鏡頭）") + " · 對準條碼即自動辨識", "ok");
-    startZxLoop(); // 相機就緒後開始 ZXing 即時解碼
+    setCamStatus("● 相機已開啟" + (label?("："+label):"（後鏡頭）") + " · 對準條碼後按快門檢驗", "ok");
+    startMetricsLoop(); // 相機就緒後開始即時影像量測(六燈號真實化;不做解碼)
   } catch (e) {
     const map = { NotAllowedError:"相機權限被拒 — 請到 iPhone 設定→Safari→相機 允許，或點網址列 ⒜A→網站設定",
       NotFoundError:"找不到相機", NotReadableError:"相機被其他 App 佔用（關掉相機/其他相機頁）",
@@ -449,11 +506,29 @@ function captureImage() {
 const imgMarkup = (img, fit="cover") => img.type==="img"
   ? `<img src="${img.data}" style="width:100%;height:100%;object-fit:${fit};display:block">` : img.data;
 
-// ── ZXing 真實解碼:相機開啟後每 300ms 取一幀嘗試辨識 ──
-// 輸入:相機 video 當前畫面;輸出:liveScan = { text, sym, at },並同步 state
-// (符號別自動切換、decoded/expected 帶真實字串),供快門當下取用。
-let zxReader = null, liveScan = null, zxTimer = null;
-const zxCanvas = document.createElement("canvas");
+// ── 即時影像量測:相機畫面 → 六燈號真實數值(每 500ms;不做解碼) ──
+// 輸入:相機 video 縮圖(320px);輸出:對焦 varLap、眩光%、白平衡Δ%、
+// 楞痕 ampRatio 寫回 state.gate,recompute() 讓燈號與快門閘門反映實況。
+let metricsTimer = null;
+const workCanvas = document.createElement("canvas");
+function measureFrame() {
+  const v = camVideo; if (!v || !v.videoWidth) return;
+  const w = 320, h = Math.round((320 * v.videoHeight) / v.videoWidth);
+  workCanvas.width = w; workCanvas.height = h;
+  const ctx = workCanvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(v, 0, 0, w, h);
+  const img = ctx.getImageData(0, 0, w, h);
+  const gray = toGray(img.data, w, h);
+  state.gate.varLap = Math.round(varianceOfLaplacian(gray, w, h));
+  state.gate.glare = +(glareRatio(gray) * 100).toFixed(2);        // state 存百分比
+  state.gate.wb = +(grayWorldWbDeviation(img.data) * 100).toFixed(1); // 灰界近似,百分比
+  state.gate.wash = +washboardAmpRatio(gray, w, h).toFixed(3);
+  recompute();
+}
+function startMetricsLoop() { if (!metricsTimer) metricsTimer = setInterval(measureFrame, 500); }
+
+// ── ZXing 單次解碼:只在按快門後對拍到的照片執行 ──
+let zxReader = null;
 const ZX_FORMAT_TO_SYM = { ITF:"ITF14", CODE_128:"GS1_128", QR_CODE:"QR", DATA_MATRIX:"DATAMATRIX" };
 function initZxing() {
   if (zxReader || !window.ZXing) return;
@@ -466,39 +541,40 @@ function initZxing() {
   zxReader = new ZXing.MultiFormatReader();
   zxReader.setHints(hints);
 }
-function scanFrame() {
-  const v = camVideo;
-  if (!zxReader || !v || !v.videoWidth) return;
-  const w = Math.min(800, v.videoWidth), h = Math.round(w * v.videoHeight / v.videoWidth);
-  zxCanvas.width = w; zxCanvas.height = h;
-  zxCanvas.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0, w, h);
+// 輸入:照片 canvas;輸出:{ sym, text, points } 或 null(不可讀)
+function zxDecodeCanvas(c) {
+  initZxing(); if (!zxReader) return null;
   try {
     const res = zxReader.decode(new ZXing.BinaryBitmap(
-      new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(zxCanvas))));
+      new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(c))));
     const sym = ZX_FORMAT_TO_SYM[ZXing.BarcodeFormat[res.getBarcodeFormat()]];
-    if (!sym) return;
-    liveScan = { text: res.getText(), sym, at: Date.now() };
-    if (state.symbology !== sym) { state.symbology = sym; render(); }
-    state.decoded = liveScan.text; state.expected = liveScan.text; state.canDecode = true;
-    setCamStatus(`✓ 已辨識（${sym}）：${liveScan.text.slice(0, 42)}${liveScan.text.length > 42 ? "…" : ""}`, "ok");
+    if (!sym) return null;
+    const points = (res.getResultPoints() || []).map((p) => ({ x: p.getX(), y: p.getY() }));
+    return { sym, text: res.getText(), points };
   } catch (e) {
-    // NotFoundException:這一幀沒有條碼,屬正常;維持上次狀態
+    return null; // NotFoundException 等:照片上無可讀條碼
   } finally {
     zxReader.reset();
   }
 }
-function startZxLoop() {
-  initZxing();
-  if (zxReader && !zxTimer) zxTimer = setInterval(scanFrame, 300);
+// 快門拍照:回傳分析用 canvas(≤1024px 寬),無相機時回 null
+function capturePhoto() {
+  const v = camVideo;
+  if (!(v && v.videoWidth)) return null;
+  const w = Math.min(1024, v.videoWidth), h = Math.round((w * v.videoHeight) / v.videoWidth);
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  c.getContext("2d").drawImage(v, 0, 0, w, h);
+  return c;
 }
 
-function saveScan(decode, grade, acceptance) {
+// 存入掃描清單。img:真實檢驗傳入快門照縮圖;null 時退回 captureImage()(SVG 快照)
+function saveScan(decode, grade, acceptance, img) {
   scans.push({
     n: scans.length+1, ts: new Date(), symbology: state.symbology,
     symLabel: (SYMS.find(([v])=>v===state.symbology)||[,state.symbology])[1],
     data: decode.decoded ? decode.data : "(不可讀)", decoded: decode.decoded,
     grade: grade.overall, pass: acceptance.pass, reqGrade: policyOf().requiredGrade,
-    margin: acceptance.marginScore, img: captureImage(),
+    margin: acceptance.marginScore, img: img || captureImage(),
     params: grade.parameters.map(p=>({ letter:p.letter, code:p.code, label:p.label, score:p.score })),
     profileName: (profileOf()||{}).name || "",
     stage: state.processStage, stageLabel: stageLabelOf(state.processStage),
