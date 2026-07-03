@@ -218,6 +218,10 @@
       <div id="diagnosis"></div>
     </div>
     <div class="card">
+      <h2>判定後內容（可複製）</h2>
+      <textarea id="resultText" readonly rows="9" style="width:100%;font:12px/1.6 ui-monospace,monospace;color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:11px;background:#f8fafc;resize:vertical"></textarea>
+    </div>
+    <div class="card">
       <h2>動作</h2>
       <div class="actions">
         <button onclick="document.querySelector('[data-page=capture]').click()">↻ 重拍</button>
@@ -481,6 +485,24 @@ function renderResult() {
   $("diagnosis").innerHTML = diagnosis.matched.length
     ? diagnosis.matched.map(h => `<div class="diag sev${h.severity}"><b>[${h.ruleId}] ${h.cause}</b><br>處方：${h.remedy}（severity ${h.severity}）</div>`).join("")
     : '<p class="muted">無命中規則 — 品質良好。</p>';
+  const stageLabelR = (STAGES.find(([k])=>k===session.processStage)||[,session.processStage])[1];
+  const symLabelR = (SYMS.find(([v])=>v===session.symbology)||[,session.symbology])[1];
+  const rl = [
+    `製程環節：${stageLabelR}`,
+    `符號別：${symLabelR}`,
+    `解碼：${decode.decoded ? "成功 · "+decode.data+"（比對"+(decode.expectedDataMatch?"符合":"不符")+"）" : "不可讀"}`,
+    `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
+    `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policy.requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
+    `分級參數：${grade.parameters.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
+  ];
+  if (measurement) {
+    rl.push(is2D(session.symbology)
+      ? `量測：模組 ${(measurement.moduleSizeMm??0).toFixed(3)}mm · QuietZone ${measurement.quietZoneX.toFixed(1)}X`
+      : `量測：X寬 ${measurement.xDimMm.toFixed(3)}mm · BWR ${(measurement.barWidthGainMm??0).toFixed(3)}mm · QuietZone ${measurement.quietZoneX.toFixed(1)}X`);
+    if (measurement.washboard) rl.push(`楞痕：週期 ${measurement.washboard.periodMm.toFixed(1)}mm · ${measurement.washboard.detected?"偵測到楞痕":"正常"}`);
+  }
+  rl.push(`診斷：${diagnosis.matched.length ? diagnosis.matched.map(h=>`[${h.ruleId}] ${h.cause}→${h.remedy}`).join("；") : "無命中規則，品質良好"}`);
+  $("resultText").value = rl.join("\n");
   $("csv").textContent = toCsvRow(session, { customer:"ACME" });
   $("engDump").textContent = JSON.stringify({ grade, measurement, acceptance, diagnosis }, null, 2);
 }

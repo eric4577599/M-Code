@@ -81,6 +81,10 @@
   .upsell { margin-top:16px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:12px; padding:12px; font-size:12px; color:#075985; }
   .upsell b { display:block; margin-bottom:4px; }
   .reBtn { margin-top:14px; width:100%; padding:13px; border:0; border-radius:12px; background:var(--ink); color:#fff; font-size:15px; }
+  .resultTextWrap { width:100%; margin-top:16px; text-align:left; }
+  .resultTextWrap label { font-size:12px; color:#64748b; display:block; margin-bottom:4px; }
+  .resultTextWrap textarea { width:100%; font:12px/1.6 ui-monospace,monospace; color:#0f172a; background:#f8fafc;
+    border:1px solid #e2e8f0; border-radius:10px; padding:10px; resize:vertical; }
   .saveBtn { margin-top:8px; width:100%; padding:11px; border:1px solid #cbd5e1; border-radius:12px; background:#fff; color:#0f172a; font-size:14px; }
 
   /* appbar 清單入口 */
@@ -179,6 +183,10 @@
       <div class="verdict" id="verdict"></div>
       <div class="margin" id="margin"></div>
       <div class="params" id="params"></div>
+      <div class="resultTextWrap">
+        <label>判定後內容（可複製）</label>
+        <textarea id="resultText" readonly rows="7"></textarea>
+      </div>
       <div class="upsell"><b>升級付費版可解鎖</b>完整參數報告 · 尺寸量測（X寬/BWR/Quiet Zone）· 印刷掉級診斷 · CSV 匯出 · ERP 回寫 · 趨勢監控</div>
       <button class="reBtn" id="reBtn">↻ 再拍一張</button>
     </div>
@@ -331,6 +339,15 @@ function inspect() {
   $("margin").textContent = "margin " + acceptance.marginScore.toFixed(2);
   $("params").innerHTML = grade.parameters.map(p =>
     `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`).join("");
+  const symLabelR = (SYMS.find(([v])=>v===sym)||[,sym])[1];
+  $("resultText").value = [
+    `製程環節：${stageLabelOf(state.processStage)}`,
+    `符號別：${symLabelR}`,
+    `解碼：${decode.decoded ? "成功 · "+decode.data : "不可讀（綜合崩壞）"}`,
+    `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
+    `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policyOf().requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
+    `分級參數：${grade.parameters.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
+  ].join("\n");
   saveScan(decode, grade, acceptance);
   show("result");
 }
