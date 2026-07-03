@@ -573,6 +573,7 @@ function saveScan(lr) {
     params: grade.parameters.map(p=>({ letter:p.letter, code:p.code, label:p.label, score:p.score })),
     diag: diagnosis.matched.map(h=>`[${h.ruleId}] ${h.cause}`),
     profileName: (profileOf(session.substrateProfileId)||{}).name || "", stage: session.processStage,
+    stageLabel: (STAGES.find(([k])=>k===session.processStage)||[,session.processStage])[1],
   });
   updateScanBadge(); renderList();
 }
@@ -584,8 +585,8 @@ function renderList() {
   $("listCount").textContent = `（共 ${scans.length} 筆）`;
   if (!scans.length) { $("listTable").innerHTML = `<tr><td class="muted">尚無掃描紀錄。到「① 拍攝」按檢驗即會累積。</td></tr>`; }
   else {
-    $("listTable").innerHTML = `<tr><th>#</th><th>時間</th><th>符號別</th><th>解碼</th><th>等級</th><th>判定</th><th>原圖</th></tr>` +
-      scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.symLabel}</td>
+    $("listTable").innerHTML = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼</th><th>等級</th><th>判定</th><th>原圖</th></tr>` +
+      scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td>
         <td style="font-family:ui-monospace,monospace">${s.data}</td>
         <td class="gcell" style="color:${GC[s.grade]}">${s.grade}</td>
         <td class="${s.pass?"pass":"fail"}">${s.pass?"通過":"未通過"}</td>
@@ -600,7 +601,7 @@ function metaFields() {
 function buildPrintReport() {
   const m = metaFields(), dateStr = new Date().toLocaleString("zh-TW");
   const passCount = scans.filter(s=>s.pass).length;
-  const summary = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.symLabel}</td>
+  const summary = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td>
     <td>${s.data}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.profileName}</td></tr>`).join("");
   const page1 = `
     <div class="rptHead"><h1>瓦楞箱條碼 / QR 品質檢驗報告</h1>
@@ -609,11 +610,11 @@ function buildPrintReport() {
       <div><b>客戶名稱</b>${m.customer}</div><div><b>品名</b>${m.product}</div>
       <div><b>工單號</b>${m.wo}</div><div><b>掃描總數</b>${scans.length} 筆</div>
       <div><b>判定通過</b>${passCount} / ${scans.length}</div><div><b>報告時間</b>${dateStr}</div></div>
-    <table class="rpt"><tr><th>#</th><th>時間</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>工法/楞型</th></tr>${summary}</table>
+    <table class="rpt"><tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>工法/楞型</th></tr>${summary}</table>
     <p class="rptLegal">※ 本報告為相對品質篩檢參考值，非 ISO 合規證書；合規驗證請使用具固定照明幾何之合規 verifier。</p>`;
   const details = scans.map(s=>`
     <div class="scanPage">
-      <h2 style="font-size:15px;margin:0 0 12px">掃描 #${s.n} · ${fmtTime(s.ts)} · ${s.symLabel}</h2>
+      <h2 style="font-size:15px;margin:0 0 12px">掃描 #${s.n} · ${fmtTime(s.ts)} · ${s.stageLabel} · ${s.symLabel}</h2>
       <div class="sp-grid">
         <div><div style="width:100%;height:190px">${s.svg}</div><p style="text-align:center;color:#64748b;font-size:12px;margin-top:4px">掃描原圖</p></div>
         <div>
@@ -635,8 +636,8 @@ function exportXls() {
   const head = `<tr><td>客戶名稱</td><td>${m.customer}</td><td>品名</td><td>${m.product}</td></tr>
     <tr><td>工單號</td><td>${m.wo}</td><td>掃描總數</td><td>${scans.length}</td></tr>
     <tr><td>報告時間</td><td>${dateStr}</td><td></td><td></td></tr><tr><td></td></tr>`;
-  const cols = `<tr><th>#</th><th>時間</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>門檻</th><th>margin</th><th>工法/楞型</th><th>診斷</th></tr>`;
-  const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.symLabel}</td><td>${s.data}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.reqGrade}</td><td>${s.margin.toFixed(2)}</td><td>${s.profileName}</td><td>${s.diag.join("；")}</td></tr>`).join("");
+  const cols = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>門檻</th><th>margin</th><th>工法/楞型</th><th>診斷</th></tr>`;
+  const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${s.data}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.reqGrade}</td><td>${s.margin.toFixed(2)}</td><td>${s.profileName}</td><td>${s.diag.join("；")}</td></tr>`).join("");
   const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1">${head}${cols}${body}</table></body></html>`;
   const blob = new Blob(["﻿"+html], { type:"application/vnd.ms-excel" });
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=`檢驗報告_${$("f-workorder").value.trim()||"export"}.xls`; a.click();
