@@ -76,6 +76,10 @@
   .verdict { font-size:15px; font-weight:700; margin:10px 0 4px; padding:7px 16px; border-radius:999px; }
   .verdict.pass { background:#dcfce7; color:#166534; } .verdict.fail { background:#fee2e2; color:#991b1b; }
   .margin { font-size:12px; color:#64748b; }
+  /* 判定下方的辨識文字(解碼字串)顯示框 */
+  .decodedBox { width:100%; margin-top:10px; text-align:left; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:9px 11px; }
+  .decodedBox .lbl { font-size:11px; color:#64748b; display:block; margin-bottom:2px; }
+  .decodedBox .val { font:14px/1.5 ui-monospace,monospace; color:#0f172a; word-break:break-all; }
   .params { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin:14px 0 4px; }
   .pchip { border:1px solid #e2e8f0; border-radius:8px; padding:5px 9px; font-size:12px; }
   .pchip b { font-weight:800; margin-right:4px; }
@@ -99,7 +103,15 @@
   .fld { margin-bottom:9px; } .fld label { font-size:11px; color:#64748b; display:block; margin-bottom:3px; }
   .fld input { width:100%; font:inherit; padding:8px 10px; border:1px solid #e2e8f0; border-radius:9px; }
   .scanItem { display:flex; gap:10px; align-items:center; border:1px solid #e2e8f0; border-radius:10px; padding:8px; margin:7px 0; }
-  .scanItem .th { width:64px; height:38px; flex:0 0 auto; background:#d8c19a; border:1px solid #e2e8f0; border-radius:5px; overflow:hidden; }
+  .scanItem .th { width:64px; height:38px; flex:0 0 auto; background:#d8c19a; border:1px solid #e2e8f0; border-radius:5px; overflow:hidden; cursor:zoom-in; }
+
+  /* 燈箱:點清單縮圖放大檢視,點任意處關閉 */
+  .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.88); display:none; align-items:center; justify-content:center; z-index:60; padding:18px; cursor:zoom-out; }
+  .lightbox.open { display:flex; }
+  .lightbox .lbInner { width:100%; max-width:560px; background:#fff; border-radius:12px; overflow:hidden; }
+  .lightbox .lbImg { width:100%; height:min(60vh,420px); background:#d8c19a; }
+  .lightbox .lbCap { font:12px/1.6 ui-monospace,monospace; padding:9px 12px; color:#0f172a; word-break:break-all; }
+  .lightbox .lbHint { text-align:center; color:#94a3b8; font-size:12px; margin-top:10px; }
   .scanItem .meta { flex:1; font-size:12px; min-width:0; }
   .scanItem .meta .d { font-family:ui-monospace,monospace; color:#475569; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .scanItem .g { font-weight:800; font-size:18px; } .scanItem .v { font-size:11px; }
@@ -184,6 +196,7 @@
       <div class="legal">相對值・非 ISO 合規證書<br>本工具不出具 ISO 證書，合規驗證請用合規 verifier。</div>
       <div class="verdict" id="verdict"></div>
       <div class="margin" id="margin"></div>
+      <div class="decodedBox"><span class="lbl">辨識文字（解碼結果）</span><div class="val" id="decodedText">–</div></div>
       <div class="params" id="params"></div>
       <div class="resultTextWrap">
         <label>判定後內容（可複製）</label>
@@ -210,6 +223,9 @@
     </div>
   </div>
 </div>
+
+<!-- 燈箱:點清單縮圖放大 -->
+<div class="lightbox" id="lightbox"></div>
 
 <!-- 列印報告(輸出 PDF 用),置於 .phone 之外 -->
 <div id="printReport"></div>
@@ -337,6 +353,7 @@ function inspect() {
   $("decode").innerHTML = decode.decoded
     ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${esc(decode.data)}${decode.dimension?" · "+esc(decode.dimension):""}`
     : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
+  $("decodedText").textContent = decode.decoded ? decode.data : "（不可讀，無辨識文字）";
   $("letter").textContent = grade.overall;
   $("circle").style.borderColor = GC[grade.overall]; $("letter").style.color = GC[grade.overall];
   const v = $("verdict");
@@ -442,7 +459,7 @@ function updateBadge() { const b=$("listBadge"); b.textContent=`清單 ${scans.l
 function renderList() {
   $("f-total").value = String(scans.length);
   $("listItems").innerHTML = scans.length
-    ? scans.map(s=>`<div class="scanItem"><div class="th">${imgMarkup(s.img)}</div>
+    ? scans.map((s,i)=>`<div class="scanItem"><div class="th" data-zoom="${i}">${imgMarkup(s.img)}</div>
         <div class="meta">#${s.n} · ${fmtTime(s.ts)} · <b>${s.stageLabel}</b> · ${s.symLabel}<div class="d">${esc(s.data)}</div></div>
         <div style="text-align:center"><div class="g" style="color:${GC[s.grade]}">${s.grade}</div>
           <div class="v" style="color:${s.pass?'#166534':'#991b1b'}">${s.pass?'通過':'未通過'}</div></div></div>`).join("")
@@ -487,6 +504,21 @@ function exportXls() {
   setTimeout(()=>URL.revokeObjectURL(a.href), 1000); // 下載觸發後釋放物件 URL
 }
 function clearList() { if(!scans.length) return; scans.length=0; updateBadge(); renderList(); }
+
+// ── 燈箱:輸入清單索引,放大顯示該筆掃描原圖與摘要;點任意處關閉 ──
+function openLightbox(i) {
+  const s = scans[i]; if (!s) return;
+  $("lightbox").innerHTML = `<div class="lbInner">
+      <div class="lbImg">${imgMarkup(s.img, "contain")}</div>
+      <div class="lbCap">#${s.n} · ${fmtTime(s.ts)} · ${s.stageLabel} · ${s.symLabel} · <b style="color:${GC[s.grade]}">${s.grade}</b> ${s.pass?"通過":"未通過"}<br>${esc(s.data)}</div>
+    </div><div class="lbHint" style="position:absolute;bottom:16px;left:0;right:0">點任意處關閉</div>`;
+  $("lightbox").classList.add("open");
+}
+$("lightbox").onclick = () => $("lightbox").classList.remove("open");
+$("listItems").addEventListener("click", (e) => {
+  const th = e.target.closest("[data-zoom]");
+  if (th) openLightbox(+th.dataset.zoom);
+});
 
 // view switch
 function show(v) { document.querySelectorAll(".view").forEach(x=>x.classList.remove("active")); $("v-"+v).classList.add("active"); }

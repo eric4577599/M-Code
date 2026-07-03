@@ -112,7 +112,14 @@
   .btn-primary { background:var(--ink); color:#fff; border:0; border-radius:8px; padding:10px 18px; font-size:14px; font-weight:600; cursor:pointer; margin-right:8px; }
   .btn-primary:disabled { background:#cbd5e1; cursor:not-allowed; }
   .btn-ghost { background:#fff; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:10px 16px; font-size:14px; cursor:pointer; }
-  .thumb { width:120px; height:64px; object-fit:contain; background:#d8c19a; border:1px solid var(--line); border-radius:6px; }
+  .thumb { width:120px; height:64px; object-fit:contain; background:#d8c19a; border:1px solid var(--line); border-radius:6px; cursor:zoom-in; }
+
+  /* 燈箱:點清單縮圖放大檢視,點任意處關閉 */
+  .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.88); display:none; align-items:center; justify-content:center; z-index:60; padding:24px; cursor:zoom-out; }
+  .lightbox.open { display:flex; }
+  .lightbox .lbInner { width:100%; max-width:640px; background:#fff; border-radius:12px; overflow:hidden; }
+  .lightbox .lbImg { width:100%; height:min(60vh,460px); background:#d8c19a; }
+  .lightbox .lbCap { font:12px/1.6 ui-monospace,monospace; padding:10px 14px; color:#0f172a; word-break:break-all; }
 
   /* ── print report (PDF via 瀏覽器列印 / 另存 PDF) ── */
   #printReport { display:none; }
@@ -277,6 +284,9 @@
     <p class="muted" style="margin-top:8px">每按一次「檢驗」即自動存入本清單。PDF 首頁為表頭與判定清單，次頁起為每次掃描原圖與判定結果。</p>
   </div>
 </section>
+
+<!-- 燈箱:點清單縮圖放大 -->
+<div class="lightbox" id="lightbox"></div>
 
 <!-- 隱藏的列印報告：輸出 PDF 時 window.print() -->
 <div id="printReport"></div>
@@ -612,11 +622,11 @@ function renderList() {
   if (!scans.length) { $("listTable").innerHTML = `<tr><td class="muted">尚無掃描紀錄。到「① 拍攝」按檢驗即會累積。</td></tr>`; }
   else {
     $("listTable").innerHTML = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼</th><th>等級</th><th>判定</th><th>原圖</th></tr>` +
-      scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td>
+      scans.map((s,i)=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td>
         <td style="font-family:ui-monospace,monospace">${esc(s.data)}</td>
         <td class="gcell" style="color:${GC[s.grade]}">${s.grade}</td>
         <td class="${s.pass?"pass":"fail"}">${s.pass?"通過":"未通過"}</td>
-        <td><div class="thumb">${s.svg}</div></td></tr>`).join("");
+        <td><div class="thumb" data-zoom="${i}" title="點擊放大">${s.svg}</div></td></tr>`).join("");
   }
   const has = scans.length>0;
   $("exportPdfBtn").disabled=!has; $("exportXlsBtn").disabled=!has;
@@ -672,6 +682,21 @@ function exportXls() {
   setTimeout(()=>URL.revokeObjectURL(a.href), 1000); // 下載觸發後釋放物件 URL
 }
 function clearList() { if (!scans.length) return; scans.length=0; updateScanBadge(); renderList(); }
+
+// ── 燈箱:輸入清單索引,放大顯示該筆掃描原圖與摘要;點任意處關閉 ──
+function openLightbox(i) {
+  const s = scans[i]; if (!s) return;
+  $("lightbox").innerHTML = `<div class="lbInner">
+      <div class="lbImg">${s.svg}</div>
+      <div class="lbCap">#${s.n} · ${fmtTime(s.ts)} · ${s.stageLabel} · ${s.symLabel} · <b style="color:${GC[s.grade]}">${s.grade}</b> ${s.pass?"通過":"未通過"}<br>${esc(s.data)}</div>
+    </div>`;
+  $("lightbox").classList.add("open");
+}
+$("lightbox").addEventListener("click", () => $("lightbox").classList.remove("open"));
+$("listTable").addEventListener("click", (e) => {
+  const th = e.target.closest("[data-zoom]");
+  if (th) openLightbox(+th.dataset.zoom);
+});
 
 // ───────────────────────── wiring ─────────────────────────
 // tabs
