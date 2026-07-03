@@ -22,14 +22,23 @@ import type { Measurement, ScaleReference, Washboard } from "../domain/types.js"
  */
 export const WASHBOARD_AMP_RATIO_FLOOR = 0.08;
 
-/** Pixels per millimetre from a resolved scale reference (C6). */
+/**
+ * 每毫米像素數(C6)。輸入:已解析的比例尺;輸出:px/mm。
+ * 退化輸入防護:resolvedPx 或 nominalMm ≤0 時回 0(與 quietZoneX 同慣例),
+ * 避免 Infinity/NaN 流入下游量測與 CSV。
+ */
 export function pxPerMm(scale: ScaleReference): number {
+  if (scale.resolvedPx <= 0 || scale.nominalMm <= 0) return 0;
   return scale.resolvedPx / scale.nominalMm;
 }
 
-/** Ground sample distance in mm/px — the inverse of pxPerMm (C6 / D5). */
+/**
+ * 地面取樣距離 mm/px(C6 / D5)— pxPerMm 的倒數。
+ * 比例尺退化(pxPerMm=0)時回 0,連帶 xDimMm / moduleSizeMm 輸出 0 而非 NaN。
+ */
 export function gsd(scale: ScaleReference): number {
-  return 1 / pxPerMm(scale);
+  const p = pxPerMm(scale);
+  return p > 0 ? 1 / p : 0;
 }
 
 /**

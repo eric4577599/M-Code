@@ -100,12 +100,12 @@ function classifyScaleRef(detected: boolean): GateCheck {
 }
 
 function classifyPicket(angleDeg: number): GateCheck {
-  // ≤10° OK, 10–25° WARN (no FAIL band per C4.2).
+  // ≤10° OK,>10° 一律 WARN(C4.2 未定義 FAIL 帶,>25° 也只是 WARN)。
   return check(
     "picket",
     angleDeg <= 10 ? "OK" : "WARN",
     angleDeg,
-    "<=10 OK, 10-25 WARN",
+    "<=10 OK, >10 WARN (no FAIL band per C4.2)",
   );
 }
 

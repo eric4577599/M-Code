@@ -204,6 +204,22 @@ describe("buildGradeResult — 2D min-takes-overall (C7.3)", () => {
   });
 });
 
+describe("buildGradeResult — 空輸入防護", () => {
+  it("1D 空掃描線陣列 → F(0 分)、parameters 空,不擲例外", () => {
+    const r = buildGradeResult("ITF14", []);
+    expect(r.overall).toBe("F");
+    expect(r.overallScore).toBe(0);
+    expect(r.parameters).toEqual([]);
+  });
+
+  it("2D 空陣列 → F(0 分),與 1D 對稱(舊版對此會 TypeError)", () => {
+    const r = buildGradeResult("QR", []);
+    expect(r.overall).toBe("F");
+    expect(r.overallScore).toBe(0);
+    expect(r.parameters).toEqual([]);
+  });
+});
+
 describe("marginScore (C7.3)", () => {
   it("subtracts the required grade's band-cut score (C9.3 worked example)", () => {
     // requiredScore 取帶下界:C→1.5、B→2.5。C9.3 實例:1.8、門檻 C → +0.3。

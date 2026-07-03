@@ -67,7 +67,7 @@ describe("scaleRef (detected OK else FAIL)", () => {
   it("FAIL when not detected", () => expect(sr(false)).toBe("FAIL"));
 });
 
-describe("picket (<=10 OK, 10-25 WARN)", () => {
+describe("picket (<=10 OK, >10 WARN — C4.2 無 FAIL 帶)", () => {
   const p = (v: number) =>
     statusOf(classifyChecks({ ...PASS, picketAngleDeg: v }), "picket");
   it("OK at 10", () => expect(p(10)).toBe("OK"));

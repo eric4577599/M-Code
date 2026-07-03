@@ -73,9 +73,16 @@ export function normalizeGtin14(raw: string): string {
   return digits.padStart(14, "0");
 }
 
-/** True when two GTIN strings are equal after GTIN-14 normalization. */
+/**
+ * 兩個 GTIN 字串正規化後是否相等。
+ * 任一邊正規化後不含任何數字(空字串)即回 false —— 「無數字 vs 無數字」
+ * 不構成有意義的 GTIN 相符,避免亂碼互比誤判 true。
+ */
 export function gtinMatches(a: string, b: string): boolean {
-  return normalizeGtin14(a) === normalizeGtin14(b);
+  const na = normalizeGtin14(a);
+  const nb = normalizeGtin14(b);
+  if (na.length === 0 || nb.length === 0) return false;
+  return na === nb;
 }
 
 /**

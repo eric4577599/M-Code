@@ -227,10 +227,15 @@ export function buildGradeResult(
   symbology: Symbology,
   input: ProxyInputs | ScanlineInputs,
 ): GradeResult {
+  // 空陣列輸入(無任何掃描線/參數集)一律回 F(0 分)、parameters 空陣列:
+  // 1D 與 2D 行為對稱,不擲例外(舊 2D 路徑對空陣列會 TypeError 崩潰)。
+  if (Array.isArray(input) && input.length === 0) {
+    return { overall: "F", overallScore: 0, isRelative: true, parameters: [] };
+  }
+
   if (is1D(symbology)) {
     const scanlines: ScanlineInputs = Array.isArray(input) ? input : [input];
-    const effective = scanlines.length > 0 ? scanlines : [];
-    const perScanline = effective.map((s) => computeParameters(s));
+    const perScanline = scanlines.map((s) => computeParameters(s));
     const scanlineOveralls = perScanline.map((params) =>
       minimum(params.map((p) => p.score)),
     );

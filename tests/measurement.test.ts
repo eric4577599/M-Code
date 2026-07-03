@@ -31,6 +31,18 @@ describe("scale calibration (C6)", () => {
     const mm = px * gsd(card);
     expect(mm * pxPerMm(card)).toBeCloseTo(px, 10);
   });
+
+  it("退化比例尺(resolvedPx/nominalMm ≤ 0)回 0,不產生 Infinity/NaN", () => {
+    const zeroPx: ScaleReference = { type: "CARD", nominalMm: 26.0, resolvedPx: 0 };
+    const zeroMm: ScaleReference = { type: "CARD", nominalMm: 0, resolvedPx: 200 };
+    expect(pxPerMm(zeroPx)).toBe(0);
+    expect(gsd(zeroPx)).toBe(0);
+    expect(pxPerMm(zeroMm)).toBe(0);
+    expect(gsd(zeroMm)).toBe(0);
+    expect(xDimMm(11, zeroPx)).toBe(0); // 0 而非 NaN,CSV 不會出現 "NaN"
+    expect(moduleSizeMm(11, zeroPx)).toBe(0);
+    expect(Number.isFinite(xDimMm(0, zeroPx))).toBe(true);
+  });
 });
 
 describe("xDimMm from pixels (C6)", () => {

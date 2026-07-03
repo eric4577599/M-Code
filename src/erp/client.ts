@@ -143,7 +143,8 @@ const INSPECTION_PATH = "/api/v1/inspections";
 /** Refresh a little before nominal expiry so an in-flight request never 401s. */
 const EXPIRY_SKEW_MS = 30_000;
 
-function isFormUrlEncoded(value: unknown): value is OAuthTokenResponse {
+// OAuth token 回應的型別守衛:輸入任意值,輸出是否為合法 OAuthTokenResponse
+function isOAuthTokenResponse(value: unknown): value is OAuthTokenResponse {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -185,7 +186,7 @@ export class ErpClient {
       body: form,
     });
 
-    if (res.status < 200 || res.status >= 300 || !isFormUrlEncoded(res.body)) {
+    if (res.status < 200 || res.status >= 300 || !isOAuthTokenResponse(res.body)) {
       throw new ErpHttpError(res.status, res.body);
     }
 
@@ -203,6 +204,14 @@ export class ErpClient {
     return { Authorization: `Bearer ${token}`, ...extra };
   }
 
+  /**
+   * 收到 401 時清除 token 快取:伺服器可能提前撤銷 token(C11「OAuth 失效重取」),
+   * 清掉後下一次呼叫會重新取 token,不必等名目 expires_in 走完。
+   */
+  private invalidateTokenOn401(status: number): void {
+    if (status === 401) this.cached = undefined;
+  }
+
   /** C9.2 — GET a work order with its acceptance thresholds. */
   async getWorkOrder(id: string): Promise<WorkOrder> {
     const res = await this.transport.request(
@@ -211,6 +220,7 @@ export class ErpClient {
       { headers: await this.authHeaders() },
     );
     if (res.status < 200 || res.status >= 300) {
+      this.invalidateTokenOn401(res.status);
       throw new ErpHttpError(res.status, res.body);
     }
     return res.body as WorkOrder;
@@ -224,13 +234,15 @@ export class ErpClient {
     body: InspectionPostBody,
     idempotencyKey: string,
   ): Promise<TransportResponse> {
-    return this.transport.request("POST", INSPECTION_PATH, {
+    const res = await this.transport.request("POST", INSPECTION_PATH, {
       headers: await this.authHeaders({
         "Content-Type": "application/json",
         "Idempotency-Key": idempotencyKey,
       }),
       body: JSON.stringify(body),
     });
+    this.invalidateTokenOn401(res.status);
+    return res;
   }
 
   /**
@@ -249,11 +261,22 @@ export class ErpClient {
     return results;
   }
 
+  /**
+   * 同步單筆佇列項目。輸入:佇列項目;輸出:C9.5 outcome。
+   * - 2xx → SYNCED;401 → QUEUED(token 可能被撤銷,快取已清,下次帶新 token 重試);
+   *   其餘 4xx → FAILED(客戶端錯誤,不重試);5xx/網路錯誤 → QUEUED。
+   * - getToken() 擲出的 4xx(如 client_secret 錯)屬永久性憑證錯誤 → FAILED,
+   *   避免整個佇列無限期滯留重送。
+   */
   private async syncOne(item: QueuedInspection): Promise<QueueItemResult> {
     let res: TransportResponse;
     try {
       res = await this.postInspection(item.body, item.id);
     } catch (err) {
+      if (err instanceof ErpHttpError && err.status >= 400 && err.status < 500) {
+        // 取 token 就 4xx:憑證/請求本身錯,重試也不會好 → FAILED。
+        return { id: item.id, outcome: "FAILED", reason: err.message };
+      }
       // Network failure / timeout → transient → keep QUEUED.
       const reason = err instanceof Error ? err.message : String(err);
       return { id: item.id, outcome: "QUEUED", reason };
@@ -268,6 +291,11 @@ export class ErpClient {
           ? (body as InspectionPostResult).inspectionId
           : undefined;
       return { id: item.id, outcome: "SYNCED", inspectionId };
+    }
+    if (status === 401) {
+      // token 遭提前撤銷:postInspection 已清快取,保留 QUEUED 待下次以新 token 重試;
+      // 若憑證真的失效,下次 getToken() 會 4xx → 走上面的 FAILED 路徑收斂。
+      return { id: item.id, outcome: "QUEUED", reason: `HTTP ${status}` };
     }
     if (status >= 400 && status < 500) {
       return {

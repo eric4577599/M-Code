@@ -34,6 +34,12 @@ describe("normalizeGtin14 / gtinMatches", () => {
   it("reports a real mismatch", () => {
     expect(gtinMatches("04012345678901", "04012345678999")).toBe(false);
   });
+  it("任一邊無數字即不相符(空對空不算 GTIN 相符)", () => {
+    expect(gtinMatches("", "")).toBe(false);
+    expect(gtinMatches("abc", "xyz")).toBe(false);
+    expect(gtinMatches("---", "(01)")).toBe(false);
+    expect(gtinMatches("", "04012345678901")).toBe(false);
+  });
 });
 
 describe("runDecode — success path", () => {

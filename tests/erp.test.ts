@@ -227,3 +227,42 @@ describe("processQueue (C9.5) — transitions + idempotency", () => {
     expect(postKeys).toEqual(["q-2xx", "q-4xx", "q-5xx", "q-timeout"]);
   });
 });
+
+describe("auth 失敗處理(C11 OAuth 失效重取 / 憑證永久錯誤)", () => {
+  it("憑證錯誤(getToken 4xx)→ 佇列項目 FAILED,不無限期滯留重送", async () => {
+    // 每次取 token 都 401(如 client_secret 錯)——永久性錯誤
+    const fake = new FakeTransport((_m, path) =>
+      path === "/oauth/token"
+        ? { status: 401, body: { error: "invalid_client" } }
+        : { status: 500, body: undefined },
+    );
+    const client = new ErpClient(conn, fake, () => 0);
+    const results = await client.processQueue([{ id: "q1", body: makeBody() }]);
+    expect(results[0]?.outcome).toBe("FAILED");
+    expect(results[0]?.reason).toContain("401");
+  });
+
+  it("POST 收到 401 → 清 token 快取、保留 QUEUED,下次以新 token 重試成功", async () => {
+    // 第一次 POST 401(token 遭提前撤銷),第二次 POST 201
+    let postCount = 0;
+    const fake = new FakeTransport((_m, path) => {
+      if (path === "/oauth/token") return tokenOk();
+      postCount += 1;
+      return postCount === 1
+        ? { status: 401, body: undefined }
+        : { status: 201, body: { inspectionId: "INSP-1" } };
+    });
+    const client = new ErpClient(conn, fake, () => 0);
+
+    const first = await client.processQueue([{ id: "q1", body: makeBody() }]);
+    expect(first[0]?.outcome).toBe("QUEUED"); // 401 不判 FAILED,等新 token 重試
+
+    const second = await client.processQueue([{ id: "q1", body: makeBody() }]);
+    expect(second[0]?.outcome).toBe("SYNCED");
+    expect(second[0]?.inspectionId).toBe("INSP-1");
+
+    // 快取已清:token 端點被要求了兩次(而非沿用第一次的快取)
+    const tokenCalls = fake.calls.filter((c) => c.path === "/oauth/token");
+    expect(tokenCalls).toHaveLength(2);
+  });
+});

@@ -1,6 +1,8 @@
 // CSV export — spec §C9.4. Maps an InspectionSession to the exact ordered
 // column list and renders RFC-4180-style CSV (quote fields containing
 // comma / quote / newline; double internal quotes).
+// 行尾刻意用 LF(\n)而非 RFC 4180 名義上的 CRLF:現代 Excel/試算表皆接受 LF,
+// 且避免跨平台 diff 噪音;若客戶端強制要求 CRLF,於呼叫端替換即可。
 
 import type { InspectionSession } from "../domain/types.js";
 
