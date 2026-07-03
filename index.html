@@ -2,11 +2,22 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="refresh" content="0; url=./demo/index.html" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>瓦楞箱條碼 / QR 品質檢驗</title>
-<script>location.replace("./demo/index.html");</script>
+<script>
+  // 裝置偵測:手機 → 手機版掃描頁;桌面 → 桌面版掃描頁。
+  (function () {
+    var ua = navigator.userAgent || "";
+    var isMobile = /Android|iPhone|iPad|iPod|Mobile|Windows Phone|webOS|BlackBerry|Opera Mini|IEMobile/i.test(ua)
+      || (window.matchMedia && window.matchMedia("(max-width: 768px)").matches);
+    location.replace(isMobile ? "./demo/mobile.html" : "./demo/index.html");
+  })();
+</script>
+<meta http-equiv="refresh" content="0; url=./demo/index.html" />
 </head>
 <body>
-<p>導向掃描頁… <a href="./demo/index.html">若未自動跳轉請點此</a></p>
+<p>導向掃描頁…
+  <a href="./demo/index.html">桌面版</a> ·
+  <a href="./demo/mobile.html">手機版</a></p>
 </body>
 </html>

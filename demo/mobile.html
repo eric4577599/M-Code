@@ -116,6 +116,13 @@
     #printReport { display:block !important; color:#0f172a; }
     @page { margin:14mm; }
   }
+
+  /* 真手機:去掉「手機框中框」,填滿螢幕、隱藏假狀態列 */
+  @media (max-width: 500px) {
+    body { padding:0; background:#0b1220; }
+    .phone { width:100%; max-width:100%; min-height:100vh; border:0; border-radius:0; box-shadow:none; }
+    .statusbar { display:none; }
+  }
 </style>
 </head>
 <body>
