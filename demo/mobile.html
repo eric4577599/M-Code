@@ -47,6 +47,8 @@
   .bars { width:78%; height:64px; background:#d8c19a; border:3px solid #2a1c0a; border-left-width:6px; border-right-width:6px;
     background-image:repeating-linear-gradient(90deg,#1a120a 0 3px,transparent 3px 6px,#1a120a 6px 8px,transparent 8px 13px); }
   .scaleNote { color:#7dd3fc; font:11px ui-monospace,monospace; margin-top:8px; }
+  .camStatus { font:11px ui-monospace,monospace; margin-top:4px; color:#94a3b8; }
+  .camStatus.ok { color:#4ade80; } .camStatus.warn { color:#fbbf24; }
 
   /* lights */
   .lights { display:grid; grid-template-columns:1fr 1fr 1fr; gap:7px; padding:4px 14px 0; }
@@ -157,6 +159,7 @@
         <div class="beam" id="beam"></div><div id="symbolMock"></div>
       </div>
       <div class="scaleNote">⊞ 比例尺卡 已偵測 · 基準 26.0 mm</div>
+      <div class="camStatus" id="camStatus">開啟相機中…</div>
     </div>
 
     <div class="lights" id="lights"></div>
@@ -384,13 +387,24 @@ const stageLabelOf = (v) => (STAGES.find(([k])=>k===v)||[,v])[1];
 
 // ── 相機:進入網頁自動開啟後鏡頭;無相機/未授權則保留 mock 條碼 ──
 let camVideo = null;
-async function initCamera() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+function setCamStatus(txt, cls) { const el=$("camStatus"); if(el){ el.textContent=txt; el.className="camStatus "+(cls||""); } }
+async function initCamera(userGesture) {
+  if (camVideo) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setCamStatus("此瀏覽器不支援相機，顯示示意條碼", "warn"); return; }
+  if (!window.isSecureContext) { setCamStatus("需 HTTPS 才能開相機", "warn"); return; }
   try {
+    setCamStatus("開啟相機中…", "");
     const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ ideal:"environment" } }, audio:false });
     const v = $("cam"); v.srcObject = stream; await v.play().catch(()=>{});
     $("frame").classList.add("live"); camVideo = v;
-  } catch (e) { /* 保留 mock 條碼 */ }
+    const label = (stream.getVideoTracks()[0] || {}).label || "";
+    setCamStatus("● 相機已開啟" + (label?("："+label):"（後鏡頭）"), "ok");
+  } catch (e) {
+    const map = { NotAllowedError:"相機權限被拒 — 請到 iPhone 設定→Safari→相機 允許，或點網址列 ⒜A→網站設定",
+      NotFoundError:"找不到相機", NotReadableError:"相機被其他 App 佔用（關掉相機/其他相機頁）",
+      SecurityError:"安全性限制（需 HTTPS）", OverconstrainedError:"無符合的後鏡頭", AbortError:"開啟中斷" };
+    setCamStatus((map[e.name] || ("相機開啟失敗："+e.name)) + (userGesture?"":" ·點畫面重試"), "warn");
+  }
 }
 // 擷取當下畫面作為「掃描原圖」:有相機取實拍 jpeg,否則用 SVG 快照
 function captureImage() {
@@ -481,9 +495,9 @@ $("clearListBtn").onclick = clearList;
 
 // init
 initSelectors(); renderHud(); recompute(); updateBadge(); renderList();
-// 進入網頁自動開啟相機;iOS 若要求手勢,首次點擊再補試一次
-initCamera();
-document.addEventListener("click", function once(){ if(!camVideo){ initCamera(); } document.removeEventListener("click", once); }, { once:true });
+// 進入網頁自動開啟相機;iOS 若要求手勢,點畫面時再補試(直到成功)
+initCamera(false);
+document.addEventListener("click", () => { if (!camVideo) initCamera(true); });
 </script>
 </body>
 </html>
