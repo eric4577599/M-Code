@@ -18,7 +18,7 @@ function makeSession(over: Partial<InspectionSession> = {}): InspectionSession {
     workOrderId: "WO-42",
     substrateProfileId: "prof-C",
     symbology: "ITF14",
-    capture: { passedAll: true, gsdMmPerPx: 0.05, pxPerModule: 8, checks: [] },
+    capture: { passedAll: true, measurementEnabled: true, gsdMmPerPx: 0.05, pxPerModule: 8, checks: [] },
     decode: {
       decoded: true,
       symbology: "ITF14",
@@ -124,6 +124,31 @@ describe("toCsvRow", () => {
     );
     expect(row).toContain('"a,b""c\nd"');
     expect(row).toContain('"Smith, Inc"');
+  });
+
+  it("中和公式注入:字串欄位以 = + - @ 開頭時前置單引號", () => {
+    // decoded_data 來自掃到的條碼內容,屬外部輸入(惡意 QR 可載入任意字串)
+    const row = toCsvRow(
+      makeSession({ decode: { decoded: true, symbology: "QR", data: "=2+5+cmd" } }),
+      { customer: "@SUM(1+9)" },
+    );
+    const cells = row.split(",");
+    expect(cells[8]).toBe("'=2+5+cmd"); // decoded_data 已中和
+    expect(cells[6]).toBe("'@SUM(1+9)"); // customer 已中和
+    // 含引號/逗號的注入字串:先中和再做 RFC-4180 包裹
+    const quoted = toCsvRow(
+      makeSession({ decode: { decoded: true, symbology: "QR", data: '=HYPERLINK("http://evil",1)' } }),
+    );
+    expect(quoted).toContain("\"'=HYPERLINK(\"\"http://evil\"\",1)\"");
+  });
+
+  it("公式注入中和不影響數字欄位(負 margin 仍為合法數字)", () => {
+    const row = toCsvRow(
+      makeSession({
+        acceptance: { policyId: "pol-1", requiredGrade: "C", pass: false, marginScore: -0.3 },
+      }),
+    );
+    expect(row.split(",")[14]).toBe("-0.3"); // 數字型不前置單引號
   });
 
   it("清除浮點表示誤差,不改動合理數值", () => {

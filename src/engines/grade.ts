@@ -13,7 +13,7 @@ import type {
   ParameterKind,
   Symbology,
 } from "../domain/types.js";
-import { letterToNominalScore, scoreToLetter } from "../domain/scale.js";
+import { letterToBandCut, scoreToLetter } from "../domain/scale.js";
 
 /** Clamp a value into [lo, hi]. */
 function clamp(v: number, lo: number, hi: number): number {
@@ -258,13 +258,15 @@ export function buildGradeResult(
 }
 
 /**
- * marginScore = overallScore − requiredScore (C7.3), where requiredScore is
- * the nominal score of the required grade band (scale.js). Positive ⇒ passing
- * margin; used for acceptance, pre-warning and trend monitoring.
+ * marginScore = overallScore − requiredScore(C7.3)。
+ * 輸入:總分(0–4)與門檻字母;輸出:帶正負號的餘裕分數。
+ * requiredScore 取門檻字母的「帶下界」(scale.js letterToBandCut),
+ * 使 margin ≥ 0 ⟺ 字母 ≥ 門檻(與允收 pass 一致),並符合 C9.3 實例
+ * (score 1.8、門檻 C → +0.3)。供允收、預警與趨勢監控使用。
  */
 export function marginScore(
   overallScore: number,
   requiredGrade: GradeLetter,
 ): number {
-  return overallScore - letterToNominalScore(requiredGrade);
+  return overallScore - letterToBandCut(requiredGrade);
 }

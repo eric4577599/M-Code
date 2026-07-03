@@ -16,6 +16,8 @@ export interface GateCheck {
 }
 export interface CaptureQualityReport {
   passedAll: boolean;
+  /** C4.2:scaleRef 偵測到才可量測;false 時量測停用、僅解碼/分級。 */
+  measurementEnabled: boolean;
   gsdMmPerPx: number;
   pxPerModule: number;
   checks: GateCheck[];

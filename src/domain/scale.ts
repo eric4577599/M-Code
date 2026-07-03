@@ -36,6 +36,17 @@ export function letterToNominalScore(letter: GradeLetter): number {
   return LETTER_NOMINAL_SCORE[letter];
 }
 
+/**
+ * 字母帶下界分數(C7.3 band cut)。
+ * 輸入:等級字母;輸出:該字母帶的下界分數(A=3.5, B=2.5, C=1.5, D=0.5, F=0)。
+ * marginScore 的 requiredScore 用此值,使 margin ≥ 0 ⟺ 字母 ≥ 門檻,
+ * 與 C9.3 實例一致(score 1.8、門檻 C → margin +0.3)。
+ */
+export function letterToBandCut(letter: GradeLetter): number {
+  const entry = GRADE_BAND_CUTS.find(([l]) => l === letter);
+  return entry ? entry[1] : 0;
+}
+
 /** Higher grade letter wins. A is best, F worst. */
 export function isAtLeast(actual: GradeLetter, required: GradeLetter): boolean {
   return LETTER_NOMINAL_SCORE[actual] >= LETTER_NOMINAL_SCORE[required];

@@ -27,19 +27,20 @@ describe("evaluateAcceptance", () => {
   it("passes when grade exceeds requirement (B ≥ C, spec B3 example)", () => {
     const result = evaluateAcceptance(grade("B", 2.7), policy("C"));
     expect(result.pass).toBe(true);
-    // marginScore = 2.7 − nominal(C)=2 → +0.7
-    expect(result.marginScore).toBeCloseTo(0.7, 10);
+    // marginScore = 2.7 − bandCut(C)=1.5 → +1.2
+    expect(result.marginScore).toBeCloseTo(1.2, 10);
     expect(result.marginScore).toBeGreaterThan(0);
   });
 
-  it("matches the C9.3 worked example (required C, marginScore 0.3)", () => {
-    const result = evaluateAcceptance(grade("C", 2.3), policy("C"));
+  it("matches the C9.3 worked example (score 1.8, required C → pass, marginScore +0.3)", () => {
+    // 規格 C9.3 實例原文:score 1.8、requiredGrade C、pass true、marginScore 0.3
+    const result = evaluateAcceptance(grade("C", 1.8), policy("C"));
     expect(result.pass).toBe(true);
     expect(result.marginScore).toBeCloseTo(0.3, 10);
   });
 
-  it("passes on exact-equal nominal score (zero margin)", () => {
-    const result = evaluateAcceptance(grade("C", 2.0), policy("C"));
+  it("passes with zero margin exactly at the band cut (C = 1.5)", () => {
+    const result = evaluateAcceptance(grade("C", 1.5), policy("C"));
     expect(result.pass).toBe(true);
     expect(result.marginScore).toBeCloseTo(0, 10);
   });
@@ -47,15 +48,25 @@ describe("evaluateAcceptance", () => {
   it("fails when grade is below requirement (D < C) with negative margin", () => {
     const result = evaluateAcceptance(grade("D", 1.2), policy("C"));
     expect(result.pass).toBe(false);
-    // marginScore = 1.2 − 2 → −0.8
-    expect(result.marginScore).toBeCloseTo(-0.8, 10);
+    // marginScore = 1.2 − 1.5 → −0.3
+    expect(result.marginScore).toBeCloseTo(-0.3, 10);
     expect(result.marginScore).toBeLessThan(0);
   });
 
   it("fails GS1-128-style stricter requirement (C < B)", () => {
     const result = evaluateAcceptance(grade("C", 2.4), policy("B", "gs1"));
     expect(result.pass).toBe(false);
-    expect(result.marginScore).toBeCloseTo(-0.6, 10);
+    expect(result.marginScore).toBeCloseTo(-0.1, 10);
+  });
+
+  it("pass and margin sign always agree (margin ≥ 0 ⟺ pass)", () => {
+    // 修正前用名目分(C=2)當 requiredScore,1.5–2.0 區間會 pass 但 margin<0
+    const passing = evaluateAcceptance(grade("C", 1.8), policy("C"));
+    expect(passing.pass).toBe(true);
+    expect(passing.marginScore).toBeGreaterThanOrEqual(0);
+    const failing = evaluateAcceptance(grade("D", 1.49), policy("C"));
+    expect(failing.pass).toBe(false);
+    expect(failing.marginScore).toBeLessThan(0);
   });
 
   it("echoes policyId and requiredGrade", () => {
@@ -63,6 +74,6 @@ describe("evaluateAcceptance", () => {
     expect(result.policyId).toBe("cust-42");
     expect(result.requiredGrade).toBe("B");
     expect(result.pass).toBe(true);
-    expect(result.marginScore).toBeCloseTo(0.9, 10);
+    expect(result.marginScore).toBeCloseTo(1.4, 10);
   });
 });

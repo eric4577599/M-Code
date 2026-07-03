@@ -121,6 +121,25 @@ describe("gate state (C4.1)", () => {
     expect(gateState(false, failing)).toBe("SCANNING");
     expect(gateState(true, failing)).toBe("LOCKED");
   });
+
+  // C4.2:scaleRef 未偵測 → 量測停用、仍可解碼,不鎖快門
+  it("scaleRef missing alone does NOT lock (C4.2: measurement off, decode allowed)", () => {
+    const { state, report } = evaluateGate({ ...PASS, scaleRefDetected: false });
+    expect(state).toBe("ARMED");
+    expect(report.measurementEnabled).toBe(false);
+    expect(report.passedAll).toBe(false); // 仍有一項 FAIL,不算全過
+  });
+
+  it("scaleRef missing plus another FAIL still locks", () => {
+    const { state } = evaluateGate({ ...PASS, scaleRefDetected: false, varLap: 50 });
+    expect(state).toBe("LOCKED");
+  });
+
+  it("measurementEnabled is true when scaleRef is detected", () => {
+    const { report } = evaluateGate(PASS);
+    expect(report.measurementEnabled).toBe(true);
+    expect(report.passedAll).toBe(true);
+  });
 });
 
 describe("report shape", () => {

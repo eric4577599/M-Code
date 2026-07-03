@@ -41,10 +41,19 @@ function formatNumber(n: number): string {
   return String(Number(n.toPrecision(10)));
 }
 
-/** Render one cell: empty for null/undefined, escaped when it contains , " or newline. */
+/**
+ * 產生單一儲存格:null/undefined 輸出空字串;含逗號/引號/換行時做 RFC-4180 跳脫。
+ * 公式注入防護:「字串型」欄位以 = + - @ Tab CR 開頭時前置單引號中和
+ * (decoded_data 來自掃到的條碼、customer 來自 ERP,皆屬外部輸入,
+ * 惡意內容如 `=HYPERLINK(...)` 開啟 Excel 即觸發)。數字/布林欄位不受影響,
+ * 負數(如 margin_score)仍為合法數字輸出。
+ */
 function escapeField(value: string | number | boolean | undefined | null): string {
   if (value === undefined || value === null) return "";
-  const s = typeof value === "number" ? formatNumber(value) : String(value);
+  let s = typeof value === "number" ? formatNumber(value) : String(value);
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(s)) {
+    s = "'" + s;
+  }
   if (/[",\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }

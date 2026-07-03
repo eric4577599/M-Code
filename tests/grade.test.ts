@@ -205,10 +205,11 @@ describe("buildGradeResult — 2D min-takes-overall (C7.3)", () => {
 });
 
 describe("marginScore (C7.3)", () => {
-  it("subtracts the required grade's nominal score", () => {
-    // required C → nominal 2.
-    expect(marginScore(1.8, "C")).toBeCloseTo(-0.2);
-    expect(marginScore(2.3, "C")).toBeCloseTo(0.3);
-    expect(marginScore(3.0, "B")).toBeCloseTo(0.0);
+  it("subtracts the required grade's band-cut score (C9.3 worked example)", () => {
+    // requiredScore 取帶下界:C→1.5、B→2.5。C9.3 實例:1.8、門檻 C → +0.3。
+    expect(marginScore(1.8, "C")).toBeCloseTo(0.3);
+    expect(marginScore(2.3, "C")).toBeCloseTo(0.8);
+    expect(marginScore(3.0, "B")).toBeCloseTo(0.5);
+    expect(marginScore(2.4, "B")).toBeCloseTo(-0.1); // 未達門檻 → 負值
   });
 });

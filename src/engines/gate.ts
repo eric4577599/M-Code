@@ -149,10 +149,17 @@ export function classifyChecks(m: GateMeasurements): GateCheck[] {
   ];
 }
 
-/** Derive the gate state (C4.1) from checks and whether a symbol ROI exists. */
+/**
+ * 由各檢查結果推導閘門狀態(C4.1)。
+ * 輸入:是否偵測到符號 ROI、各檢查結果;輸出:SCANNING / LOCKED / ARMED。
+ * C4.2:scaleRef 未偵測只「量測停用,仍可解碼」,不鎖快門;
+ * 其餘任一檢查 FAIL 才 LOCKED。
+ */
 export function gateState(symbolDetected: boolean, checks: GateCheck[]): GateState {
   if (!symbolDetected) return "SCANNING";
-  return checks.some((c) => c.status === "FAIL") ? "LOCKED" : "ARMED";
+  return checks.some((c) => c.status === "FAIL" && c.key !== "scaleRef")
+    ? "LOCKED"
+    : "ARMED";
 }
 
 /** Result of evaluating the gate: the report plus the C4.1 state. */
@@ -162,18 +169,22 @@ export interface GateEvaluation {
 }
 
 /**
- * Evaluate the capture quality gate (C4.3).
- * Returns the CaptureQualityReport and the gate state. When no symbol ROI is
- * present the state is SCANNING and passedAll is false.
+ * 評估拍攝品質閘門(C4.3)。
+ * 輸入:上游已算好的量測數值;輸出:CaptureQualityReport 與閘門狀態。
+ * - 未偵測到符號 ROI → SCANNING,passedAll=false。
+ * - passedAll:ARMED 且無任何 FAIL(scaleRef 未偵測時可 ARMED 但 passedAll=false)。
+ * - measurementEnabled:scaleRef 偵測到才可量測(C4.2:未偵測→量測停用,仍可解碼)。
  */
 export function evaluateGate(m: GateMeasurements): GateEvaluation {
   const checks = classifyChecks(m);
   const state = gateState(m.symbolDetected, checks);
-  const passedAll = state === "ARMED";
+  const passedAll =
+    state === "ARMED" && checks.every((c) => c.status !== "FAIL");
   return {
     state,
     report: {
       passedAll,
+      measurementEnabled: m.scaleRefDetected,
       gsdMmPerPx: m.gsdMmPerPx,
       pxPerModule: m.pxPerModule,
       checks,
