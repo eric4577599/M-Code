@@ -56,7 +56,7 @@ function makeBody(overrides: Partial<InspectionPostBody> = {}): InspectionPostBo
     workOrderId: "WO-1",
     processStage: "OUTBOUND",
     symbology: "ITF14",
-    decodedData: "104712345678904",
+    decodedData: "14712345678907",
     grade: { overall: "C", score: 1.8, relative: true },
     acceptance: { requiredGrade: "C", pass: true, marginScore: 0.3 },
     diagnosis: [],
@@ -122,7 +122,7 @@ describe("getWorkOrder (C9.2)", () => {
       id: "WO-2406A-7741",
       customer: "ACME",
       symbology: "ITF14",
-      expectedGtin: "104712345678904",
+      expectedGtin: "14712345678907",
       acceptance: { requiredGrade: "C", xDimSpecMm: 1.016, quietZoneMinX: 10 },
     };
     const fake = new FakeTransport((method, path) => {

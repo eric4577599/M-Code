@@ -67,12 +67,14 @@ describe("scaleRef (detected OK else FAIL)", () => {
   it("FAIL when not detected", () => expect(sr(false)).toBe("FAIL"));
 });
 
-describe("picket (<=10 OK, >10 WARN — C4.2 無 FAIL 帶)", () => {
+describe("picket (<=10 OK, 10-25 WARN, >25 FAIL — D2 必須 picket fence)", () => {
   const p = (v: number) =>
     statusOf(classifyChecks({ ...PASS, picketAngleDeg: v }), "picket");
   it("OK at 10", () => expect(p(10)).toBe("OK"));
   it("WARN just above 10", () => expect(p(10.1)).toBe("WARN"));
   it("WARN at 25", () => expect(p(25)).toBe("WARN"));
+  it("FAIL just above 25", () => expect(p(25.1)).toBe("FAIL"));
+  it("FAIL when the barcode lies sideways (90° ladder)", () => expect(p(90)).toBe("FAIL"));
 });
 
 describe("perspective (<=5 OK else FAIL)", () => {

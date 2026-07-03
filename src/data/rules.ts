@@ -25,7 +25,7 @@ export const SEED_DIAGNOSIS_RULES: DiagnosisRule[] = [
   },
   {
     id: "LOW_CONTRAST",
-    appliesTo: ["ITF14", "GS1_128", "QR"],
+    appliesTo: ["ITF14", "GS1_128", "CODE128", "QR", "DATAMATRIX"],
     when: [{ metric: "SC.score", op: "<", value: 2.0 }],
     cause: "牛皮基材吃光 / 墨色不足",
     remedy: "提高墨色濃度，或改面紙 / 加塗布",
@@ -57,7 +57,7 @@ export const SEED_DIAGNOSIS_RULES: DiagnosisRule[] = [
   },
   {
     id: "NO_DECODE",
-    appliesTo: ["ITF14", "GS1_128", "QR", "DATAMATRIX"],
+    appliesTo: ["ITF14", "GS1_128", "CODE128", "QR", "DATAMATRIX"],
     when: [{ metric: "decoded", op: "==", value: 0 }],
     cause: "不可讀（綜合崩壞）",
     remedy: "立即停線檢查版 / 墨 / 楞型",

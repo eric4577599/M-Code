@@ -24,7 +24,7 @@ import type {
 // A direct-print C-flute job (the most common, washboard-prone substrate).
 const profile = SEED_SUBSTRATE_PROFILES.find((p) => p.id === "direct-c-flute")!;
 const policy = SEED_ACCEPTANCE_POLICIES.find((p) => p.id === "itf14-direct-default")!;
-const EXPECTED_GTIN = "104712345678904";
+const EXPECTED_GTIN = "14712345678907"; // 合法 GTIN-14(檢查碼 7)
 
 const scale: ScaleReference = { type: "CARD", nominalMm: 26, resolvedPx: 260 }; // 10 px/mm
 

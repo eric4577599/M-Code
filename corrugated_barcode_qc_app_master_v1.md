@@ -343,7 +343,7 @@ stateDiagram-v2
 | `washboard` | 跨楞向亮度剖面 FFT，2–10mm 帶主峰/均值 | ampRatio | ≤0.08 | 0.08–0.15 | >0.15 |
 | `whiteBalance` | 參考卡白塊 RGB 增益偏差 | Δgain | ≤5% | — | >5%（要 AWB lock） |
 | `scaleRef` | 參考卡/硬幣偵測且角點解析 | bool | 偵測到 | — | 未偵測（量測停用，仍可解碼） |
-| `picket` | 符號主軸與垂直夾角 | deg | ≤10° | 10–25° | — |
+| `picket` | 符號主軸與垂直夾角 | deg | ≤10° | 10–25° | >25°（D2：必須 picket fence，橫躺不得放行） |
 
 附加（並入放行）：**透視傾斜** ≤5° 否則 FAIL；**解析度** `gsd≤0.20` 且 `pxPerModule≥8`（<8 WARN、<5 FAIL）。
 
@@ -430,7 +430,7 @@ R(x) = clamp( (L(x) − L_black) / (L_white − L_black), 0, 1 )
   {"id":"WASHBOARD","appliesTo":["ITF14","GS1_128","QR","DATAMATRIX"],"substrateCategories":["DIRECT_COARSE"],
    "when":[{"metric":"washboard.amplitudeRatio","op":">","value":0.12}],
    "cause":"楞痕 / washboard（粗楞透印）","remedy":"高階訂單改細楞 E/F 或表貼；調印壓","severity":2},
-  {"id":"LOW_CONTRAST","appliesTo":["ITF14","GS1_128","QR"],
+  {"id":"LOW_CONTRAST","appliesTo":["ITF14","GS1_128","CODE128","QR","DATAMATRIX"],
    "when":[{"metric":"SC.score","op":"<","value":2.0}],
    "cause":"牛皮基材吃光 / 墨色不足","remedy":"提高墨色濃度，或改面紙 / 加塗布","severity":2},
   {"id":"QR_REGISTRATION","appliesTo":["QR","DATAMATRIX"],
@@ -442,7 +442,7 @@ R(x) = clamp( (L(x) − L_black) / (L_white − L_black), 0, 1 )
   {"id":"QUIET_ZONE","appliesTo":["ITF14","GS1_128","CODE128"],
    "when":[{"metric":"quietZoneX","op":"<","value":10}],
    "cause":"落版排版空白區不足","remedy":"調整落版，留足 Quiet Zone","severity":1},
-  {"id":"NO_DECODE","appliesTo":["ITF14","GS1_128","QR","DATAMATRIX"],
+  {"id":"NO_DECODE","appliesTo":["ITF14","GS1_128","CODE128","QR","DATAMATRIX"],
    "when":[{"metric":"decoded","op":"==","value":0}],
    "cause":"不可讀（綜合崩壞）","remedy":"立即停線檢查版 / 墨 / 楞型","severity":3}
 ]
@@ -462,7 +462,7 @@ POST /oauth/token   grant_type=client_credentials & client_id & client_secret
 ```
 GET /api/v1/workorders/{id}   (Bearer)
 → 200 { "id":"WO-2406A-7741","customer":"ACME","symbology":"ITF14",
-        "expectedGtin":"104712345678904",
+        "expectedGtin":"14712345678907",
         "acceptance":{"requiredGrade":"C","xDimSpecMm":1.016,"quietZoneMinX":10} }
 ```
 
@@ -471,7 +471,7 @@ GET /api/v1/workorders/{id}   (Bearer)
 POST /api/v1/inspections   (Bearer, Idempotency-Key)
 {
   "sessionId":"uuid","workOrderId":"WO-2406A-7741","processStage":"OUTBOUND",
-  "symbology":"ITF14","decodedData":"104712345678904",
+  "symbology":"ITF14","decodedData":"14712345678907",
   "grade":{"overall":"C","score":1.8,"relative":true},
   "acceptance":{"requiredGrade":"C","pass":true,"marginScore":0.3},
   "measurement":{"xDimMm":1.09,"barWidthGainMm":0.08,"quietZoneX":10.4,
