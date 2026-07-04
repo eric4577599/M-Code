@@ -258,7 +258,7 @@
     <div id="trendStats"></div>
   </div>
   <div class="card">
-    <h2>近 10 批 參考等級走勢（紅虛線＝門檻 C，趨近門檻以紅圈預警）</h2>
+    <h2>近 10 批 參考等級走勢（紅虛線＝驗收門檻（隨符號別連動），趨近門檻以紅圈預警）</h2>
     <div id="trendChart"></div>
     <p class="muted">切換楞型基準檔：粗楞貼著門檻跑、細楞抬高、表貼/標籤穩在 A——驗證「楞越粗越易掉級」，支撐高階訂單導向細楞/表貼的業務話術。每按一次快門即累積一批。</p>
   </div>
@@ -677,7 +677,9 @@ function exportXls() {
     <tr><td>報告時間</td><td>${dateStr}</td><td></td><td></td></tr><tr><td></td></tr>`;
   const cols = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>門檻</th><th>margin</th><th>工法/楞型</th><th>診斷</th></tr>`;
   const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${esc(s.data)}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.reqGrade}</td><td>${s.margin.toFixed(2)}</td><td>${esc(s.profileName)}</td><td>${esc(s.diag.join("；"))}</td></tr>`).join("");
-  const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1">${head}${cols}${body}</table></body></html>`;
+  // 法律護欄聲明(規格 A3 紅線):Excel 報告表尾必附,與結果頁 / PDF 聲明一致
+  const legal = `<tr><td></td></tr><tr><td colspan="11">※ 本報告所有等級皆為相對代理值（proxy），非 ISO 15416/15415 合規驗證，不出具證書；合規驗證請使用具固定照明幾何之合規 verifier。</td></tr>`;
+  const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1">${head}${cols}${body}${legal}</table></body></html>`;
   const blob = new Blob(["﻿"+html], { type:"application/vnd.ms-excel" });
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
   a.download=`檢驗報告_${safeFileName($("f-workorder").value.trim())||"export"}.xls`; a.click();

@@ -498,7 +498,7 @@ async function initCamera(userGesture) {
     $("scaleNote").textContent = "⊞ 比例尺卡 未偵測 — 尺寸量測停用（不影響拍攝與分級）";
     startMetricsLoop(); // 相機就緒後開始即時影像量測(六燈號真實化;不做解碼)
   } catch (e) {
-    const map = { NotAllowedError:"相機權限被拒 — 請到 iPhone 設定→Safari→相機 允許，或點網址列 ⒜A→網站設定",
+    const map = { NotAllowedError:"相機權限被拒 — 請到 iPhone 設定→Safari→相機 允許，或點網址列 AA→網站設定；Android Chrome：網址列鎖頭→權限→相機",
       NotFoundError:"找不到相機", NotReadableError:"相機被其他 App 佔用（關掉相機/其他相機頁）",
       SecurityError:"安全性限制（需 HTTPS）", OverconstrainedError:"無符合的後鏡頭", AbortError:"開啟中斷" };
     setCamStatus((map[e.name] || ("相機開啟失敗："+e.name)) + (userGesture?"":" ·點畫面重試"), "warn");
@@ -637,7 +637,9 @@ function exportXls() {
     <tr><td>報告時間</td><td>${dateStr}</td><td></td><td></td></tr><tr><td></td></tr>`;
   const cols = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>門檻</th><th>margin</th><th>工法/楞型</th></tr>`;
   const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${esc(s.data)}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.reqGrade}</td><td>${s.margin.toFixed(2)}</td><td>${esc(s.profileName)}</td></tr>`).join("");
-  const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1">${head}${cols}${body}</table></body></html>`;
+  // 法律護欄聲明(規格 A3 紅線):Excel 報告表尾必附,與結果頁 / PDF 聲明一致
+  const legal = `<tr><td></td></tr><tr><td colspan="10">※ 本報告所有等級皆為相對代理值（proxy），非 ISO 15416/15415 合規驗證，不出具證書；合規驗證請使用具固定照明幾何之合規 verifier。</td></tr>`;
+  const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1">${head}${cols}${body}${legal}</table></body></html>`;
   const blob = new Blob(["﻿"+html], { type:"application/vnd.ms-excel" });
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
   a.download=`檢驗報告_${safeFileName($("f-workorder").value.trim())||"export"}.xls`; a.click();

@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>條碼品質快篩 — 操作手冊</title>
+<style>
+  :root { --ok:#1f9d55; --warn:#d97706; --fail:#dc2626; --ink:#0f172a; --mut:#64748b; --line:#e2e8f0; --bg:#f8fafc; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI","Noto Sans TC",system-ui,sans-serif; color:var(--ink); background:var(--bg); line-height:1.75; }
+  .wrap { max-width:860px; margin:0 auto; padding:28px 20px 64px; }
+  header.doc { border-bottom:3px solid var(--ink); padding-bottom:14px; margin-bottom:24px; }
+  header.doc h1 { font-size:26px; margin:0 0 4px; }
+  header.doc .sub { color:var(--mut); font-size:14px; }
+  h2 { font-size:20px; margin:40px 0 12px; padding-left:10px; border-left:5px solid #0ea5e9; }
+  h3 { font-size:16px; margin:24px 0 8px; }
+  p { margin:8px 0; }
+  code, kbd { font-family:ui-monospace,SFMono-Regular,monospace; background:#eef2f7; border-radius:5px; padding:1px 6px; font-size:.92em; }
+  a { color:#0284c7; }
+  table { width:100%; border-collapse:collapse; font-size:14px; margin:10px 0 16px; background:#fff; }
+  th, td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; white-space:nowrap; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px 18px; margin:12px 0; }
+  .step { display:flex; gap:12px; margin:10px 0; align-items:flex-start; }
+  .step .no { flex:0 0 auto; width:28px; height:28px; border-radius:50%; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px; margin-top:2px; }
+  .dot { display:inline-block; width:11px; height:11px; border-radius:50%; vertical-align:middle; margin-right:4px; }
+  .d-ok{ background:var(--ok) } .d-warn{ background:var(--warn) } .d-fail{ background:var(--fail) }
+  .tagOK{ color:var(--ok); font-weight:700 } .tagWARN{ color:var(--warn); font-weight:700 } .tagFAIL{ color:var(--fail); font-weight:700 }
+  .note { border-left:4px solid var(--warn); background:#fffbeb; padding:10px 14px; border-radius:8px; margin:12px 0; font-size:14px; }
+  .danger { border-left:4px solid var(--fail); background:#fef2f2; padding:10px 14px; border-radius:8px; margin:12px 0; font-size:14px; }
+  .tip { border-left:4px solid #0ea5e9; background:#f0f9ff; padding:10px 14px; border-radius:8px; margin:12px 0; font-size:14px; }
+  .free { background:#dcfce7; color:#166534; border-radius:5px; padding:1px 8px; font-size:12px; font-weight:700; white-space:nowrap; }
+  .paid { background:#fef3c7; color:#92400e; border-radius:5px; padding:1px 8px; font-size:12px; font-weight:700; white-space:nowrap; }
+  nav.toc { background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px 20px; }
+  nav.toc ol { margin:6px 0; padding-left:22px; }
+  nav.toc a { text-decoration:none; }
+  footer.doc { margin-top:48px; border-top:1px solid var(--line); padding-top:14px; color:var(--mut); font-size:12px; }
+  @media print {
+    body { background:#fff; }
+    .wrap { max-width:100%; padding:0; }
+    nav.toc { page-break-after:always; }
+    h2 { page-break-after:avoid; }
+    .card, table { page-break-inside:avoid; }
+    * { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    @page { margin:16mm; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>條碼品質快篩 — 操作手冊</h1>
+  <div class="sub">瓦楞箱條碼 / QR 相對品質篩檢 Demo · 版本 2026-07-04</div>
+</header>
+
+<div class="danger">
+  <b>定位護欄(請先閱讀)</b><br>
+  本工具所有等級皆為<b>相對代理值(proxy)</b>,<b>非 ISO 15416 / 15415 合規驗證、不出具證書</b>。
+  合規驗證請使用具固定照明幾何的合規 verifier。結果頁與 PDF 報告均帶有此聲明。
+</div>
+
+<nav class="toc">
+  <b>目錄</b>
+  <ol>
+    <li><a href="#s1">系統概觀與兩個入口</a></li>
+    <li><a href="#s2">手機版操作流程(真實掃描)</a></li>
+    <li><a href="#s3">六項品質燈號與快門狀態機</a></li>
+    <li><a href="#s4">結果頁判讀</a></li>
+    <li><a href="#s5">清單與報告輸出(PDF / Excel)</a></li>
+    <li><a href="#s6">桌面展示版操作(展示 / 工程模式)</a></li>
+    <li><a href="#s7">免費版與付費版功能界線</a></li>
+    <li><a href="#s8">常見問題排除</a></li>
+  </ol>
+</nav>
+
+<!-- ═══════════ 1 ═══════════ -->
+<h2 id="s1">1. 系統概觀與兩個入口</h2>
+<p>本系統針對瓦楞紙箱上的一維條碼(ITF-14、GS1-128)與二維碼(QR、DataMatrix)做現場品質快篩:
+先以「六項品質燈號」把關拍攝條件,再解碼、換算相對參考等級(A–F),依驗收政策(ITF-14 ≥ C、GS1-128 ≥ B;QR / DataMatrix 目前採預設門檻 ≥ C)判定通過與否。</p>
+
+<table>
+  <tr><th>入口</th><th>網址</th><th>用途</th></tr>
+  <tr>
+    <td><b>手機版</b></td>
+    <td><code>https://m-code.ericchh.work/demo/mobile.html</code></td>
+    <td>用手機相機<b>真實拍攝、真實解碼(ZXing)、真實影像量測</b>的現場檢驗頁。無相機時可用「示範情境」模擬。</td>
+  </tr>
+  <tr>
+    <td><b>桌面展示版</b></td>
+    <td><code>https://m-code.ericchh.work/demo/index.html</code></td>
+    <td>對客戶簡報 / 內部驗證用的完整功能展示:情境模擬、掉級診斷、尺寸量測、CSV、ERP 回寫(模擬)、趨勢圖。</td>
+  </tr>
+</table>
+
+<div class="tip">
+  也可在本機直接以 HTTP 伺服器開啟 repo 內 <code>demo/mobile.html</code>、<code>demo/index.html</code>。
+  注意:<b>手機相機需要 HTTPS</b>(或 localhost),用 <code>file://</code> 或純 HTTP 的區網 IP 開啟時相機不會啟動,只能走示範情境。
+</div>
+
+<!-- ═══════════ 2 ═══════════ -->
+<h2 id="s2">2. 手機版操作流程(真實掃描)</h2>
+
+<div class="step"><div class="no">1</div><div>
+  <b>開啟頁面並允許相機</b><br>
+  進入頁面會自動要求相機權限(優先使用後鏡頭)。授權成功後觀景窗會顯示即時畫面,
+  相機狀態列顯示「● 相機已開啟 · 對準條碼後按快門檢驗」。若被拒絕,依畫面提示到
+  iPhone 設定 → Safari → 相機允許後,<b>點畫面任意處重試</b>。
+</div></div>
+
+<div class="step"><div class="no">2</div><div>
+  <b>選擇檢驗條件</b><br>
+  上方依序選:<b>製程環節</b>(產線 / 出貨 / 客訴)、<b>符號別</b>(ITF-14 / GS1-128 / QR / DM)、
+  <b>工法 / 楞型基準檔</b>(下拉選單)。此選項依箱面印刷方式選擇(直印 C 楞 / 直印 E 楞 / 表貼 / 標籤面材);手機版此選項記錄於報告欄位,不影響分級。實拍解碼成功時,符號別會依實際解出的格式自動切換,驗收門檻亦隨之切換(例:解出 GS1-128 即改用 ≥ B)。
+</div></div>
+
+<div class="step"><div class="no">3</div><div>
+  <b>對準條碼,等六燈號放行</b><br>
+  建議距條碼約 15–20 公分、讓條碼佔滿觀景窗。相機開啟後每 0.5 秒對畫面做一次即時量測(對焦、眩光、白平衡、楞痕為實測值),
+  六燈號與右上角狀態標籤即時更新。狀態為 <span class="tagOK">ARMED</span> 時快門變綠色可按;
+  有 FAIL 燈時為 <span class="tagFAIL">LOCKED</span> 快門鎖死(比例尺卡除外,見第 3 章)。
+</div></div>
+
+<div class="step"><div class="no">4</div><div>
+  <b>按快門檢驗</b><br>
+  按下綠色快門後,系統對<b>這一張照片</b>做單次 ZXing 解碼與影像量測(光度參數 SC / MOD / Rmin 實算),
+  換算相對等級與判定,自動切到結果頁,並將該筆(含實拍縮圖)存入清單。
+</div></div>
+
+<div class="step"><div class="no">5</div><div>
+  <b>繼續下一張或輸出報告</b><br>
+  結果頁按「↻ 再拍一張」回拍攝頁;右上角「清單 N」進入清單 / 輸出頁(見第 5 章)。
+</div></div>
+
+<h3>無相機時:示範情境</h3>
+<p>拍攝頁底部展開「示範情境(無相機時用)」,提供 7 個預設情境一鍵套用:
+理想、楞痕偏高、低對比、套印不準(2D)、失焦、眩光、不可讀。
+點選後燈號與模擬參數立即切換;除「失焦」「眩光」(示範快門鎖死)外,可照常按快門走完整流程(此時為模擬值,非實拍)。</p>
+<div class="note">相機已開啟時,燈號一律以即時實測為準(對焦、眩光、白平衡、楞痕每 0.5 秒實測會覆蓋示範值),示範情境僅在無相機時完整生效;「比例尺卡」亦維持未偵測,避免展示文字與實際狀態不符。</div>
+
+<!-- ═══════════ 3 ═══════════ -->
+<h2 id="s3">3. 六項品質燈號與快門狀態機</h2>
+
+<table>
+  <tr><th>燈號</th><th>檢查內容</th><th>來源(手機版實拍時)</th></tr>
+  <tr><td>對焦</td><td>影像清晰度(Laplacian 變異數)</td><td>即時實測</td></tr>
+  <tr><td>眩光</td><td>過曝反光面積比例</td><td>即時實測</td></tr>
+  <tr><td>楞痕透印</td><td>瓦楞楞痕造成的週期性明暗</td><td>即時實測</td></tr>
+  <tr><td>白平衡</td><td>色偏程度(灰界近似)</td><td>即時實測</td></tr>
+  <tr><td>比例尺卡</td><td>尺寸換算基準卡是否入鏡</td><td>實機尚未支援偵測,固定顯示「未偵測」</td></tr>
+  <tr><td>印向直立</td><td>條碼印向 / 透視角度</td><td>解碼成功後由定位點回填</td></tr>
+</table>
+
+<p>燈號三色:<span class="dot d-ok"></span><b>OK(綠)</b>通過;
+<span class="dot d-warn"></span><b>WARN(黃)</b>仍可拍,拍攝頁會提示數值可能受影響(例如受楞痕影響);
+<span class="dot d-fail"></span><b>FAIL(紅)</b>快門鎖死。</p>
+
+<table>
+  <tr><th>狀態</th><th>意義</th><th>快門</th></tr>
+  <tr><td><span class="tagWARN">SCANNING</span></td><td>尚未偵測到條碼時的狀態;本 demo 載入後即完成偵測,實際操作上不會看到此狀態</td><td>灰色,不可按</td></tr>
+  <tr><td><span class="tagOK">ARMED</span></td><td>全綠 / 黃,拍攝條件放行</td><td>綠色,可按</td></tr>
+  <tr><td><span class="tagFAIL">LOCKED</span></td><td>有 FAIL 燈</td><td>鎖死</td></tr>
+</table>
+
+<div class="note">
+  <b>比例尺卡是唯一例外</b>:未偵測到時<b>只停用尺寸量測</b>(X 寬 / BWR / Quiet Zone),
+  <b>不鎖快門、不影響拍攝與分級</b>。所以「五綠一紅(比例尺卡)」仍然可拍。
+  設計目的:強制每次拍攝條件一致 —— 穩定優先於單張精準。
+</div>
+
+<!-- ═══════════ 4 ═══════════ -->
+<h2 id="s4">4. 結果頁判讀</h2>
+
+<table>
+  <tr><th>區塊</th><th>內容</th></tr>
+  <tr><td>解碼狀態</td><td>✓ 解碼成功(含解出字串;2D 維度僅示範情境顯示)或 ✗ 不可讀(綜合崩壞)</td></tr>
+  <tr><td>參考等級圓環</td><td>A–F 相對等級,顏色隨等級變化;下方紅字為「非 ISO 合規證書」聲明</td></tr>
+  <tr><td>判定</td><td>通過 / 未通過,附驗收門檻(ITF-14 ≥ C、GS1-128 ≥ B;QR / DataMatrix 目前採預設門檻 ≥ C)與 margin(離門檻的餘裕分數)</td></tr>
+  <tr><td>辨識文字</td><td>解碼出的原始字串,可長按複製</td></tr>
+  <tr><td>參數列</td><td>光度參數(SC / MOD / Rmin)顯示等級(分數見「判定後內容」摘要)<span class="free">免費版</span>;幾何參數(DEC / DEF / FPD / GNU)以 🔒 代號鎖定 <span class="paid">付費版</span></td></tr>
+  <tr><td>判定後內容</td><td>整份文字摘要(製程、符號別、解碼、等級、判定、參數),可全選複製貼到聊天 / 郵件</td></tr>
+</table>
+
+<div class="tip"><b>margin 怎麼看</b>:margin 為總分減門檻分。正值 = 高於門檻(越大越安全);接近 0 = 貼著門檻跑,建議關注製程;負值 = 未通過。</div>
+
+<!-- ═══════════ 5 ═══════════ -->
+<h2 id="s5">5. 清單與報告輸出(PDF / Excel)</h2>
+
+<p>每按一次快門檢驗,結果即自動存入清單(手機版含實拍縮圖;示範情境掃描為示意圖)。點右上角「清單 N」進入:</p>
+
+<div class="step"><div class="no">1</div><div><b>填寫表頭</b>:客戶名稱、品名、工單號(掃描總數自動帶入)。</div></div>
+<div class="step"><div class="no">2</div><div><b>檢視清單</b>:每筆含縮圖、時間、製程環節、符號別、解碼字串、等級、判定。<b>點縮圖可放大檢視</b>(燈箱),點任意處關閉。</div></div>
+<div class="step"><div class="no">3</div><div><b>🖨 輸出 PDF</b>:叫出系統列印對話方塊,選「另存為 PDF」。首頁為表頭 + 判定總表,次頁起<b>每筆掃描一頁</b>(原圖 + 等級 + 判定 + 參數明細)。</div></div>
+<div class="step"><div class="no">4</div><div><b>⬇ 輸出 Excel</b>:直接下載 <code>檢驗報告_&lt;工單號&gt;.xls</code>,含表頭與逐筆明細(等級、判定、門檻、margin、工法 / 楞型),表尾同樣附有護欄聲明(相對代理值、非 ISO 合規驗證、不出具證書)。</div></div>
+<div class="step"><div class="no">5</div><div><b>清除清單</b>:清空所有累積紀錄(不可復原)。<b>按下立即清空,無確認對話方塊</b>,請先確認已輸出報告。</div></div>
+
+<div class="note">清單留存與 PDF / Excel 報告屬<b>付費版</b>功能(免費版單機不留存);Demo 頁面開放試用展示,重新整理頁面後清單即消失。</div>
+
+<!-- ═══════════ 6 ═══════════ -->
+<h2 id="s6">6. 桌面展示版操作(展示 / 工程模式)</h2>
+
+<p>桌面版 <code>demo/index.html</code> 為全模擬展示(無相機),頂部四個分頁 + 右上「展示 / 工程」模式切換。</p>
+
+<h3>① 拍攝</h3>
+<p>以 chip 選製程環節、工法 / 楞型、符號別;右側燈號較手機版六項多出「透視」「解析度」,共 8 項檢查。
+<b>展示模式</b>提供 8 個情境按鈕(理想樣本、楞痕偏高、墨量過多、牛皮吃光、套印不準、失焦、眩光過強、不可讀),
+每個情境標明會觸發的診斷規則;<b>工程模式</b>改為滑桿:閘門參數(varLap、眩光%、楞痕 ampRatio…)即時反映燈號與快門;分級 proxy 參數(R_light、R_dark、邊緣對比、DEC、DEF、BWR…)調整後需再按「檢驗」,於結果頁觀察等級變化。</p>
+
+<h3>② 結果</h3>
+<p>比手機版多出三塊:</p>
+<table>
+  <tr><th>區塊</th><th>內容</th></tr>
+  <tr><td>尺寸量測</td><td>X-dimension、條寬增益 BWR、Quiet Zone、楞痕週期,附規格判定(正常 / 偏高);2D 符號時改顯示模組尺寸與解碼維度</td></tr>
+  <tr><td>印刷掉級診斷</td><td>命中之診斷規則(如 WASHBOARD、BWR_GAIN、LOW_CONTRAST、QR_REGISTRATION、NO_DECODE),每條附成因與處方</td></tr>
+  <tr><td>動作</td><td>⚑ 標記製程;⬇ 存成 CSV(22 欄固定格式)<span class="paid">付費版</span>(Demo 開放試用);⇪ 回寫 ERP(模擬)<span class="paid">付費版</span>:展示 GET 工單門檻 → POST + Idempotency-Key → 201 → SYNCED 的完整交握</td></tr>
+</table>
+<div class="tip">桌面展示版為<b>付費功能的完整展示</b>:分級參數含幾何參數(DEC / DEF / FPD / GNU 等),等級與分數完整展開、不做 🔒 鎖定;解碼列另顯示與預期資料的比對結果(符合 / 不符)。</div>
+<p>工程模式額外顯示「工程明細」:完整 pipeline 物件 JSON(grade / measurement / acceptance / diagnosis)。</p>
+
+<h3>③ 清單 / 輸出</h3>
+<p>操作同手機版第 5 章(表頭 → 清單 → PDF / Excel / 清除)。桌面版清單縮圖為示意圖(非實拍);PDF / Excel 明細另多含「診斷」欄。</p>
+
+<h3>④ 趨勢 <span class="paid">付費版 · 需後台</span></h3>
+<p>近 10 批參考等級走勢:紅虛線為門檻,趨近門檻的批次以紅圈預警;統計卡顯示平均等級、趨近門檻比例、近 3 批走勢箭頭。
+切換楞型基準檔可展示「楞越粗越易掉級」:粗楞貼門檻跑、細楞 / 表貼抬高、標籤穩在 A 帶邊緣。初始走勢為預載示意資料,之後每按一次快門累積一批。</p>
+
+<!-- ═══════════ 7 ═══════════ -->
+<h2 id="s7">7. 免費版與付費版功能界線</h2>
+
+<table>
+  <tr><th>功能</th><th>版本</th></tr>
+  <tr><td>六燈號拍攝閘門、解碼、相對等級(A–F)、通過判定、光度基本參數(SC / MOD / Rmin)</td><td><span class="free">免費版</span></td></tr>
+  <tr><td>完整參數報告(幾何參數 DEC / DEF / FPD / GNU 等)</td><td><span class="paid">付費版</span></td></tr>
+  <tr><td>尺寸量測(X 寬 / BWR / Quiet Zone)</td><td><span class="paid">付費版</span></td></tr>
+  <tr><td>印刷掉級診斷(成因 + 處方)</td><td><span class="paid">付費版</span></td></tr>
+  <tr><td>清單留存、PDF / Excel 報告、CSV 匯出</td><td><span class="paid">付費版</span>(Demo 開放試用)</td></tr>
+  <tr><td>ERP 回寫(離線佇列 + Idempotency)</td><td><span class="paid">付費版</span></td></tr>
+  <tr><td>趨勢監控</td><td><span class="paid">付費版 · 需後台</span></td></tr>
+</table>
+
+<!-- ═══════════ 8 ═══════════ -->
+<h2 id="s8">8. 常見問題排除</h2>
+
+<table>
+  <tr><th>症狀</th><th>原因與處理</th></tr>
+  <tr><td>相機打不開,顯示「需 HTTPS 才能開相機」</td><td>用 HTTP / file:// 開啟。改走 <code>https://m-code.ericchh.work/demo/mobile.html</code> 或 localhost。</td></tr>
+  <tr><td>顯示「相機權限被拒」</td><td>iPhone:設定 → Safari → 相機 → 允許;或點網址列 <code>AA</code> → 網站設定。Android Chrome:網址列鎖頭 → 權限 → 相機 → 允許。設好後點頁面任意處重試。</td></tr>
+  <tr><td>顯示「相機被其他 App 佔用」</td><td>關閉相機 App 或其他使用相機的分頁後,點畫面重試。</td></tr>
+  <tr><td>快門一直鎖死(LOCKED)</td><td>看哪顆燈是紅的:失焦 → 靠近 / 遠離讓畫面清晰;眩光 → 避開反光、換角度;楞痕 → 換光源方向;白平衡 → 避開有色光源、改白光環境。比例尺卡紅燈<b>不會</b>鎖快門。</td></tr>
+  <tr><td>拍了但顯示「不可讀」</td><td>照片上無法解出條碼:對準置中、放大占框、保持直立後重拍。系統仍會給出該照片的光度分級供參考。</td></tr>
+  <tr><td>尺寸量測沒有數值</td><td>比例尺卡未偵測時尺寸量測停用(實機目前固定未偵測),屬預期行為;不影響分級與判定。</td></tr>
+  <tr><td>輸出 PDF 沒反應</td><td>清單為空時輸出按鈕停用;先完成至少一筆檢驗。彈出的是系統列印視窗,請確認瀏覽器未封鎖。</td></tr>
+  <tr><td>開啟 Excel 檔跳出「檔案格式與副檔名不符」警告</td><td>屬預期行為:報告以網頁表格格式封裝為 <code>.xls</code>,按「是」開啟即可,內容不受影響。</td></tr>
+  <tr><td>重新整理後清單不見</td><td>預期行為:免費版單機不留存,Demo 清單只存在當前頁面工作階段。</td></tr>
+</table>
+
+<footer class="doc">
+  本手冊可直接以瀏覽器列印/另存 PDF(目錄後自動分頁);列印時請勾選「背景圖形」。<br>
+  條碼品質快篩 Demo 操作手冊 · 2026-07-04<br>
+  所有等級皆為相對代理值(proxy),非 ISO 合規驗證、不出具證書;合規驗證請使用具固定照明幾何之合規 verifier。
+</footer>
+
+</div>
+</body>
+</html>
