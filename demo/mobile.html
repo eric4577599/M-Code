@@ -45,7 +45,6 @@
   .frame.live #symbolMock { display:none; }
   .bars { width:78%; height:64px; background:#d8c19a; border:3px solid #2a1c0a; border-left-width:6px; border-right-width:6px;
     background-image:repeating-linear-gradient(90deg,#1a120a 0 3px,transparent 3px 6px,#1a120a 6px 8px,transparent 8px 13px); }
-  .scaleNote { color:#7dd3fc; font:11px ui-monospace,monospace; margin-top:8px; }
   .camStatus { font:11px ui-monospace,monospace; margin-top:4px; color:#94a3b8; }
   .camStatus.ok { color:#4ade80; } .camStatus.warn { color:#fbbf24; }
 
@@ -81,6 +80,8 @@
   .decodedBox .lbl { font-size:11px; color:#64748b; display:block; margin-bottom:2px; }
   .decodedBox .val { font:14px/1.5 ui-monospace,monospace; color:#0f172a; word-break:break-all; }
   .params { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin:14px 0 4px; }
+  /* 結果畫面:掃描後偵測到的符號類型標籤 */
+  .symBadge { display:inline-block; background:#0f172a; color:#7dd3fc; border-radius:8px; padding:4px 10px; font:600 12px ui-monospace,monospace; margin-bottom:8px; }
   .pchip { border:1px solid #e2e8f0; border-radius:8px; padding:5px 9px; font-size:12px; }
   .pchip b { font-weight:800; margin-right:4px; }
   /* 免費版鎖定的付費參數(C10 full_parameters):只露代號不露分數 */
@@ -173,7 +174,6 @@
         <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
         <div class="beam" id="beam"></div><div id="symbolMock"></div>
       </div>
-      <div class="scaleNote" id="scaleNote">⊞ 比例尺卡（示意）· 基準 26.0 mm</div>
       <div class="camStatus" id="camStatus">開啟相機中…</div>
     </div>
 
@@ -195,6 +195,7 @@
   <div class="view" id="v-result">
     <div class="res">
       <button class="back" id="back">‹ 重新拍攝</button>
+      <div class="symBadge" id="symBadge"></div>
       <div class="decode" id="decode"></div>
       <div class="circle" id="circle"><div class="l" id="letter">–</div><div class="s">參考等級</div></div>
       <div class="legal">相對值・非 ISO 合規證書<br>本工具不出具 ISO 證書，合規驗證請用合規 verifier。</div>
@@ -253,18 +254,23 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ "&":"&amp;", "<":"&l
 // 檔名清理:移除檔案系統不允許的字元,輸出可安全當下載檔名的字串
 const safeFileName = (s) => String(s).replace(/[\\/:*?"<>|]/g, "_");
 const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
-const SIX = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", whiteBalance:"白平衡", scaleRef:"比例尺卡", picket:"印向直立" };
+// 品質燈號標籤。比例尺卡(scaleRef)僅用於絕對毫米尺寸量測、相對品質篩檢不需要,
+// 故不列入面板(引擎仍計算 scaleRef,但它本就不鎖快門,隱藏不影響閘門邏輯)。
+const SIX = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", whiteBalance:"白平衡", picket:"印向直立" };
 const STAGES = [["INLINE","產線"],["OUTBOUND","出貨"],["COMPLAINT","客訴"]];
 
-const SYMS = [["ITF14","ITF-14"],["GS1_128","GS1-128"],["QR","QR"],["DATAMATRIX","DM"]];
+const SYMS = [["AUTO","自動"],["ITF14","ITF-14"],["GS1_128","GS1-128"],["QR","QR"],["DATAMATRIX","DM"]];
 const is2D = (s) => s === "QR" || s === "DATAMATRIX";
+// AUTO 只是「掃描前」的顯示狀態;掃描當下一定收斂成具體類型(真實相機由 ZXing 覆寫,
+// 其餘路徑用此 fallback),避免 AUTO 流入分級/驗收/診斷路由。
+const resolveSym = (s) => s === "AUTO" ? "ITF14" : s;
 const SAMPLE_DATA = {
   ITF14:"14712345678907", GS1_128:"(01)14712345678907",
   QR:"https://trace.acme/wo/2406A-7741", DATAMATRIX:"DM:LOT2406A-7741/S00231",
 };
 
 const state = {
-  symbology:"ITF14", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
+  symbology:"AUTO", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
   decoded:SAMPLE_DATA.ITF14, expected:SAMPLE_DATA.ITF14, canDecode:true,
   gate:{ varLap:210, glare:0.4, wash:0.06, wb:2, picket:3, tilt:2, pxm:9, scaleRef:true },
   grade:{ rLight:0.84, rDark:0.16, edge:0.62, dec:0.25, def:0.18, fpd:0.05, gnu:0.1, uecUsed:2, uecTotal:10 },
@@ -274,7 +280,7 @@ const policyOf  = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state
   || { id:state.symbology.toLowerCase()+"-default", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
 
 function onSymChange() {
-  state.decoded = SAMPLE_DATA[state.symbology];
+  state.decoded = SAMPLE_DATA[state.symbology] ?? ""; // AUTO 無對應樣本字串,退回空字串
   state.expected = state.decoded;
   renderHud();
 }
@@ -328,7 +334,7 @@ const SCN = [
 ];
 $("scenarios").innerHTML = SCN.map((s,i)=>`<button data-i="${i}">${s.t}</button>`).join("");
 $("scenarios").onclick = (e) => { const b=e.target.closest("button"); if(!b) return; SCN[+b.dataset.i].a(state);
-  // 相機已開時以實況為準:情境不得把 scaleRef 演回「已偵測」(scaleNote 文字才不會失真)
+  // 相機已開時以實況為準:情境不得把 scaleRef 演回「已偵測」(維持引擎量測狀態誠實)
   if (camVideo) state.gate.scaleRef = false;
   $("profile").value=state.profileId; onSymChange(); render(); recompute(); };
 
@@ -348,7 +354,7 @@ function recompute() {
   $("beam").style.display = armed ? "none" : "block"; // 鎖定後停止掃描光束（已對準）
   sh.className = "shutter " + (armed?"ready":""); sh.disabled = !armed;
   $("shutterLbl").textContent = armed ? "可拍 — 點按檢驗" : (gate.state==="LOCKED" ? "快門鎖死（有未過項）" : "校準中…");
-  $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "有 FAIL 燈時快門鎖死（比例尺卡除外—未偵測僅停用量測），確保每次拍攝一致。";
+  $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "有 FAIL 燈時快門鎖死，確保每次拍攝一致。";
 }
 
 // inspect:快門入口。有相機 → 對拍到的照片做真實解碼與實測評分;無相機 → 情境模擬。
@@ -364,8 +370,9 @@ function inspectReal(photo) {
   const img = photo.getContext("2d").getImageData(0, 0, w, h);
   const gray = toGray(img.data, w, h);
   const zx = zxDecodeCanvas(photo);
-  const sym = zx ? zx.sym : state.symbology;
-  if (zx && state.symbology !== sym) { state.symbology = sym; render(); }
+  // 解碼成功用 ZXing 實測格式;失敗(不可讀)時 AUTO 收斂成具體 fallback,不讓 "AUTO" 流入下游
+  const sym = zx ? zx.sym : resolveSym(state.symbology);
+  if (state.symbology !== sym) { state.symbology = sym; render(); }
   // ROI:解碼成功 → result points 外框外擴 25%;失敗 → 取中央 70% 區域
   let roi;
   if (zx && zx.points.length >= 2) {
@@ -407,7 +414,8 @@ function inspectReal(photo) {
 
 // 模擬檢驗(無相機):沿用示範情境設定的 gate/grade 模擬值
 function inspectSim() {
-  const sym = state.symbology, g = state.grade;
+  const sym = resolveSym(state.symbology), g = state.grade; // 無相機 + AUTO 時收斂成具體類型
+  if (state.symbology !== sym) { state.symbology = sym; state.decoded = state.decoded || SAMPLE_DATA[sym]; state.expected = state.decoded; render(); }
   const dim = sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined;
   const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null };
   const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
@@ -422,6 +430,9 @@ function inspectSim() {
 
 // 共用結果呈現:更新結果頁 DOM、存入清單(img 為 null 時退回 SVG 快照)、切頁
 function presentResult(decode, grade, acceptance, img) {
+  // 此時 state.symbology 已收斂為具體類型(相機路徑由 ZXing 覆寫,其餘由 resolveSym)
+  const symLabelR = (SYMS.find(([sv])=>sv===state.symbology)||[,state.symbology])[1];
+  $("symBadge").textContent = "偵測類型：" + symLabelR;
   $("decode").innerHTML = decode.decoded
     ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${esc(decode.data)}${decode.dimension?" · "+esc(decode.dimension):""}`
     : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
@@ -436,7 +447,6 @@ function presentResult(decode, grade, acceptance, img) {
   $("params").innerHTML = grade.parameters.map(p => p.kind === "PHOTOMETRIC"
     ? `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`
     : `<span class="pchip locked">🔒 ${p.code}</span>`).join("");
-  const symLabelR = (SYMS.find(([sv])=>sv===state.symbology)||[,state.symbology])[1];
   $("resultText").value = [
     `製程環節：${stageLabelOf(state.processStage)}`,
     `符號別：${symLabelR}`,
@@ -494,10 +504,10 @@ async function initCamera(userGesture) {
     $("frame").classList.add("live"); camVideo = v;
     const label = (stream.getVideoTracks()[0] || {}).label || "";
     setCamStatus("● 相機已開啟" + (label?("："+label):"（後鏡頭）") + " · 對準條碼後按快門檢驗", "ok");
-    // 誠實化:實機尚無比例尺卡偵測 → scaleRef 標未偵測(C4.2:量測停用、仍可拍攝)
+    // 誠實化:實機尚無比例尺卡偵測 → scaleRef 標未偵測(C4.2:量測停用、仍可拍攝)。
+    // 比例尺卡已從燈號面板隱藏,此處僅維持引擎 measurementEnabled 誠實,不再更新 UI 文字。
     state.gate.scaleRef = false;
-    $("scaleNote").textContent = "⊞ 比例尺卡 未偵測 — 尺寸量測停用（不影響拍攝與分級）";
-    startMetricsLoop(); // 相機就緒後開始即時影像量測(六燈號真實化;不做解碼)
+    startMetricsLoop(); // 相機就緒後開始即時影像量測(品質燈號真實化;不做解碼)
   } catch (e) {
     const map = { NotAllowedError:"相機權限被拒 — 請到 iPhone 設定→Safari→相機 允許，或點網址列 AA→網站設定；Android Chrome：網址列鎖頭→權限→相機",
       NotFoundError:"找不到相機", NotReadableError:"相機被其他 App 佔用（關掉相機/其他相機頁）",
