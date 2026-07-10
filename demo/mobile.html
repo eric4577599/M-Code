@@ -257,6 +257,8 @@ const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
 // 品質燈號標籤。比例尺卡(scaleRef)僅用於絕對毫米尺寸量測、相對品質篩檢不需要,
 // 故不列入面板(引擎仍計算 scaleRef,但它本就不鎖快門,隱藏不影響閘門邏輯)。
 const SIX = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", whiteBalance:"白平衡", picket:"印向直立" };
+// 完整檢查標籤(含面板未顯示的比例尺卡/透視/解析度),供「快門鎖死」時具名列出未過項
+const CHECK_LABEL = { ...SIX, scaleRef:"比例尺卡", perspective:"透視", resolution:"解析度" };
 const STAGES = [["INLINE","產線"],["OUTBOUND","出貨"],["COMPLAINT","客訴"]];
 
 const SYMS = [["AUTO","自動"],["ITF14","ITF-14"],["GS1_128","GS1-128"],["QR","QR"],["DATAMATRIX","DM"]];
@@ -353,7 +355,11 @@ function recompute() {
   const armed = gate.state === "ARMED", sh = $("shutter");
   $("beam").style.display = armed ? "none" : "block"; // 鎖定後停止掃描光束（已對準）
   sh.className = "shutter " + (armed?"ready":""); sh.disabled = !armed;
-  $("shutterLbl").textContent = armed ? "可拍 — 點按檢驗" : (gate.state==="LOCKED" ? "快門鎖死（有未過項）" : "校準中…");
+  // 鎖死時具名列出未過項(scaleRef 不鎖快門故排除),避免「面板全綠卻鎖死」無從判斷
+  const failing = gate.report.checks.filter(c => c.status === "FAIL" && c.key !== "scaleRef");
+  $("shutterLbl").textContent = armed ? "可拍 — 點按檢驗"
+    : gate.state==="LOCKED" ? "快門鎖死：" + failing.map(c => CHECK_LABEL[c.key] || c.key).join("、") + " 未過"
+    : "校準中…";
   $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "有 FAIL 燈時快門鎖死，確保每次拍攝一致。";
 }
 
@@ -548,6 +554,10 @@ function measureFrame() {
   state.gate.glare = +(glareRatio(gray) * 100).toFixed(2);        // state 存百分比
   state.gate.wb = +(grayWorldWbDeviation(img.data) * 100).toFixed(1); // 灰界近似,百分比
   state.gate.wash = +washboardAmpRatio(gray, w, h).toFixed(3);
+  // 幾何檢查(印向/透視/解析度)需解碼定位點才算得出,即時預覽不解碼 →
+  // 還原為安全放行值,避免「上一張拍攝殘留的幾何值」把下一張預覽快門鎖死。
+  // 真正的幾何值會在按快門後由 inspectReal 對該張照片重算並存入結果。
+  state.gate.picket = 0; state.gate.tilt = 0; state.gate.pxm = 9;
   recompute();
 }
 function startMetricsLoop() { if (!metricsTimer) metricsTimer = setInterval(measureFrame, 500); }
