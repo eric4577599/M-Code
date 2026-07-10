@@ -53,6 +53,19 @@ describe("washboard (<=0.08 OK, 0.08-0.15 WARN, >0.15 FAIL)", () => {
   it("FAIL just above 0.15", () => expect(w(0.1501)).toBe("FAIL"));
 });
 
+describe("washboard fluteType-aware (NONE substrate never FAILs/WARNs)", () => {
+  const w = (v: number, fluteType?: GateMeasurements["fluteType"]) =>
+    statusOf(classifyChecks({ ...PASS, washboardAmpRatio: v, fluteType }), "washboard");
+  it("NONE substrate: value that would normally FAIL (0.5) → OK", () =>
+    expect(w(0.5, "NONE")).toBe("OK"));
+  it("NONE substrate: value that would normally WARN (0.1) → OK", () =>
+    expect(w(0.1, "NONE")).toBe("OK"));
+  it("flute C substrate: same 0.5 value → still FAIL (other substrates not relaxed)", () =>
+    expect(w(0.5, "C")).toBe("FAIL"));
+  it("fluteType undefined (legacy caller): unchanged, applies fixed thresholds", () =>
+    expect(w(0.5, undefined)).toBe("FAIL"));
+});
+
 describe("whiteBalance (<=5% OK else FAIL)", () => {
   const wb = (v: number) =>
     statusOf(classifyChecks({ ...PASS, wbGainDeviation: v }), "whiteBalance");
@@ -141,6 +154,12 @@ describe("gate state (C4.1)", () => {
     const { report } = evaluateGate(PASS);
     expect(report.measurementEnabled).toBe(true);
     expect(report.passedAll).toBe(true);
+  });
+
+  // 實際使用者場景:標籤材質(無瓦楞)不該被楞痕透印誤判鎖死快門
+  it("NONE substrate with a high washboard reading stays ARMED, not LOCKED", () => {
+    const { state } = evaluateGate({ ...PASS, fluteType: "NONE", washboardAmpRatio: 0.9 });
+    expect(state).toBe("ARMED");
   });
 });
 

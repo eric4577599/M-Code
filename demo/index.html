@@ -418,6 +418,7 @@ function evalGate() {
     symbolDetected:true, varLap:state.gate.varLap, glareRatio:state.gate.glare/100,
     washboardAmpRatio:state.gate.wash, wbGainDeviation:state.gate.wb/100, scaleRefDetected:state.gate.scaleRef,
     picketAngleDeg:state.gate.picket, perspectiveTiltDeg:state.gate.tilt, gsdMmPerPx:0.12, pxPerModule:state.gate.pxm,
+    fluteType:(profileOf(state.profileId)||{}).fluteType,
   });
 }
 const LIGHT_LABEL = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", whiteBalance:"白平衡", scaleRef:"比例尺卡", picket:"印向直立", perspective:"透視", resolution:"解析度" };

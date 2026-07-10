@@ -336,7 +336,8 @@ $("scenarios").onclick = (e) => { const b=e.target.closest("button"); if(!b) ret
 function evalGate() {
   return evaluateGate({ symbolDetected:true, varLap:state.gate.varLap, glareRatio:state.gate.glare/100,
     washboardAmpRatio:state.gate.wash, wbGainDeviation:state.gate.wb/100, scaleRefDetected:state.gate.scaleRef,
-    picketAngleDeg:state.gate.picket, perspectiveTiltDeg:state.gate.tilt, gsdMmPerPx:0.12, pxPerModule:state.gate.pxm });
+    picketAngleDeg:state.gate.picket, perspectiveTiltDeg:state.gate.tilt, gsdMmPerPx:0.12, pxPerModule:state.gate.pxm,
+    fluteType:(profileOf()||{}).fluteType });
 }
 function recompute() {
   const gate = evalGate();

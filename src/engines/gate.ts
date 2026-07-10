@@ -6,6 +6,7 @@
 
 import type {
   CaptureQualityReport,
+  FluteType,
   GateCheck,
   GateStatus,
 } from "../domain/types.js";
@@ -40,6 +41,12 @@ export interface GateMeasurements {
   gsdMmPerPx: number;
   /** Pixels per narrowest module (additional resolution check). */
   pxPerModule: number;
+  /**
+   * 材質楞型(選填)。用於判斷 washboard(楞痕透印)檢查是否適用 ——
+   * 無瓦楞材質(fluteType === "NONE",如標籤面材、裱貼平版)物理上不可能
+   * 出現楞紋透印,不應套用固定振幅門檻,以免材質紋理/背景週期性圖案誤判為 FAIL。
+   */
+  fluteType?: FluteType;
 }
 
 const check = (
@@ -65,7 +72,19 @@ function classifyGlare(glareRatio: number): GateCheck {
   return check("glare", status, glareRatio, "<=1% OK, 1-4% WARN, >4% FAIL");
 }
 
-function classifyWashboard(ampRatio: number): GateCheck {
+function classifyWashboard(ampRatio: number, fluteType?: FluteType): GateCheck {
+  // 無瓦楞材質(fluteType === "NONE")物理上不會有楞痕透印,此檢查不適用,
+  // 一律回傳 OK,不套用固定門檻(避免材質紋理造成假陽性 FAIL/WARN 鎖死快門)。
+  // value 仍回傳原始 ampRatio 供除錯用,不影響狀態判定。
+  if (fluteType === "NONE") {
+    return check(
+      "washboard",
+      "OK",
+      ampRatio,
+      "N/A (no flute — non-corrugated substrate)",
+    );
+  }
+  // 其餘材質(含未提供 fluteType,維持向後相容預設行為):
   // ≤0.08 OK, 0.08–0.15 WARN, >0.15 FAIL.
   let status: GateStatus;
   if (ampRatio <= 0.08) status = "OK";
@@ -145,7 +164,7 @@ export function classifyChecks(m: GateMeasurements): GateCheck[] {
   return [
     classifyFocus(m.varLap),
     classifyGlare(m.glareRatio),
-    classifyWashboard(m.washboardAmpRatio),
+    classifyWashboard(m.washboardAmpRatio, m.fluteType),
     classifyWhiteBalance(m.wbGainDeviation),
     classifyScaleRef(m.scaleRefDetected),
     classifyPicket(m.picketAngleDeg),
