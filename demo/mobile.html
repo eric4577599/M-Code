@@ -143,6 +143,26 @@
     @page { margin:14mm; }
   }
 
+  /* appbar 設定 / 登出小按鈕 */
+  .iconBtn { background:#334155; color:#cbd5e1; border:0; border-radius:999px; font-size:12px; font-weight:600; padding:4px 10px; margin-left:6px; cursor:pointer; }
+
+  /* 設定頁(admin/ADVANCED 專用,目前空白 placeholder) */
+  .setBlock { border:1px solid #e2e8f0; border-radius:12px; padding:14px; margin-bottom:12px; }
+  .setBlock h3 { font-size:14px; margin:0 0 6px; color:#0f172a; }
+  .setBlock .empty { font-size:12px; color:#94a3b8; margin:0; }
+
+  /* 登入覆蓋層:蓋住 appbar 與所有功能 view,未登入時擋住整支 app */
+  .loginOverlay { position:absolute; inset:0; z-index:80; background:linear-gradient(160deg,#0f172a,#1e293b); color:#fff;
+    display:flex; flex-direction:column; justify-content:center; padding:34px 28px; }
+  .loginOverlay.hidden { display:none; }
+  .loginOverlay h2 { font-size:21px; margin:0 0 4px; }
+  .loginOverlay .sub { font-size:12px; color:#94a3b8; margin-bottom:20px; }
+  .loginOverlay label { font-size:12px; color:#cbd5e1; display:block; margin:12px 0 4px; }
+  .loginOverlay input { width:100%; padding:11px 12px; border:1px solid #334155; border-radius:10px; background:#0b1220; color:#fff; font:inherit; }
+  .loginBtn { margin-top:22px; width:100%; padding:13px; border:0; border-radius:12px; background:var(--beam); color:#0b1220; font-size:15px; font-weight:700; cursor:pointer; }
+  .loginErr { color:#f87171; font-size:12px; margin-top:12px; min-height:16px; }
+  .loginNote { font-size:11px; color:#64748b; line-height:1.6; margin-top:22px; border-top:1px solid #1e293b; padding-top:12px; }
+
   /* 真手機:去掉「手機框中框」,填滿螢幕、隱藏假狀態列 */
   @media (max-width: 500px) {
     body { padding:0; background:#0b1220; }
@@ -157,6 +177,8 @@
   <div class="appbar">
     <div class="grow"><div class="t">條碼品質快篩</div><div class="s">相對品質篩檢 · 非 ISO 合規驗證</div></div>
     <button class="listBadge zero" id="listBadge">清單 0</button>
+    <button class="iconBtn" id="settingsBtn" style="display:none" title="設定">⚙ 設定</button>
+    <button class="iconBtn" id="logoutBtn" title="登出">登出</button>
   </div>
 
   <!-- ════ 拍攝 ════ -->
@@ -207,7 +229,7 @@
         <label>判定後內容（可複製）</label>
         <textarea id="resultText" readonly rows="7"></textarea>
       </div>
-      <div class="upsell"><b>升級付費版可解鎖</b>完整參數報告 · 尺寸量測（X寬/BWR/Quiet Zone）· 印刷掉級診斷 · CSV 匯出 · ERP 回寫 · 趨勢監控</div>
+      <div class="upsell" id="upsellBox"><b>升級付費版可解鎖</b>完整參數報告 · 尺寸量測（X寬/BWR/Quiet Zone）· 印刷掉級診斷 · CSV 匯出 · ERP 回寫 · 趨勢監控</div>
       <button class="reBtn" id="reBtn">↻ 再拍一張</button>
     </div>
   </div>
@@ -216,7 +238,7 @@
   <div class="view" id="v-list">
     <div class="listView">
       <button class="back" id="listBack">‹ 返回拍攝</button>
-      <p class="tierNote">🔒 清單留存與 PDF / Excel 報告為<b>付費版</b>功能（免費版單機不留存）— 此畫面為 Demo 試用展示</p>
+      <p class="tierNote" id="listTierNote">🔒 清單留存與 PDF / Excel 報告為<b>付費版</b>功能（免費版單機不留存）— 此畫面為 Demo 試用展示</p>
       <div class="fld"><label>客戶名稱</label><input type="text" id="f-customer" placeholder="例：ACME 食品"></div>
       <div class="fld"><label>品名</label><input type="text" id="f-product" placeholder="例：早餐脆片 500g 外箱"></div>
       <div class="fld"><label>工單號</label><input type="text" id="f-workorder" placeholder="例：WO-2406A-7741"></div>
@@ -227,6 +249,29 @@
       <button class="exBtn clear" id="clearListBtn">清除清單</button>
       <p style="font-size:11px;color:#64748b;margin-top:10px">每按一次檢驗即自動存入清單。PDF 首頁為表頭與判定清單，次頁起為每次掃描原圖與判定結果。</p>
     </div>
+  </div>
+
+  <!-- ════ 設定(僅 admin / ADVANCED 可見入口)════ -->
+  <div class="view" id="v-settings">
+    <div class="listView">
+      <button class="back" id="settingsBack">‹ 返回拍攝</button>
+      <div class="setBlock"><h3>付費版（PAID）功能定義</h3><p class="empty">目前保持空白 · 待設定</p></div>
+      <div class="setBlock"><h3>進階版（ADVANCED）功能定義</h3><p class="empty">目前保持空白 · 待設定</p></div>
+      <p style="font-size:11px;color:#64748b;margin-top:10px">此頁僅系統管理者（admin / ADVANCED）可見，供日後定義各版功能範圍。目前不含任何設定控制項。</p>
+    </div>
+  </div>
+
+  <!-- ════ 登入覆蓋層(client-side demo 授權,非真安全)════ -->
+  <div class="loginOverlay hidden" id="loginOverlay">
+    <h2>條碼品質快篩</h2>
+    <div class="sub">請登入以使用檢測功能</div>
+    <label for="loginUser">帳號</label>
+    <input type="text" id="loginUser" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="admin 或 demo">
+    <label for="loginPass">密碼</label>
+    <input type="password" id="loginPass" autocomplete="current-password" placeholder="密碼">
+    <button class="loginBtn" id="loginBtn">登入</button>
+    <div class="loginErr" id="loginErr"></div>
+    <div class="loginNote">Demo 授權展示：此登入為純前端示範，帳號密碼與分級判定邏輯皆寫在網頁原始碼中、可被檢視與繞過，<b>並非真正的身分驗證或資安機制</b>。正式環境須由後端驗證。</div>
   </div>
 </div>
 
@@ -242,6 +287,7 @@
 import {
   evaluateGate, runDecode, buildGradeResult, evaluateAcceptance,
   SEED_SUBSTRATE_PROFILES, SEED_ACCEPTANCE_POLICIES,
+  isEnabled,
 } from "../dist/index.js";
 import {
   toGray, varianceOfLaplacian, glareRatio, grayWorldWbDeviation, washboardAmpRatio,
@@ -449,10 +495,16 @@ function presentResult(decode, grade, acceptance, img) {
   v.className = "verdict " + (acceptance.pass?"pass":"fail");
   v.textContent = (acceptance.pass ? "通過" : "未通過") + ` ｜ 門檻 ≥ ${policyOf().requiredGrade}`;
   $("margin").textContent = "margin " + acceptance.marginScore.toFixed(2);
-  // 免費版只露光度基本參數;幾何參數屬付費 full_parameters,以鎖定樣式呈現(C10)
-  $("params").innerHTML = grade.parameters.map(p => p.kind === "PHOTOMETRIC"
-    ? `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`
-    : `<span class="pchip locked">🔒 ${p.code}</span>`).join("");
+  // 參數呈現(C10 full_parameters):光度參數一律顯示;幾何參數在 full_parameters
+  // 解鎖(PAID/ADVANCED)時比照 pchip 露出字母+代號+分數,未解鎖(FREE)維持鎖定樣式。
+  const fullParams = isEnabled(currentTier, "full_parameters");
+  $("params").innerHTML = grade.parameters.map(p => {
+    if (p.kind === "PHOTOMETRIC")
+      return `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`;
+    return fullParams
+      ? `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code} <small style="color:#64748b">${p.score.toFixed(2)}</small></span>`
+      : `<span class="pchip locked">🔒 ${p.code}</span>`;
+  }).join("");
   $("resultText").value = [
     `製程環節：${stageLabelOf(state.processStage)}`,
     `符號別：${symLabelR}`,
@@ -561,6 +613,21 @@ function measureFrame() {
   recompute();
 }
 function startMetricsLoop() { if (!metricsTimer) metricsTimer = setInterval(measureFrame, 500); }
+// 停止相機串流與即時量測迴圈(登出時呼叫)。
+// 輸入:無;輸出:無。邏輯:清除 metricsTimer(停背景 recompute)、stop 每個
+//   video track(釋放鏡頭、熄滅相機指示燈)、清空 srcObject/camVideo 與 live 樣式,
+//   使登入層蓋回時不再有相機開啟與 500ms 背景運算(隱私/資源考量)。
+function stopCamera() {
+  if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
+  if (camVideo) {
+    const s = camVideo.srcObject;
+    if (s && s.getTracks) s.getTracks().forEach((t) => { try { t.stop(); } catch (e) {} });
+    camVideo.srcObject = null;
+    camVideo = null;
+  }
+  const fr = $("frame"); if (fr) fr.classList.remove("live");
+  setCamStatus("", "");
+}
 
 // ── ZXing 單次解碼:只在按快門後對拍到的照片執行 ──
 let zxReader = null;
@@ -694,11 +761,66 @@ $("exportPdfBtn").onclick = exportPdf;
 $("exportXlsBtn").onclick = exportXls;
 $("clearListBtn").onclick = clearList;
 
+// ─── 登入 / 分級授權(client-side demo,非真安全)───
+// 誠實聲明:以下帳密表與 tier 判定完全在前端原始碼,任何人可檢視/繞過,
+// 純為 demo 展示分級呈現差異,並非真正的身分驗證或授權機制。正式環境須後端驗證。
+const ACCOUNTS = {
+  admin: { pw: "admin123", tier: "ADVANCED" }, // 全領域(所有功能旗標)
+  demo:  { pw: "demo",     tier: "FREE" },      // 免費版
+};
+const SESSION_KEY = "mcode.session";
+let currentTier = null; // 目前登入者的 tier;未登入為 null
+function loadSession() { try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null"); } catch (e) { return null; } }
+function saveSession(s) { try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) {} }
+function clearSessionStore() { try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {} }
+
+// 依 currentTier 套用分級呈現:設定入口(僅 ADVANCED)、升級提示、清單付費提示的顯隱。
+// 結果頁參數的鎖定/解鎖在 presentResult 內即時依 isEnabled 判定。
+function applyTier() {
+  $("settingsBtn").style.display = currentTier === "ADVANCED" ? "" : "none";
+  // full_parameters 解鎖 → 隱藏「升級付費版可解鎖完整參數」upsell
+  $("upsellBox").style.display = isEnabled(currentTier, "full_parameters") ? "none" : "";
+  // csv_export 解鎖 → 隱藏清單頁付費 tierNote
+  $("listTierNote").style.display = isEnabled(currentTier, "csv_export") ? "none" : "";
+}
+// 登入成功後進入 app:記住 tier、關掉登入層、套用分級、開相機
+function enterApp(s) {
+  currentTier = s.tier;
+  $("loginErr").textContent = ""; $("loginPass").value = "";
+  $("loginOverlay").classList.add("hidden");
+  applyTier();
+  initCamera(false); // 進入 app 才開相機(iOS 若要求手勢,點畫面時補試)
+}
+function doLogin() {
+  const u = $("loginUser").value.trim(), p = $("loginPass").value;
+  const acc = ACCOUNTS[u];
+  if (!acc || acc.pw !== p) { $("loginErr").textContent = "帳號或密碼錯誤"; return; } // 畫面文字報錯,不用 alert
+  const s = { user: u, tier: acc.tier };
+  saveSession(s); enterApp(s);
+}
+function doLogout() {
+  clearSessionStore(); currentTier = null;
+  stopCamera(); // 釋放相機並停即時量測,避免登出後鏡頭仍開、背景每 500ms 續算
+  $("loginUser").value = ""; $("loginPass").value = ""; $("loginErr").textContent = "";
+  show("capture"); // 回到預設 view,再由登入層蓋住
+  $("loginOverlay").classList.remove("hidden");
+}
+$("loginBtn").onclick = doLogin;
+$("loginPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+$("logoutBtn").onclick = doLogout;
+$("settingsBtn").onclick = () => show("settings");
+$("settingsBack").onclick = () => show("capture");
+
 // init
 initSelectors(); renderHud(); recompute(); updateBadge(); renderList();
-// 進入網頁自動開啟相機;iOS 若要求手勢,點畫面時再補試(直到成功)
-initCamera(false);
-document.addEventListener("click", () => { if (!camVideo) initCamera(true); });
+// 開機授權:sessionStorage 有有效 session → 直接進 app(重整維持登入);否則顯示登入層
+(function bootAuth() {
+  const s = loadSession();
+  if (s && ACCOUNTS[s.user] && ACCOUNTS[s.user].tier === s.tier) enterApp(s);
+  else $("loginOverlay").classList.remove("hidden");
+})();
+// 已登入且尚無相機時,點畫面補試開相機(iOS 手勢限制);未登入不啟動相機
+document.addEventListener("click", () => { if (currentTier && !camVideo) initCamera(true); });
 </script>
 </body>
 </html>
