@@ -140,6 +140,27 @@
     #printReport { display:block !important; padding:0; color:#0f172a; }
     @page { margin:14mm; }
   }
+
+  /* ── 登入覆蓋層(client-side demo 授權,非真安全):固定覆蓋整支 app,含 topbar 與所有 page ── */
+  .loginOverlay { position:fixed; inset:0; z-index:9999; background:linear-gradient(160deg,#0f172a,#1e293b); color:#fff;
+    display:flex; flex-direction:column; justify-content:center; align-items:center; padding:34px 28px; }
+  .loginOverlay.hidden { display:none; }
+  .loginCard { width:100%; max-width:360px; }
+  .loginOverlay h2 { font-size:22px; margin:0 0 4px; }
+  .loginOverlay .sub { font-size:13px; color:#94a3b8; margin:0 0 20px; }
+  .loginOverlay label { font-size:12px; color:#cbd5e1; display:block; margin:12px 0 4px; }
+  .loginOverlay input { width:100%; padding:11px 12px; border:1px solid #334155; border-radius:10px; background:#0b1220; color:#fff; font:inherit; }
+  .loginBtn { margin-top:22px; width:100%; padding:13px; border:0; border-radius:12px; background:var(--beam); color:#0b1220; font-size:15px; font-weight:700; cursor:pointer; }
+  .loginErr { color:#f87171; font-size:12px; margin-top:12px; min-height:16px; }
+  .loginNote { font-size:11px; color:#64748b; line-height:1.6; margin-top:22px; border-top:1px solid #1e293b; padding-top:12px; }
+
+  /* 登出小按鈕(topbar 角落) */
+  .logoutBtn { background:#334155; color:#cbd5e1; border:0; border-radius:999px; font-size:12px; font-weight:600; padding:6px 12px; cursor:pointer; }
+  .logoutBtn:hover { background:#475569; }
+
+  /* 分級輕量呈現:升級 upsell / 清單付費 tierNote */
+  .upsell { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; border-radius:10px; padding:11px 13px; font-size:12px; line-height:1.6; margin-bottom:14px; }
+  .tierNote { background:#f8fafc; border:1px dashed #cbd5e1; color:#475569; border-radius:10px; padding:11px 13px; font-size:12px; line-height:1.6; margin-bottom:12px; }
 </style>
 </head>
 <body class="mode-demo">
@@ -159,6 +180,7 @@
       <div class="knob"></div>
     </div>
   </div>
+  <button class="logoutBtn" id="logoutBtn" title="登出">登出</button>
 </div>
 
 <!-- ════════ ① 拍攝 ════════ -->
@@ -203,6 +225,7 @@
 <section class="page" id="page-result">
   <div id="noResult" class="card muted">尚無檢驗結果。請到「① 拍攝」全綠後按快門。</div>
   <div id="resultBody" style="display:none">
+    <div class="upsell" id="upsellBox"><b>升級付費版可解鎖</b>完整參數報告 · 尺寸量測（X寬/BWR/Quiet Zone）· 印刷掉級診斷 · CSV 匯出 · ERP 回寫 · 趨勢監控</div>
     <div class="card">
       <h2>解碼 <span id="decodeStatus"></span></h2>
       <div class="resultGrid">
@@ -275,6 +298,7 @@
       <div><label>掃描總數</label><input type="text" id="f-total" readonly /></div>
     </div>
   </div>
+  <p class="tierNote" id="listTierNote">🔒 清單留存與 PDF / Excel 報告為<b>付費版</b>功能（免費版單機不留存）— 此畫面為 Demo 試用展示</p>
   <div class="card">
     <h2>掃描結果 / 判定清單 <span class="muted" id="listCount"></span></h2>
     <table class="listTable" id="listTable"></table>
@@ -293,12 +317,28 @@
 <!-- 隱藏的列印報告：輸出 PDF 時 window.print() -->
 <div id="printReport"></div>
 
+<!-- ════ 登入覆蓋層(client-side demo 授權,非真安全;預設未登入顯示,蓋住整支 app)════ -->
+<div class="loginOverlay" id="loginOverlay">
+  <div class="loginCard">
+    <h2>瓦楞箱條碼 / QR 品質檢驗</h2>
+    <div class="sub">請登入以使用檢測功能</div>
+    <label for="loginUser">帳號</label>
+    <input type="text" id="loginUser" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="admin 或 demo">
+    <label for="loginPass">密碼</label>
+    <input type="password" id="loginPass" autocomplete="current-password" placeholder="密碼">
+    <button class="loginBtn" id="loginBtn">登入</button>
+    <div class="loginErr" id="loginErr"></div>
+    <div class="loginNote">Demo 授權展示：此登入為純前端示範,帳號密碼與分級判定邏輯皆寫在網頁原始碼中、可被檢視與繞過,<b>並非真正的身分驗證或資安機制</b>。正式環境須由後端驗證。</div>
+  </div>
+</div>
+
 <script type="module">
 import {
   evaluateGate, runDecode, buildMeasurement, buildGradeResult,
   evaluateDiagnosis, evaluateAcceptance, toCsvRow,
   SEED_DIAGNOSIS_RULES, SEED_SUBSTRATE_PROFILES, SEED_ACCEPTANCE_POLICIES,
   scoreToLetter, letterToNominalScore,
+  isEnabled,
 } from "../dist/index.js";
 
 const $ = (id) => document.getElementById(id);
@@ -750,9 +790,60 @@ $("exportPdfBtn").addEventListener("click", exportPdf);
 $("exportXlsBtn").addEventListener("click", exportXls);
 $("clearListBtn").addEventListener("click", clearList);
 
+// ─── 登入 / 分級授權(client-side demo,非真安全)───
+// 誠實聲明:以下帳密表與 tier 判定完全在前端原始碼,任何人可檢視/繞過,
+// 純為 demo 展示分級呈現差異,並非真正的身分驗證或授權機制。正式環境須後端驗證。
+const ACCOUNTS = {
+  admin: { pw: "admin", tier: "PAID" }, // 付費版(ADVANCED 與 admin 專屬設定頁待日後)
+  demo:  { pw: "demo",  tier: "FREE" }, // 免費版
+};
+const SESSION_KEY = "mcode.session";
+let currentTier = null; // 目前登入者的 tier;未登入為 null
+function loadSession() { try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null"); } catch (e) { return null; } }
+function saveSession(s) { try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) {} }
+function clearSessionStore() { try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {} }
+
+// 依 currentTier 套用輕量分級呈現:升級提示、清單付費提示的顯隱。
+// 設定入口維持 ADVANCED-only 閘門(目前無人是 ADVANCED,故自然隱藏);桌面各付費功能深鎖待日後。
+function applyTier() {
+  const up = $("upsellBox");    if (up) up.style.display = isEnabled(currentTier, "full_parameters") ? "none" : "";
+  const ln = $("listTierNote"); if (ln) ln.style.display = isEnabled(currentTier, "csv_export") ? "none" : "";
+}
+// 登入成功後進入 app:記住 tier、關掉登入層、套用分級
+function enterApp(s) {
+  currentTier = s.tier;
+  $("loginErr").textContent = ""; $("loginPass").value = "";
+  $("loginOverlay").classList.add("hidden");
+  applyTier();
+}
+function doLogin() {
+  const u = $("loginUser").value.trim(), p = $("loginPass").value;
+  const acc = ACCOUNTS[u];
+  if (!acc || acc.pw !== p) { $("loginErr").textContent = "帳號或密碼錯誤"; return; } // 畫面文字報錯,不用 alert
+  const s = { user: u, tier: acc.tier };
+  saveSession(s); enterApp(s);
+}
+function doLogout() {
+  clearSessionStore(); currentTier = null;
+  $("loginUser").value = ""; $("loginPass").value = ""; $("loginErr").textContent = "";
+  document.querySelector('[data-page=capture]').click(); // 回到預設頁,再由登入層蓋住
+  $("loginOverlay").classList.remove("hidden");
+}
+$("loginBtn").onclick = doLogin;
+$("loginPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+$("loginUser").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+$("logoutBtn").onclick = doLogout;
+
 // init
 renderChips(); renderSliders(); renderScenarios(); seedHistory(); renderHud(); recompute(); renderTrendChips();
 updateScanBadge(); renderList();
+
+// 開機授權:sessionStorage 有有效 session → 直接進 app(重整維持登入);否則顯示登入層
+(function bootAuth() {
+  const s = loadSession();
+  if (s && ACCOUNTS[s.user] && ACCOUNTS[s.user].tier === s.tier) enterApp(s);
+  else $("loginOverlay").classList.remove("hidden");
+})();
 </script>
 </body>
 </html>

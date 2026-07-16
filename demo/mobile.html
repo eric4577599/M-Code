@@ -765,7 +765,7 @@ $("clearListBtn").onclick = clearList;
 // 誠實聲明:以下帳密表與 tier 判定完全在前端原始碼,任何人可檢視/繞過,
 // 純為 demo 展示分級呈現差異,並非真正的身分驗證或授權機制。正式環境須後端驗證。
 const ACCOUNTS = {
-  admin: { pw: "admin123", tier: "ADVANCED" }, // 全領域(所有功能旗標)
+  admin: { pw: "admin",    tier: "PAID" },      // 付費版
   demo:  { pw: "demo",     tier: "FREE" },      // 免費版
 };
 const SESSION_KEY = "mcode.session";
