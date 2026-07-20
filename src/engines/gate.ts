@@ -99,12 +99,17 @@ function classifyWashboard(ampRatio: number, fluteType?: FluteType): GateCheck {
 }
 
 function classifyWhiteBalance(wbGainDeviation: number): GateCheck {
-  // Δgain ≤5% OK else FAIL. Fraction (0.05 == 5%).
+  // 白平衡僅為「建議燈」,永不 FAIL、永不鎖快門(Δgain ≤5% OK,>5% WARN)。
+  // 理由:條碼 / QR 的可讀性取決於條碼與底色之間的「色差對比」是否足以被解碼器
+  // 準確分辨(此由 C5 解碼與 C7 分級的 SC / MOD / 邊緣對比把關),而非取決於
+  // 絕對白平衡是否中性。有色光源下灰界白平衡偏差很容易超標,若當硬閘門會使
+  // 現場明明拍得出可解讀影像卻鎖死快門(實際使用者回報)。故列為建議、不阻拍。
+  // value 仍回傳原始偏差供除錯與反射量測參考。
   return check(
     "whiteBalance",
-    wbGainDeviation <= 0.05 ? "OK" : "FAIL",
+    wbGainDeviation <= 0.05 ? "OK" : "WARN",
     wbGainDeviation,
-    "<=5% OK",
+    "<=5% OK else WARN (advisory, never locks)",
   );
 }
 

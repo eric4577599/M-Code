@@ -66,11 +66,22 @@ describe("washboard fluteType-aware (NONE substrate never FAILs/WARNs)", () => {
     expect(w(0.5, undefined)).toBe("FAIL"));
 });
 
-describe("whiteBalance (<=5% OK else FAIL)", () => {
+describe("whiteBalance (advisory: <=5% OK else WARN, never FAIL/locks)", () => {
   const wb = (v: number) =>
     statusOf(classifyChecks({ ...PASS, wbGainDeviation: v }), "whiteBalance");
   it("OK at 5%", () => expect(wb(0.05)).toBe("OK"));
-  it("FAIL just above 5%", () => expect(wb(0.0501)).toBe("FAIL"));
+  it("WARN (not FAIL) just above 5%", () => expect(wb(0.0501)).toBe("WARN"));
+  it("even a large deviation stays WARN, never FAIL", () => expect(wb(0.9)).toBe("WARN"));
+});
+
+// 實際使用者場景:有色光源下白平衡偏差超標,不該鎖死快門
+// (條碼可讀性看色差對比,由解碼/分級把關,非白平衡)。
+describe("whiteBalance does not lock the shutter (C4.2 advisory)", () => {
+  it("large wb deviation alone stays ARMED and passedAll true", () => {
+    const { state, report } = evaluateGate({ ...PASS, wbGainDeviation: 0.9 });
+    expect(state).toBe("ARMED");
+    expect(report.passedAll).toBe(true);
+  });
 });
 
 describe("scaleRef (detected OK else FAIL)", () => {
