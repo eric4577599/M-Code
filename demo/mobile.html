@@ -60,6 +60,10 @@
   .shutter { width:74px; height:74px; border-radius:50%; border:5px solid #cbd5e1; background:#94a3b8; cursor:not-allowed; }
   .shutter.ready { background:var(--ok); border-color:#bbf7d0; box-shadow:0 0 0 4px rgba(34,197,94,.25); cursor:pointer; }
   .shutterLbl { font-size:12px; color:#64748b; }
+  /* 拍攝頁快速鍵:操作說明 / 檢測結果 */
+  .quickRow { display:flex; gap:8px; padding:0 14px 4px; }
+  .quickRow button { flex:1; border:1px solid #e2e8f0; background:#fff; color:var(--ink); border-radius:11px; padding:10px 0; font-size:13px; font-weight:600; cursor:pointer; }
+  .quickRow button:disabled { color:#94a3b8; background:#f1f5f9; cursor:default; }
   .demoPick { padding:4px 14px 12px; }
   .demoPick summary { font-size:12px; color:#0ea5e9; cursor:pointer; }
   .demoPick .row { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
@@ -205,6 +209,11 @@
     <div class="shutterWrap">
       <button class="shutter" id="shutter" disabled></button>
       <span class="shutterLbl" id="shutterLbl">校準中…</span>
+    </div>
+
+    <div class="quickRow">
+      <button id="manualBtn">📖 操作說明</button>
+      <button id="lastResultBtn" disabled>📋 檢測結果</button>
     </div>
 
     <details class="demoPick">
@@ -521,6 +530,7 @@ function presentResult(decode, grade, acceptance, img) {
     ]),
   ].join("\n");
   saveScan(decode, grade, acceptance, img);
+  $("lastResultBtn").disabled = false; // 已有檢驗結果,拍攝頁「檢測結果」可用
   show("result");
 }
 
@@ -761,6 +771,9 @@ function show(v) { document.querySelectorAll(".view").forEach(x=>x.classList.rem
 $("shutter").onclick = inspect;
 $("back").onclick = () => show("capture");
 $("reBtn").onclick = () => show("capture");
+// 拍攝頁快速鍵:操作說明開手冊分頁;檢測結果回最近一次結果頁(無結果時停用)
+$("manualBtn").onclick = () => window.open("manual.html", "_blank");
+$("lastResultBtn").onclick = () => show("result");
 $("listBadge").onclick = () => { renderList(); show("list"); };
 $("listBack").onclick = () => show("capture");
 $("exportPdfBtn").onclick = exportPdf;
