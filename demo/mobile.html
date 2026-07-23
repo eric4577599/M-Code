@@ -505,14 +505,20 @@ function presentResult(decode, grade, acceptance, img) {
       ? `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code} <small style="color:#64748b">${p.score.toFixed(2)}</small></span>`
       : `<span class="pchip locked">🔒 ${p.code}</span>`;
   }).join("");
+  // 判定後內容依 tier 分流:full_parameters 解鎖(PAID/ADVANCED)顯示完整參數
+  // 報告(全參數字母+分數);FREE 維持基本參數 + 升級提示文案。
   $("resultText").value = [
     `製程環節：${stageLabelOf(state.processStage)}`,
     `符號別：${symLabelR}`,
     `解碼：${decode.decoded ? "成功 · "+decode.data : "不可讀（綜合崩壞）"}`,
     `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
     `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policyOf().requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
-    `基本參數（免費版·光度）：${grade.parameters.filter(p=>p.kind==="PHOTOMETRIC").map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
-    `完整參數報告（幾何 ${grade.parameters.filter(p=>p.kind!=="PHOTOMETRIC").map(p=>p.code).join("/") || "DEC/DEF/FPD/GNU"} 等）：付費版解鎖`,
+    ...(fullParams ? [
+      `完整參數報告（付費版）：${grade.parameters.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
+    ] : [
+      `基本參數（免費版·光度）：${grade.parameters.filter(p=>p.kind==="PHOTOMETRIC").map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
+      `完整參數報告（幾何 ${grade.parameters.filter(p=>p.kind!=="PHOTOMETRIC").map(p=>p.code).join("/") || "DEC/DEF/FPD/GNU"} 等）：付費版解鎖`,
+    ]),
   ].join("\n");
   saveScan(decode, grade, acceptance, img);
   show("result");
