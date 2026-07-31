@@ -453,11 +453,15 @@ function renderScenarios() {
 }
 
 // ───────────────────────── pipeline ─────────────────────────
+// gsdMmPerPx 必須跟著 scaleRef 走:有比例尺卡才有實體基準可換算 mm/px(規格 A4.5),
+// 沒有就傳 null,讓 gate.ts 的 classifyResolution 走「GSD 不可得」分支僅以 pxPerModule 判定。
+// 本頁是桌面模擬測試台,scaleRef 為 true 時給的 0.12 是刻意的模擬量測值,不是實測結果。
 function evalGate() {
   return evaluateGate({
     symbolDetected:true, varLap:state.gate.varLap, glareRatio:state.gate.glare/100,
     washboardAmpRatio:state.gate.wash, wbGainDeviation:state.gate.wb/100, scaleRefDetected:state.gate.scaleRef,
-    picketAngleDeg:state.gate.picket, perspectiveTiltDeg:state.gate.tilt, gsdMmPerPx:0.12, pxPerModule:state.gate.pxm,
+    picketAngleDeg:state.gate.picket, perspectiveTiltDeg:state.gate.tilt,
+    gsdMmPerPx:state.gate.scaleRef ? 0.12 : null, pxPerModule:state.gate.pxm,
     fluteType:(profileOf(state.profileId)||{}).fluteType,
   });
 }
