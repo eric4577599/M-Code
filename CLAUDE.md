@@ -52,7 +52,7 @@ M-Code = 瓦楞箱條碼 / QR 品質檢驗的**純運算核心庫**(前端無關
 
 ```bash
 npm run typecheck   # tsc --noEmit(只掃 src)
-npm test            # vitest,現況 12 檔 159 測試
+npm test            # vitest(測試檔數/測試數以實跑輸出為準,本檔不複製數字)
 npm run build       # tsc → dist/(demo 依賴,必跑)
 ```
 
