@@ -267,6 +267,489 @@ export function lineAngleDeg(points) {
   return Math.min(a, 180 - a);
 }
 
+// 由 capabilities 的區間欄位取出可用上限:只接受有限正數,
+// 缺欄位、null、0、字串、NaN 一律視為不可得並回 0(呼叫端據此降級)
+function capabilityMax(range) {
+  if (!range || typeof range !== "object") return 0;
+  const v = range.max;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/**
+ * 挑選快門時要請求的解析度(規格 §3.1 三層降級)。純函式,不碰 MediaStream,
+ * 能力表由呼叫端讀好再注入,才測得到。
+ * 輸入:
+ * - caps:`MediaStreamTrack.getCapabilities()` 的回傳,可能為 null 或殘缺(Safari)
+ * - photoCaps:`ImageCapture.getPhotoCapabilities()` 的回傳,可能為 null / undefined
+ * 輸出:{ width, height, source, tier, widthOnly }
+ * - tier 1 / source 'photo':photoCaps 的 imageWidth.max 與 imageHeight.max 皆可用
+ *   (Android Chrome 的照片上限通常遠高於視訊)
+ * - tier 2 / source 'track':退而用 caps 的 width.max 與 height.max
+ * - tier 3 / source 'fallback':兩者皆不可得 → 4096×4096,語意是「請求 ideal
+ *   讓瀏覽器自己 clamp」,不猜裝置能力
+ * 任何殘缺輸入都不得 throw;寬高必須同時可得才採用,只有其中一邊視為不可得。
+ *
+ * widthOnly 的意思:**true 時呼叫端只准拿 width 下 ideal 約束,不得連 height 一起下**。
+ * 為什麼要分:getUserMedia / applyConstraints 的 ideal 是靠 fitness distance 挑模式,
+ * 寬與高各算一份距離再相加。
+ * - tier 2 的 caps.width.max 與 caps.height.max 是兩個獨立區間的上限,**不保證來自
+ *   同一個可用模式**(例:1920×1080 與 1280×960 並存時,上限組出 1920×960 這種
+ *   不存在的組合),兩邊一起下約束會把瀏覽器推去選一個折衷的怪模式。
+ * - tier 3 的 4096×4096 是為了「讓瀏覽器自己 clamp」而寫的請求值,1:1 長寬比不是
+ *   任何實機的真實比例,一起下高度只會讓 fitness distance 偏向接近正方形的模式。
+ * - tier 1 的寬高是給 ImageCapture.takePhoto() 的 photoSettings,由 UA 直接挑最接近的
+ *   照片尺寸,不走 fitness distance,故 widthOnly 為 false,寬高可一起帶。
+ * 高度一律交給裝置依原生長寬比決定 —— 分析只吃寬度(§3.1 只對 ROI 取像素)。
+ */
+export function pickBestResolution(caps, photoCaps) {
+  const pw = capabilityMax(photoCaps && photoCaps.imageWidth);
+  const ph = capabilityMax(photoCaps && photoCaps.imageHeight);
+  if (pw && ph) return { width: pw, height: ph, source: "photo", tier: 1, widthOnly: false };
+  const tw = capabilityMax(caps && caps.width);
+  const th = capabilityMax(caps && caps.height);
+  if (tw && th) return { width: tw, height: th, source: "track", tier: 2, widthOnly: true };
+  return { width: 4096, height: 4096, source: "fallback", tier: 3, widthOnly: true };
+}
+
+/**
+ * ROI 座標放大並夾回畫布邊界(規格 §3.1:解碼與定位跑降取樣版,ROI 座標再放大回
+ * 全解析度,只對放大後的 ROI 取像素)。
+ * 輸入:
+ * - roi:降取樣版座標的 { x0, y0, x1, y1 }
+ * - k:降取樣版 → 全解析度的放大倍率(全解析度寬 / 降取樣版寬)
+ * - maxW / maxH:全解析度畫布的寬高,夾回用
+ * 輸出:全解析度座標的新 roi { x0, y0, x1, y1 },整數。
+ * 邏輯:左上取 floor、右下取 ceil(寧可多包一點也不切到符號邊緣),再夾進
+ *   [0, maxW] / [0, maxH];退化(x1 ≤ x0,含原始寬或高為 0)時往右下補 1 px,
+ *   保證回傳至少 1×1 且完全落在畫布內 —— 下游 getImageData 取到畫布外會直接壞掉。
+ */
+export function scaleRoi(roi, k, maxW, maxH) {
+  const w = Math.max(1, Math.floor(maxW)), h = Math.max(1, Math.floor(maxH));
+  const clamp = (v, hi) => Math.min(Math.max(0, v), hi);
+  const x0 = clamp(Math.floor(roi.x0 * k), w - 1), y0 = clamp(Math.floor(roi.y0 * k), h - 1);
+  const x1 = Math.max(x0 + 1, clamp(Math.ceil(roi.x1 * k), w));
+  const y1 = Math.max(y0 + 1, clamp(Math.ceil(roi.y1 * k), h));
+  return { x0, y0, x1, y1 };
+}
+
+/**
+ * ROI 取樣預算(規格 §3.1 記憶體護欄):4032×3024 全張 getImageData 是 48MB RGBA、
+ * toGray 再吃 12MB,iOS Safari 舊機會被系統回收分頁,故 ROI 過大時先等比縮再取像素。
+ * 輸入:ROI 寬 rw、高 rh、像素數上限 maxPixels(非有限正數視為無上限)。
+ * 輸出:{ w, h, scale } —— 該取的取樣寬高與縮放倍率。
+ * 邏輯:面積在上限內 → 原尺寸、scale 為 1;超過 → scale = √(上限/面積),寬高等比
+ *   縮放後四捨五入,至少 1 px(量測值即以該取樣尺寸為準,不再是原始 ROI 尺寸)。
+ */
+export function fitRoiToBudget(rw, rh, maxPixels) {
+  const w0 = Math.max(1, Math.round(rw)), h0 = Math.max(1, Math.round(rh));
+  const area = w0 * h0;
+  const budget = typeof maxPixels === "number" && Number.isFinite(maxPixels) && maxPixels > 0 ? maxPixels : Infinity;
+  if (area <= budget) return { w: w0, h: h0, scale: 1 };
+  const scale = Math.sqrt(budget / area);
+  return { w: Math.max(1, Math.round(w0 * scale)), h: Math.max(1, Math.round(h0 * scale)), scale };
+}
+
+// ── 梯形矯正(規格 §3.3 提案 B)────────────────────────────────────────────
+// 整段共用的座標與矩陣約定,呼叫端請照此傳值:
+// - 點一律是 { x, y },影像座標(x 向右、y 向下),單位像素。
+// - 單應矩陣 H 是 row-major 的 9 元素陣列 [h11,h12,h13,h21,h22,h23,h31,h32,h33],
+//   齊次式 (u,v,w)ᵀ = H·(x,y,1)ᵀ,實際座標為 (u/w, v/w)。
+// - **方向固定為「來源影像 → 正射輸出」**,即 solveHomography(影像四角, 正射四角)。
+//   warpPerspective 與 tiltFromHomography 吃的都是同一個 H,呼叫端不必自己反轉。
+// - 任何退化輸入(點數不足、四點共線、矩陣奇異、焦距不可得)一律回 **null 代表不可得**,
+//   不 throw、不代填數字 —— 規格 §3.3 明訂「信心不足時誠實退回不矯正」,不得硬套一個
+//   錯的矩陣;同理也不得代填一個「看起來正常」的量測值,閘門語意下那通常正好是放行值
+//   (見 tiltFromHomography)。要退回哪條路徑由呼叫端決定。
+
+// 取出前 n 個座標有限的點(座標非有限的點直接略過);不足 n 個回 null
+function takeFinitePoints(points, n) {
+  if (!points || typeof points.length !== "number") return null;
+  const out = [];
+  for (let i = 0; i < points.length && out.length < n; i++) {
+    const p = points[i];
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    out.push({ x: p.x, y: p.y });
+  }
+  return out.length === n ? out : null;
+}
+
+// 四邊形 shoelace 面積的兩倍(帶正負號)。y 向下的影像座標系中,正值代表
+// 畫面上的順時針(即 TL→TR→BR→BL)方向。
+function polygonArea2(q) {
+  let s = 0;
+  for (let i = 0; i < q.length; i++) {
+    const a = q[i], b = q[(i + 1) % q.length];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return s;
+}
+
+// 最小面積外接矩形(oriented bbox)。輸入:環狀順序的 4 點;
+// 輸出:{ area, long, short } —— 矩形面積與長短兩邊的邊長,完全退化時皆為 0。
+// 候選方向只取**四條邊自己的方向**:凸多邊形的最小面積外接矩形必與其中一邊貼齊
+// (rotating calipers 定理),凹四邊形取到的則是上界(偏保守,寧可低估填充率)。
+// **不得把「軸對齊」列為候選** —— 那會讓量測值隨畫面內旋轉角改變,正是 2026-07-31
+// 修掉的病灶:以軸對齊外接框當分母時,10:1 的 1D 四邊形只要 picket 轉 25°
+// (閘門本身只判 WARN、明確放行)填充率就掉到 0.205,再多一點雜訊就靜默退回。
+function minAreaRect(q) {
+  let best = null;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (!len) continue; // 重複點:這條邊給不出方向
+    const ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+    let uMin = Infinity, uMax = -Infinity, nMin = Infinity, nMax = -Infinity;
+    for (const p of q) {
+      const pu = p.x * ux + p.y * uy, pn = -p.x * uy + p.y * ux;
+      if (pu < uMin) uMin = pu;
+      if (pu > uMax) uMax = pu;
+      if (pn < nMin) nMin = pn;
+      if (pn > nMax) nMax = pn;
+    }
+    const w = uMax - uMin, h = nMax - nMin, area = w * h;
+    if (!best || area < best.area) best = { area, long: Math.max(w, h), short: Math.min(w, h) };
+  }
+  return best || { area: 0, long: 0, short: 0 }; // 四點完全重合:沒有任何方向可用
+}
+
+/**
+ * 四角擬合信心的門檻(規格 §3.3「擬合信心不足時誠實退回不矯正」)。
+ * 四項互相獨立、任一項不過即判退化;數字的理由見 quadConfidence 的 JSDoc。
+ * 這些門檻都與四邊形的整體尺度**無關**(不是「相對 span 的比例」),
+ * 才擋得住「整體很大、但某一邊薄如紙片」的近退化四邊形;而且都是**旋轉不變**的量,
+ * 同一個四邊形在畫面內轉任意角度,四個實測值都不變(picket 角由閘門去判,不由本函式)。
+ */
+export const QUAD_CONFIDENCE_LIMITS = Object.freeze({
+  minEdgePx: 8,
+  minFillRatio: 0.55,
+  maxAspectRatio: 25,
+  minAngleDeg: 20,
+});
+
+/**
+ * 四角擬合信心(規格 §3.3):判斷這組四角值不值得拿去解單應矩陣。
+ * 輸入:corners,4 個 { x, y },**必須已是環狀順序**(orderCorners 的輸出);
+ *   非環狀順序會構成自交多邊形,面積與內角都失去意義。
+ * 輸出:{ ok, areaPx, minEdgePx, fillRatio, aspectRatio, minAngleDeg };點數不足回 null。
+ * 邏輯:單看「面積是否為 0」只擋得住**完全**共線 —— 近退化四邊形(例如 1000×0.001 的
+ *   紙片)照樣解得出 mapErr=0 的「合法」H,warpPerspective 會把 0.001px 高的來源
+ *   拉伸成整張正射圖,下游 roi1DGeometry 還照樣算得出看似正常的 maxWidthDeviation。
+ *   故改為四重把關,任一項不過就 ok=false,由呼叫端誠實退回不矯正:
+ * - **minEdgePx = 8**:最短邊的像素長度。與 resolution 檢查的 pxPerModule ≥ 8 同源
+ *   —— 一條邊短於 8px 連一個模組都放不下,矯正出來的細節必然是內插憑空生出來的。
+ *   用絕對像素而非相對 span,才擋得住紙片狀四邊形。
+ * - **minFillRatio = 0.55**:四邊形面積 / **最小面積外接矩形**面積(見 minAreaRect)。
+ *   分母用 oriented bbox 而非軸對齊外接框,量才是**旋轉不變**的:正矩形不論轉幾度都是
+ *   1.0,45° 旋轉的正方形也是 1.0(舊定義是 0.5),透視梯形則隨遠近端比例下降。
+ *   凸四邊形此值的**下界恰是 0.5**(退化成三角形時等號成立,即三點共線、DLT 已不可解),
+ *   故 0.55 的語意是「離三角形退化至少留 10% 餘裕」。換算成看得懂的量:等腰梯形的
+ *   fillRatio = (遠端邊 + 近端邊) / (2 × 近端邊),0.55 恰好對應「**遠端邊只剩近端邊的
+ *   1/10**」才擋 —— 本輪針孔合成實測(f=900、距離 833、長寬比 4.5)繞軸傾到 85° 時
+ *   fillRatio 仍有 0.736,離門檻還很遠,5° 透視閘門下更是 0.970。共線四邊形此值為 0,
+ *   故本項同時涵蓋舊的共線判定。
+ *   **2026-07-31 修正:** 舊版分母是軸對齊外接框、門檻 0.2,那組數字是以近正方形符號推的
+ *   (正矩形 1.0、45° 正方形 0.5),對 1D 不成立 —— 長寬比 10:1 的四邊形只要在畫面內轉
+ *   25°(picket 閘門本身只判 WARN、明確放行)填充率就掉到 0.205,15:1 轉 20° 更直接
+ *   0.171 → ok=false → orderCorners 回 null,角點稍有雜訊就靜默退回不矯正,
+ *   而規格 §3.3 說「一維是最硬的一段」,階段 ⑤ 的 bearer bar 擬合正靠這道把關。
+ * - **maxAspectRatio = 25**:最小面積外接矩形的長邊 / 短邊,即「細長斜帶」的獨立判準
+ *   (旋轉不變性由 minFillRatio 交還之後,細長與否得自己明講,不能再靠填充率順便擋)。
+ *   數字用真實 1D 幾何定,不沿用正方形推來的值:ITF-14 100% 總寬約 142.7mm(§D2)、
+ *   條高 32mm → 約 4.5:1;GS1-128 最長 165mm、最低條高 13mm → 約 12.7:1,是合法符號裡
+ *   最細長的一種。再留約 2 倍餘裕吸收透視壓縮(繞長軸傾 60° 時高度只剩 cos60=0.5)
+ *   → 25。超過 25:1 已不可能是任何 1D 符號的四角,通常是擬合塌陷成幾條 bar 的殘骸;
+ *   真的是「拍得太斜」則由 picket / perspective 閘門去報原因,不該由本函式靜默吃掉。
+ * - **minAngleDeg = 20**:最小內角。透視再嚴重,矩形投影的內角也不會小於約 30°,
+ *   小於 20° 代表兩角幾乎重合或三點近共線 —— DLT 在這種組態下對 1px 的角點誤差
+ *   極度敏感,解得出來也不可信。
+ * 注意:minAngleDeg 取的是兩邊的**非反向夾角**(≤180°),凹四邊形的反角會被記成補角,
+ *   故本函式是退化判定、**不是凸性檢查**(凹點附近的夾角變小時仍會被擋下)。
+ */
+export function quadConfidence(corners) {
+  const q = takeFinitePoints(corners, 4);
+  if (!q) return null;
+  const rect = minAreaRect(q);
+  const areaPx = Math.abs(polygonArea2(q)) / 2;
+  let minEdgePx = Infinity, minAngleDeg = 180;
+  for (let i = 0; i < 4; i++) {
+    const p = q[i], next = q[(i + 1) % 4], prev = q[(i + 3) % 4];
+    const edge = Math.hypot(next.x - p.x, next.y - p.y);
+    if (edge < minEdgePx) minEdgePx = edge;
+    const a = { x: prev.x - p.x, y: prev.y - p.y }, b = { x: next.x - p.x, y: next.y - p.y };
+    const la = Math.hypot(a.x, a.y), lb = Math.hypot(b.x, b.y);
+    // 邊長為 0(重複點)時內角無定義,直接記 0 讓判定失敗
+    const cos = la && lb ? (a.x * b.x + a.y * b.y) / (la * lb) : 1;
+    const deg = la && lb ? (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI : 0;
+    if (deg < minAngleDeg) minAngleDeg = deg;
+  }
+  const fillRatio = rect.area > 0 ? areaPx / rect.area : 0;
+  // 短邊為 0(共線或四點重合)時長寬比視為無限大,不回 NaN —— NaN 的比較恆為 false,
+  // 語意上會變成「不知道就當它過不了」的巧合,不如直接寫成「無限細長」明確。
+  const aspectRatio = rect.short > 0 ? rect.long / rect.short : Infinity;
+  const ok =
+    minEdgePx >= QUAD_CONFIDENCE_LIMITS.minEdgePx &&
+    fillRatio >= QUAD_CONFIDENCE_LIMITS.minFillRatio &&
+    aspectRatio <= QUAD_CONFIDENCE_LIMITS.maxAspectRatio &&
+    minAngleDeg >= QUAD_CONFIDENCE_LIMITS.minAngleDeg;
+  return { ok, areaPx, minEdgePx, fillRatio, aspectRatio, minAngleDeg };
+}
+
+/**
+ * 四角排序(**只排序、不判定退化**):任意順序的 4 點 → [TL, TR, BR, BL](規格 §3.3)。
+ * 輸入:points,≥4 個 { x, y };超過 4 個只取前 4 個座標有限者。
+ * 輸出:長度 4 的陣列;**只有點數不足時**回 null(排不出來),擬合信心一概不管。
+ * 邏輯:各符號別回傳的點順序不一致(QR 是 finder 中心、DataMatrix 是 L 型端點),
+ *   故先以重心極角排成環狀(y 向下時,極角遞增即畫面順時針),再把「x+y 最小」
+ *   的點轉到開頭當 TL —— 環狀順序 + 固定起點,同一組點不論輸入順序都給同一結果。
+ *   注意:起點用 x+y 最小,在符號旋轉超過 45° 時會挑到相鄰角(印向本來就該先過
+ *   picket 閘門),此處不另做旋轉推測。
+ * **為什麼要單獨匯出這一支(2026-07-31):** quadConfidence 回傳實測值而非只回布林,
+ *   是為了「讓呼叫端在退回時說明是哪一項不過」(規格 §3.3),但它的輸入前提是
+ *   **已經環狀排序**,而唯一產出環狀順序的公開入口是 orderCorners —— 呼叫端拿到 null
+ *   之後就再也問不出原因,那個設計目的在舊的 API 形狀下根本達不到。
+ *   階段 ④/⑤ 的護欄要的正是「退回時講得出原因」,故拆成:
+ *   `const raw = orderCornersRaw(pts); const conf = quadConfidence(raw);`
+ *   —— 排序與判定分離,orderCorners 則保留為「排序 + 判定」的便利包裝。
+ */
+export function orderCornersRaw(points) {
+  const q = takeFinitePoints(points, 4);
+  if (!q) return null;
+  const cx = (q[0].x + q[1].x + q[2].x + q[3].x) / 4;
+  const cy = (q[0].y + q[1].y + q[2].y + q[3].y) / 4;
+  const ring = q
+    .map((p) => ({ p, a: Math.atan2(p.y - cy, p.x - cx) }))
+    .sort((m, n) => m.a - n.a)
+    .map((e) => e.p);
+  let start = 0;
+  for (let i = 1; i < 4; i++) {
+    if (ring[i].x + ring[i].y < ring[start].x + ring[start].y) start = i;
+  }
+  let out = [0, 1, 2, 3].map((i) => ring[(start + i) % 4]);
+  const area2 = polygonArea2(out);
+  // 極角排序理應給出順時針環,萬一重心落在四邊形外而反向,就翻回來(保住起點)
+  if (area2 < 0) out = [out[0], out[3], out[2], out[1]];
+  return out;
+}
+
+/**
+ * 四角排序 + 擬合信心判定(規格 §3.3):任意順序的 4 點 → [TL, TR, BR, BL] 或 null。
+ * 輸入同 orderCornersRaw;輸出:點數不足,或 quadConfidence 判定擬合信心不足(重複點、
+ *   四點共線、紙片狀、過度細長等近退化四邊形)時回 null,其餘回排好的四角。
+ * 退化判定交給 quadConfidence 的四重把關(最短邊 / 填充率 / 長寬比 / 最小內角)。
+ * 舊版只比「面積 vs span²」,實質等於「面積 ≥ 1px² 就放行」,近退化四邊形照樣通過。
+ * **要知道是哪一項不過**(退回時要對使用者說明原因)就別用本函式的 null,改走
+ * `quadConfidence(orderCornersRaw(points))` 拿實測值 —— 兩者判定完全同源。
+ */
+export function orderCorners(points) {
+  const out = orderCornersRaw(points);
+  if (!out) return null;
+  const conf = quadConfidence(out);
+  if (!conf || !conf.ok) return null;
+  return out;
+}
+
+/**
+ * 正射目標矩形尺寸(規格 §3.3):寬取上下兩邊長的**最大值**、高取左右兩邊長的最大值。
+ * 輸入:corners,orderCorners 的輸出([TL, TR, BR, BL]);輸出:{ w, h } 整數,
+ *   點數不足回 null。
+ * 邏輯:取最大而非平均,是為了**少損失一部分解析度** —— resolution 檢查的
+ *   pxPerModule ≥ 8 直接依賴取樣密度(規格 §1.5)。
+ *   **但這不等於「不降取樣」**:只有仿射變形(整張等比)才可能一點都不損失。
+ *   透視變形下同一條掃描線上近端與遠端的取樣密度本來就不同,矯正輸出是單一均勻網格,
+ *   取邊長最大值仍會把近端壓下來 —— 本輪合成測試實測:模組寬 10.0–14.5px 的傾斜影像
+ *   矯正後落在 12.0–12.5px,近端的 14.5 被降到 12.5。
+ *   **矯正不能替代把手機拍正**(現場教育訓練請照這個說法,不要說「矯正後就不損失」)。
+ *   退化四邊形至少回 1×1,避免下游配出 0 面積的緩衝區。
+ */
+export function targetRectSize(corners) {
+  const c = takeFinitePoints(corners, 4);
+  if (!c) return null;
+  const d = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+  const w = Math.max(d(c[0], c[1]), d(c[3], c[2])); // 上邊、下邊
+  const h = Math.max(d(c[0], c[3]), d(c[1], c[2])); // 左邊、右邊
+  return { w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) };
+}
+
+// 8 元線性方程組的高斯消去(含部分主元選取)。輸入:8×8 係數列陣列 A 與常數項 b;
+// 輸出:解陣列,主元過小(奇異)或解含非有限值時回 null。
+// 門檻用相對值 1e-9 × 最大元素:DLT 的係數量級橫跨 1 到 u·x(千像素時達 1e6),
+// 用絕對門檻會在大座標下把正常解誤判成奇異。
+function solveLinear8(A, b) {
+  const n = b.length;
+  const M = A.map((row, i) => row.concat([b[i]]));
+  let scaleMax = 0;
+  for (const row of M) for (const v of row) {
+    if (!Number.isFinite(v)) return null;
+    const a = Math.abs(v);
+    if (a > scaleMax) scaleMax = a;
+  }
+  if (!(scaleMax > 0)) return null;
+  const tol = 1e-9 * scaleMax;
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+    if (Math.abs(M[piv][c]) <= tol) return null; // 奇異:四點共線或退化四邊形
+    if (piv !== c) { const t = M[piv]; M[piv] = M[c]; M[c] = t; }
+    for (let r = c + 1; r < n; r++) {
+      const f = M[r][c] / M[c][c];
+      if (f === 0) continue;
+      for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k];
+    }
+  }
+  const x = new Array(n);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = M[r][n];
+    for (let k = r + 1; k < n; k++) s -= M[r][k] * x[k];
+    x[r] = s / M[r][r];
+  }
+  return x.every(Number.isFinite) ? x : null;
+}
+
+// 3×3 反矩陣(row-major 9 元素)。輸入:H;輸出:H⁻¹ 或 null(奇異/含非有限值)。
+// 行列式門檻取 1e-12 × 三個列向量長度的乘積(Hadamard 上界的相對量):
+// 直接用「最大元素³」會在含大平移量的正常矩陣上把門檻抬到比行列式還大而誤殺。
+function invert3x3(H) {
+  if (!H || H.length !== 9) return null;
+  for (const v of H) if (!Number.isFinite(v)) return null;
+  const [a, b, c, d, e, f, g, h, i] = H;
+  const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+  const det = a * A + b * B + c * C;
+  const bound = Math.hypot(a, b, c) * Math.hypot(d, e, f) * Math.hypot(g, h, i);
+  if (!Number.isFinite(det) || Math.abs(det) <= 1e-12 * bound) return null;
+  return [
+    A / det, -(b * i - c * h) / det, (b * f - c * e) / det,
+    B / det, (a * i - c * g) / det, -(a * f - c * d) / det,
+    C / det, -(a * h - b * g) / det, (a * e - b * d) / det,
+  ];
+}
+
+/**
+ * 解單應矩陣(規格 §3.3):兩組 4 點 → 3×3 或 null。
+ * 輸入:src / dst 各 ≥4 個 { x, y },**索引一一對應**(通常兩邊都先過 orderCorners)。
+ * 輸出:row-major 9 元素矩陣(h33 固定為 1),奇異時回 null,絕不回含 NaN 的矩陣。
+ * 邏輯:DLT 標準式,每組對應點給兩條方程
+ *   x·h11 + y·h12 + h13 − u·x·h31 − u·y·h32 = u
+ *   x·h21 + y·h22 + h23 − v·x·h31 − v·y·h32 = v
+ *   共 8 條、8 個未知數,以自寫 8×8 高斯消去(部分主元)求解;
+ *   四點共線時消去過程主元趨近 0 → null,退化 dst(四點重合)則由行列式檢查攔下。
+ */
+export function solveHomography(src, dst) {
+  const s = takeFinitePoints(src, 4);
+  const d = takeFinitePoints(dst, 4);
+  if (!s || !d) return null;
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const x = s[i].x, y = s[i].y, u = d[i].x, v = d[i].y;
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+  }
+  const h = solveLinear8(A, b);
+  if (!h) return null;
+  const H = [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+  if (!invert3x3(H)) return null; // 解得出來但矩陣本身奇異(例如 dst 四點重合)
+  return H;
+}
+
+// 雙線性取樣。輸入:灰階、寬高、次像素座標;輸出:內插後的亮度(0–255)。
+// 越界處理:座標先夾回 [0, w−1]×[0, h−1],即**複製邊界像素**。
+// 為什麼不用 0 填:0 是全黑,會在正射影像四周造出不存在的暗 run,直接污染
+// scanlineRuns 的分段與 edgeContrasts;複製邊界則沿用該處原有的亮度(靜區通常是亮的)。
+function sampleBilinear(gray, w, h, x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return 0;
+  const cx = Math.min(Math.max(x, 0), w - 1), cy = Math.min(Math.max(y, 0), h - 1);
+  const x0 = Math.floor(cx), y0 = Math.floor(cy);
+  const x1 = Math.min(x0 + 1, w - 1), y1 = Math.min(y0 + 1, h - 1);
+  const fx = cx - x0, fy = cy - y0;
+  const p00 = gray[y0 * w + x0], p10 = gray[y0 * w + x1];
+  const p01 = gray[y1 * w + x0], p11 = gray[y1 * w + x1];
+  const top = p00 + (p10 - p00) * fx, bot = p01 + (p11 - p01) * fx;
+  return top + (bot - top) * fy;
+}
+
+/**
+ * 正射輸出的面積預算(規格 §3.1「記憶體護欄(硬性)」)。與 mobile.html 的
+ * MAX_ROI_PIXELS 同值同源:4032×3024 的來源下 targetRectSize 最壞可給到影像對角線
+ * 量級(約 5040),25M 像素等於 25MB 陣列加同步的雙線性重採樣迴圈,行動裝置會當掉。
+ * 階段 ④ 接線時 mobile.html 應改為引用本常數,不要再各寫一份數字。
+ */
+export const MAX_WARP_PIXELS = 4e6;
+
+/**
+ * 透視矯正(規格 §3.3):灰階 + H → 正射灰階。
+ * 輸入:gray 來源灰階、w/h 來源寬高、H(來源→輸出,見本節開頭約定)、outW/outH 輸出寬高、
+ *   maxPixels 輸出面積上限(預設 MAX_WARP_PIXELS;非有限正數 = 不設上限,記憶體自負)。
+ * 輸出:{ data, w, h, scale };來源或尺寸不合法、H 為 null 或奇異時回 null,不 throw。
+ * - w / h 是**實際**輸出尺寸,超出預算時已等比縮小,不等於請求的 outW/outH。
+ * - scale = 實際輸出寬 / 請求寬(未縮時恰為 1)。呼叫端據此把量測值換算回請求尺度,
+ *   並標註「取樣密度已降低」—— 比照 fitRoiToBudget 與 mobile.html 的 roiScale 用法。
+ * 邏輯:反向映射 —— 對每個輸出像素套 H⁻¹ 求來源座標,再以**雙線性內插**取值。
+ *   不用最近鄰:最近鄰會在模組邊界造成鋸齒,直接污染 edgeContrasts 與
+ *   maxWidthDeviation(規格 §3.3)。落在消失線上(分母為 0)的輸出像素填 0。
+ *   縮小輸出時不改動 H,而是把輸出座標乘回取樣格距(sx/sy ≥ 1)再做反向映射,
+ *   故四角的對應關係與未縮時一致,只是取樣得比較稀。
+ */
+export function warpPerspective(gray, w, h, H, outW, outH, maxPixels = MAX_WARP_PIXELS) {
+  const sw = Number.isFinite(w) ? Math.floor(w) : 0, sh = Number.isFinite(h) ? Math.floor(h) : 0;
+  if (!gray || !(sw > 0) || !(sh > 0) || gray.length < sw * sh) return null;
+  if (!Number.isFinite(outW) || !Number.isFinite(outH) || outW < 1 || outH < 1) return null;
+  const rw = Math.floor(outW), rh = Math.floor(outH); // 請求尺寸
+  const Hi = invert3x3(H);
+  if (!Hi) return null;
+  const fit = fitRoiToBudget(rw, rh, maxPixels);
+  const ow = fit.w, oh = fit.h;
+  const sx = rw / ow, sy = rh / oh; // 取樣格距,未縮時為 1
+  const out = new Uint8ClampedArray(ow * oh);
+  for (let y = 0; y < oh; y++) {
+    const yf = y * sy;
+    for (let x = 0; x < ow; x++) {
+      const xf = x * sx;
+      const den = Hi[6] * xf + Hi[7] * yf + Hi[8];
+      if (!den) continue; // 消失線上,無對應來源點 → 留 0
+      out[y * ow + x] = sampleBilinear(gray, sw, sh, (Hi[0] * xf + Hi[1] * yf + Hi[2]) / den, (Hi[3] * xf + Hi[4] * yf + Hi[5]) / den);
+    }
+  }
+  return { data: out, w: ow, h: oh, scale: ow / rw };
+}
+
+/**
+ * 由單應矩陣求透視傾角(規格 §3.3 / §5.4),取代 quadGeometry 的臂長差代理值。
+ * 輸入:
+ * - H:與 warpPerspective 同一個矩陣(來源影像 → 正射輸出)
+ * - focalPx:相機焦距(像素);cx / cy:主點(通常是分析影像中心),預設 0
+ * 輸出:0–90 的度數,或 **null 代表「不可得」**(H 為 null / 奇異 / 含 NaN,
+ *   或 focalPx 不是有限正數)。不 throw。
+ * **為什麼不可得時回 null 而不是 0:** gate.ts 的語意是 perspectiveTiltDeg ≤ 5° 否則 FAIL,
+ *   0 度是**最寬鬆的放行值**,不是安全值 —— 回 0 等於讓透視閘門永遠綠燈,正是規格
+ *   §1.3 在批判的 state.gate.tilt = 0 那個病灶。瀏覽器的 MediaStreamTrack 一般拿不到
+ *   像素焦距,若本函式代填 0,接線後會恆走這條路徑,比現行的臂長差代理值更糟。
+ *   **退回路徑由呼叫端決定**(例如沿用 quadGeometry 的 tiltDeg 臂長差代理值,並在
+ *   結果標註該值為代理),本函式不代填任何放行數字(規格 §3.3 護欄)。
+ * 邏輯:H⁻¹ 是「正射平面 → 影像」的投影,其前兩欄即平面兩軸方向的消失點(齊次),
+ *   兩者外積得平面的消失線 l;以內參 K = [[f,0,cx],[0,f,cy],[0,0,1]] 還原,
+ *   平面法線 n ∝ Kᵀ·l,傾角 = n 與光軸 (0,0,1) 的夾角
+ *   = atan2(f·√(l₁²+l₂²), |cx·l₁ + cy·l₂ + l₃|)。
+ *   此式只用到消失線,與正射矩形的尺度、長寬比無關(目標矩形換算只差一個軸對齊
+ *   仿射,消失線不變),故 targetRectSize 的估計誤差不會傳進角度。
+ * **為什麼焦距必須由呼叫端給:** 只有 H 推不出絕對角度 —— 同一條消失線在不同視野角
+ *   的相機下對應不同傾角。沒有焦距就誠實回 null 讓呼叫端走退回路徑,不猜一個值。
+ */
+export function tiltFromHomography(H, focalPx, cx = 0, cy = 0) {
+  const G = invert3x3(H); // 正射平面 → 影像
+  if (!G) return null;
+  if (!Number.isFinite(focalPx) || focalPx <= 0) return null;
+  const px = Number.isFinite(cx) ? cx : 0, py = Number.isFinite(cy) ? cy : 0;
+  const a = [G[0], G[3], G[6]], b = [G[1], G[4], G[7]]; // 前兩欄:兩軸消失點
+  const l = [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+  const lateral = focalPx * Math.hypot(l[0], l[1]);
+  const axial = Math.abs(px * l[0] + py * l[1] + l[2]);
+  const deg = (Math.atan2(lateral, axial) * 180) / Math.PI;
+  return Number.isFinite(deg) ? deg : null; // 算不出有限度數同樣是「不可得」,不代填 0
+}
+
 /**
  * FPD(固定圖樣損傷)proxy:暗類像素的標準差相對符號對比的比例。
  * 印刷刮白/針孔會讓暗模組亮度發散 → 比例升高。輸入:灰階、寬、ROI 與
