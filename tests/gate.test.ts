@@ -118,6 +118,236 @@ describe("resolution (gsd<=0.20 & pxPerModule>=8 OK, <8 WARN, <5 FAIL)", () => {
   it("FAIL just below 5", () => expect(r(0.2, 4.9)).toBe("FAIL"));
 });
 
+// 規格 §3.2 / §5.3:比例尺卡未偵測時無實體基準(A4.5),GSD 不可得,
+// 該項僅以 pxPerModule 判定,且不得放寬 pxPerModule>=8 這個門檻。
+describe("resolution with GSD unavailable (null/undefined — no scale ref)", () => {
+  // gsd 允許傳 undefined 以模擬舊呼叫端未帶此欄位的情況,故此處放寬型別。
+  const checkOf = (gsd: number | null | undefined, px: number) => {
+    const m = { ...PASS, gsdMmPerPx: gsd, pxPerModule: px } as GateMeasurements;
+    const c = classifyChecks(m).find((x) => x.key === "resolution");
+    if (!c) throw new Error("no resolution check");
+    return c;
+  };
+  const r = (gsd: number | null | undefined, px: number) => checkOf(gsd, px).status;
+
+  it("null gsd & px 7 (<8) is not OK — WARN", () => expect(r(null, 7)).toBe("WARN"));
+  it("null gsd & px 7.9 (just below 8) is not OK — WARN", () =>
+    expect(r(null, 7.9)).toBe("WARN"));
+  it("null gsd & px 5 boundary is not OK — WARN", () => expect(r(null, 5)).toBe("WARN"));
+  it("null gsd & px 4.9 (<5) FAILs", () => expect(r(null, 4.9)).toBe("FAIL"));
+  it("null gsd & px 8 boundary → OK (threshold not tightened either)", () =>
+    expect(r(null, 8)).toBe("OK"));
+  it("null gsd & px 12 → OK", () => expect(r(null, 12)).toBe("OK"));
+  it("undefined gsd behaves the same as null", () => {
+    expect(r(undefined, 7)).toBe("WARN");
+    expect(r(undefined, 8)).toBe("OK");
+    expect(r(undefined, 4.9)).toBe("FAIL");
+  });
+
+  it("threshold string states that GSD is unavailable", () => {
+    const c = checkOf(null, 8);
+    expect(c.threshold).toContain("GSD unavailable");
+    expect(c.threshold).toContain("pxPerModule>=8 OK, <8 WARN, <5 FAIL");
+  });
+
+  // 文案只陳述狀態、不歸因:null 的成因不只「比例尺卡未偵測」一種,
+  // threshold 不得斷定原因(reviewer minor #9)。
+  it("threshold string does not attribute a cause for the missing GSD", () => {
+    const c = checkOf(null, 8);
+    expect(c.threshold).not.toContain("scale ref");
+    expect(c.threshold).not.toContain("scaleRef");
+  });
+
+  it("value still carries pxPerModule for debugging", () =>
+    expect(checkOf(null, 6.5).value).toBe(6.5));
+
+  // 回歸保護:帶數字 gsd 的行為必須與現況完全一致
+  it("numeric gsd path unchanged: coarse gsd still WARNs even at px 8", () =>
+    expect(r(0.21, 8)).toBe("WARN"));
+  it("numeric gsd path unchanged: 0.20 & px 8 still OK", () =>
+    expect(r(0.2, 8)).toBe("OK"));
+  it("numeric gsd path unchanged: threshold string keeps the gsd clause", () =>
+    expect(checkOf(0.2, 8).threshold).toBe(
+      "gsd<=0.20 & pxPerModule>=8 OK, <8 WARN, <5 FAIL",
+    ));
+  it("numeric gsd 0 (a real, very fine GSD) is not treated as unavailable", () =>
+    expect(checkOf(0, 8).threshold).toContain("gsd<=0.20"));
+});
+
+describe("evaluateGate with no scale ref (規格 §5.3)", () => {
+  it("resolution threshold states GSD unavailable when scaleRefDetected=false", () => {
+    const { report } = evaluateGate({
+      ...PASS,
+      scaleRefDetected: false,
+      gsdMmPerPx: null,
+    });
+    const res = report.checks.find((c) => c.key === "resolution");
+    expect(res?.threshold).toContain("GSD unavailable");
+    // 只說不可得,不在文案裡斷定是哪個成因造成的
+    expect(res?.threshold).not.toContain("scale ref");
+  });
+
+  it("missing GSD with a poor pxPerModule locks the shutter (no free pass)", () => {
+    const { state } = evaluateGate({
+      ...PASS,
+      scaleRefDetected: false,
+      gsdMmPerPx: null,
+      pxPerModule: 4,
+    });
+    expect(state).toBe("LOCKED");
+  });
+
+  it("missing GSD alone (px 8) does not lock — only scaleRef FAILs", () => {
+    const { state, report } = evaluateGate({
+      ...PASS,
+      scaleRefDetected: false,
+      gsdMmPerPx: null,
+    });
+    expect(state).toBe("ARMED");
+    expect(report.measurementEnabled).toBe(false);
+    expect(report.passedAll).toBe(false); // scaleRef 仍 FAIL
+  });
+
+  it("report gsdMmPerPx is NaN (量不出來),絕不補 0 或假值", () => {
+    const { report } = evaluateGate({ ...PASS, scaleRefDetected: false, gsdMmPerPx: null });
+    expect(Number.isNaN(report.gsdMmPerPx)).toBe(true);
+  });
+});
+
+// 「不可得」守衛(C4.2)。demo/*.html 是原生 JS、不進 typecheck,量測失敗很容易把
+// null / undefined / NaN 餵進來;JS 會把 null coerce 成 0,而 0 正是多數檢查最寬鬆的
+// 放行值(≤5° 透視、≤10° 印向、≤1% 眩光、≤0.08 楞痕),不擋就是靜默恆綠。
+// 重點斷言是 state !== "ARMED"(快門不得解鎖),不只看單項 status。
+describe("不可得守衛:量測值為 null / undefined / NaN 時不得放行", () => {
+  // 用 as 繞過型別,刻意模擬「原生 JS 呼叫端沒有型別保護」的實況。
+  const withBad = (field: keyof GateMeasurements, bad: unknown) =>
+    ({ ...PASS, [field]: bad } as GateMeasurements);
+  const BAD_INPUTS: [string, unknown][] = [
+    ["null", null],
+    ["undefined", undefined],
+    ["NaN", NaN],
+  ];
+
+  // 會鎖快門的檢查:不可得 → FAIL → LOCKED。
+  const LOCKING: [keyof GateMeasurements, string][] = [
+    ["varLap", "focus"],
+    ["glareRatio", "glare"],
+    ["washboardAmpRatio", "washboard"],
+    ["picketAngleDeg", "picket"],
+    ["perspectiveTiltDeg", "perspective"],
+    ["pxPerModule", "resolution"],
+  ];
+
+  for (const [field, key] of LOCKING) {
+    describe(`${key}(${field})`, () => {
+      for (const [label, bad] of BAD_INPUTS) {
+        it(`${label} → 不得 ARMED(鎖快門)`, () => {
+          const { state, report } = evaluateGate(withBad(field, bad));
+          expect(state).not.toBe("ARMED");
+          expect(state).toBe("LOCKED");
+          expect(report.passedAll).toBe(false);
+          expect(statusOf(report.checks, key)).toBe("FAIL");
+        });
+
+        it(`${label} → threshold 標明不可得,value 不帶 null/NaN`, () => {
+          const c = classifyChecks(withBad(field, bad)).find((x) => x.key === key)!;
+          expect(c.threshold).toContain("unavailable");
+          expect(c.value).not.toBeNull();
+          expect(Number.isFinite(c.value)).toBe(true);
+        });
+      }
+    });
+  }
+
+  // whiteBalance 是唯一例外:C4.2 明訂它是建議燈、永不鎖快門(歷史誤判熱區),
+  // 故不可得取「不鎖快門前提下最嚴的一側」= WARN,而不是讓 null coerce 成 0 拿到 OK。
+  describe("whiteBalance(建議燈例外:不可得 → WARN,仍不鎖快門)", () => {
+    for (const [label, bad] of BAD_INPUTS) {
+      it(`${label} → WARN 而非 OK,且不 FAIL`, () => {
+        const c = classifyChecks(withBad("wbGainDeviation", bad)).find(
+          (x) => x.key === "whiteBalance",
+        )!;
+        expect(c.status).toBe("WARN");
+        expect(c.threshold).toContain("unavailable");
+        expect(Number.isFinite(c.value)).toBe(true);
+      });
+      it(`${label} → 仍維持 ARMED(建議燈不得改回硬閘門)`, () => {
+        const { state } = evaluateGate(withBad("wbGainDeviation", bad));
+        expect(state).toBe("ARMED");
+      });
+    }
+  });
+
+  // gsd 不可得是既有的「少一個條件」語意,與上面「沒有替代量」的檢查不同:
+  // pxPerModule 仍撐得住這道檢查,故 NaN 也要走 null 那一支,不得掉到 WARN 放行側。
+  describe("resolution:gsd 的 NaN 視同 null(走既有不可得分支)", () => {
+    const resOf = (gsd: unknown, px: number) =>
+      classifyChecks({ ...PASS, gsdMmPerPx: gsd, pxPerModule: px } as GateMeasurements).find(
+        (x) => x.key === "resolution",
+      )!;
+    it("NaN gsd & px 8 → OK,threshold 標 GSD unavailable", () => {
+      const c = resOf(NaN, 8);
+      expect(c.status).toBe("OK");
+      expect(c.threshold).toContain("GSD unavailable");
+    });
+    it("NaN gsd & px 7 → WARN(門檻未放寬)", () => expect(resOf(NaN, 7).status).toBe("WARN"));
+    it("NaN gsd & px 4.9 → FAIL", () => expect(resOf(NaN, 4.9).status).toBe("FAIL"));
+    it("Infinity gsd 視同不可得,不得因比較為 false 而落到放行側", () => {
+      const c = resOf(Infinity, 8);
+      expect(c.threshold).toContain("GSD unavailable");
+    });
+  });
+
+  // 規劃書 §1.3 病灶的直接回歸:tiltFromHomography 焦距不可得回 null,
+  // 若閘門讓 null coerce 成 0° 就等於誠實白做。
+  it("perspectiveTiltDeg = null 不得回 OK/ARMED(對應 tiltFromHomography 回 null)", () => {
+    const { state, report } = evaluateGate(withBad("perspectiveTiltDeg", null));
+    expect(state).not.toBe("ARMED");
+    expect(statusOf(report.checks, "perspective")).not.toBe("OK");
+  });
+
+  // 一次掃過所有量測欄位:報告裡的 value 一律是有限數,null / NaN 不得流進報告。
+  it("任一欄位不可得,所有 GateCheck.value 仍為有限數", () => {
+    const fields: (keyof GateMeasurements)[] = [
+      "varLap",
+      "glareRatio",
+      "washboardAmpRatio",
+      "wbGainDeviation",
+      "picketAngleDeg",
+      "perspectiveTiltDeg",
+      "gsdMmPerPx",
+      "pxPerModule",
+    ];
+    for (const field of fields) {
+      for (const [label, bad] of BAD_INPUTS) {
+        for (const c of evaluateGate(withBad(field, bad)).report.checks) {
+          expect(Number.isFinite(c.value), `${field}=${label} → ${c.key}.value`).toBe(true);
+        }
+      }
+    }
+  });
+
+  // 無瓦楞材質的 N/A 前例不受影響:不看讀數,但 value 也不能是 NaN。
+  it("fluteType=NONE 且 ampRatio 不可得:仍 OK 且 value 為有限數", () => {
+    const c = classifyChecks({
+      ...PASS,
+      fluteType: "NONE",
+      washboardAmpRatio: NaN,
+    } as GateMeasurements).find((x) => x.key === "washboard")!;
+    expect(c.status).toBe("OK");
+    expect(Number.isFinite(c.value)).toBe(true);
+  });
+
+  // 回歸保護:守衛不得動到正常數值路徑,門檻數字一個都不准變。
+  it("正常輸入行為不變(門檻未被守衛動到)", () => {
+    const { state, report } = evaluateGate(PASS);
+    expect(state).toBe("ARMED");
+    expect(report.passedAll).toBe(true);
+    expect(statusOf(report.checks, "perspective")).toBe("OK"); // 5° 邊界仍 OK
+    expect(statusOf(report.checks, "picket")).toBe("OK"); // 10° 邊界仍 OK
+  });
+});
+
 describe("gate state (C4.1)", () => {
   it("SCANNING when no symbol ROI", () => {
     const { state, report } = evaluateGate({ ...PASS, symbolDetected: false });

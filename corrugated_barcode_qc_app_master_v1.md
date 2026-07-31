@@ -281,7 +281,11 @@ interface InspectionSession {
 }
 
 interface CaptureQualityReport {
-  passedAll: boolean; gsdMmPerPx: number; pxPerModule: number;
+  passedAll: boolean;
+  // GSD 不可得（C4.2「GSD 不可得」分支）時目前以 NaN 承載「量不出來」，不得補 0 或假值。
+  // 放寬為 number | null 是待辦（見 docs/todolist20260703-1.md「技術」段），尚未實作。
+  gsdMmPerPx: number;
+  pxPerModule: number;
   checks: GateCheck[];
 }
 interface GateCheck { key: string; status: GateStatus; value: number; threshold: string; }
@@ -382,7 +386,39 @@ stateDiagram-v2
 | `scaleRef` | 參考卡/硬幣偵測且角點解析 | bool | 偵測到 | — | 未偵測（量測停用，仍可解碼） |
 | `picket` | 符號主軸與垂直夾角 | deg | ≤10° | 10–25° | >25°（D2：必須 picket fence，橫躺不得放行） |
 
-附加（並入放行）：**透視傾斜** ≤5° 否則 FAIL；**解析度** `gsd≤0.20` 且 `pxPerModule≥8`（<8 WARN、<5 FAIL）。
+附加（並入放行）：**透視傾斜** ≤5° 否則 FAIL；**解析度**依 GSD 是否可得分兩支：
+
+| 情形 | 判定 | `threshold` 字串 |
+|---|---|---|
+| GSD 可得 | `gsd≤0.20` 且 `pxPerModule≥8` OK；`pxPerModule<5` FAIL；其餘 WARN | `gsd<=0.20 & pxPerModule>=8 OK, <8 WARN, <5 FAIL` |
+| **GSD 不可得**（C4.3 偽碼的 `gsd` 為 `null`，最常見成因是比例尺卡未偵測） | 該項不套 GSD 門檻，**僅以 `pxPerModule` 判定**：`≥8` OK、`<8` WARN、`<5` FAIL | `GSD unavailable: pxPerModule>=8 OK, <8 WARN, <5 FAIL` |
+
+規則:
+
+- 依 A4.5「無實體基準則只有像素、量不出 mm」，GSD 不可得時**不得填假值充數**讓這道檢查看似通過；閘門的輸入型別因此為 `gsdMmPerPx: number | null`（`null` / 未提供 = 不可得）。
+- 不可得的成因不只一種（比例尺卡未偵測、四角未解出、換算失敗等），故 `threshold` 只陳述「不可得」這個事實、**不歸因**，由呼叫端自行說明情境。做法比照 `washboard` 對 `fluteType === 'NONE'` 的 N/A 前例。
+- 兩個門檻數字（`pxPerModule≥8`、`gsd≤0.20`，來自 A4.3）**在任何分支都不放寬**。GSD 不可得只是少一個條件，不是降低標準。
+
+> 對應實作：`src/engines/gate.ts` 的 `classifyResolution` 與 `GateMeasurements.gsdMmPerPx`。
+> 沿革與驗收見 `docs/spec20260731-1.md` §3.2（階段 ②）。
+
+#### 「不可得」守衛（全檢查一致）
+
+量測值為 `null` / `undefined` / `NaN` 時，JS 的比較運算會把 `null` coerce 成 `0`，而 `0` 在多數檢查裡正是**最寬鬆的放行值**（`≤5°` 透視、`≤10°` 印向、`≤1%` 眩光、`≤0.08` 楞痕），不擋就等於量測失敗自動綠燈——與 §1.3 批判的 `tilt=0` 是同一個病灶，只是換個假值。前端 `demo/*.html` 是原生 JS、不進 `tsc`，型別擋不到，故守衛必須做在閘門這一側。每支吃數值的檢查一律先過 `Number.isFinite`，落在嚴側：
+
+| 檢查 | 不可得時 | 理由 |
+|---|---|---|
+| `focus` / `glare` / `washboard` / `picket` / `perspective` | **FAIL**（鎖快門） | 這些量**沒有替代量**，量不到就是沒有判準；若比照 GSD 標成 N/A，這幾盞燈就恆綠 |
+| `whiteBalance` | **WARN**（仍不鎖快門） | 建議燈永不 FAIL 是本節既有性質，改成 FAIL 等於把它變回硬閘門；故取「不鎖快門前提下最嚴的一側」 |
+| `resolution`：`gsd` 不可得 | 走上表「GSD 不可得」分支（`NaN` 視同 `null`） | 少一個條件、不是沒有判準——`pxPerModule` 仍可單獨判定 |
+| `resolution`：`pxPerModule` 不可得 | **FAIL** | 唯一剩下的判準也沒了 |
+| `scaleRef` | 沿用 falsy → FAIL | 輸入是 bool 不是量測值，本來就落在嚴側 |
+
+- `threshold` 字串一律標明不可得（`measurement unavailable: <原門檻>`；`gsd` 不可得沿用既有的 `GSD unavailable: …`），且比照上文**只陳述事實、不歸因**。
+- `GateCheck.value` 型別是 `number`，不可得時一律填 **`-1`**：閘門的量測值（變異數、比例、角度、像素數）皆為非負，`-1` 必在值域外，不會與真實讀數混淆，真正的語意由 `status` 與 `threshold` 承載。**不用 `NaN`** 是因為 `InspectionSession`（含本報告）會 JSON 序列化送 ERP（[C9](#c9-erp--api-串接付費版)），`JSON.stringify(NaN)` 產出的是 `null`，等於繞一圈又把 `null` 漏回報告。報告頂層的 `gsdMmPerPx` / `pxPerModule` 兩欄仍沿用既有的 `NaN` 約定（型別在 [C3.1](#c31-核心實體)），兩者尚未統一。
+- 守衛只擋不可得，**不動任何門檻數字**；正常數值路徑行為與改動前完全一致。
+
+> 對應實作：`src/engines/gate.ts` 的 `isMeasured` / `UNAVAILABLE` 與各 `classify*`。
 
 ### C4.3 偽碼
 
@@ -397,8 +433,9 @@ function evaluateGate(frame, profile, policy):
     check('whiteBalance', wbGainDeviation(scale.whitePatch)),
     check('scaleRef', scale!=null),
     check('picket', abs(symbolAxisAngle(roi))) ]
-  gsd = scale ? scale.nominalMm/scale.resolvedPx : null
-  checks += checkResolution(gsd, pxPerModule(roi,gsd))
+  gsd = scale ? scale.nominalMm/scale.resolvedPx : null   # 無比例尺 → 不可得，不得填假值
+  checks += checkResolution(gsd, pxPerModule(roi,gsd))     # gsd==null 走 C4.2「GSD 不可得」分支
+  # 上面任一量測回 null/NaN → 該項走 C4.2「不可得」守衛，落在嚴側，不得靠 coerce 成 0 放行
   return Report((any FAIL)?LOCKED:ARMED, checks, gsd)
 ```
 

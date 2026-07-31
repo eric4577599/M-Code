@@ -151,6 +151,30 @@ describe("toCsvRow", () => {
     expect(row.split(",")[14]).toBe("-0.3"); // 數字型不前置單引號
   });
 
+  // 守門測試:GSD 不可得時 evaluateGate 會把 capture.gsdMmPerPx 填成 NaN
+  // (CaptureQualityReport.gsdMmPerPx 型別為 number,無法放 null)。
+  // §C9.4 的欄位清單本來就不含 GSD,故此 NaN 不得外洩到匯出檔;
+  // 本測試鎖住「CSV 不消費 capture.gsdMmPerPx」這個現況,防止日後加欄位時把 NaN 帶出去。
+  it("capture.gsdMmPerPx 為 NaN 時,匯出內容不得出現字面 'NaN'", () => {
+    const session = makeSession({
+      capture: {
+        passedAll: false,
+        measurementEnabled: false,
+        gsdMmPerPx: NaN,
+        pxPerModule: 8,
+        checks: [],
+      },
+    });
+    const row = toCsvRow(session, { customer: "ACME" });
+    expect(row).not.toContain("NaN");
+    // 整份文件(含表頭)同樣不得出現,且欄位清單本身無 GSD 欄
+    const csv = toCsv([session]);
+    expect(csv).not.toContain("NaN");
+    expect(CSV_COLUMNS.some((c) => c.includes("gsd"))).toBe(false);
+    // 與正常 capture 的輸出逐字相同 —— 證明此欄位完全未被消費
+    expect(row).toBe(toCsvRow(makeSession(), { customer: "ACME" }));
+  });
+
   it("清除浮點表示誤差,不改動合理數值", () => {
     // 模擬上游分數/量測算出的浮點雜訊(2.56 → 2.5599999999999 等)
     const row = toCsvRow(
