@@ -208,9 +208,38 @@ describe("evaluateGate with no scale ref (規格 §5.3)", () => {
     expect(report.passedAll).toBe(false); // scaleRef 仍 FAIL
   });
 
-  it("report gsdMmPerPx is NaN (量不出來),絕不補 0 或假值", () => {
+  it("report gsdMmPerPx is null (量不出來),絕不補 0 或假值", () => {
     const { report } = evaluateGate({ ...PASS, scaleRefDetected: false, gsdMmPerPx: null });
-    expect(Number.isNaN(report.gsdMmPerPx)).toBe(true);
+    expect(report.gsdMmPerPx).toBeNull();
+    // 絕不退回舊的 NaN 承載法:NaN 型別上仍是合法 number,消費端不會被逼著處理
+    expect(Number.isNaN(report.gsdMmPerPx as unknown as number)).toBe(false);
+    // 也絕不補 0 —— 0 是「非常細的 GSD」,是最寬鬆的放行值
+    expect(report.gsdMmPerPx).not.toBe(0);
+  });
+
+  // NaN 會傳染的三條實際路徑,逐條斷言 null 都不會發生同樣的事。
+  // 這是型別放寬的真正理由,不是風格偏好。
+  it("不可得的 gsd / pxPerModule 序列化往返後仍是 null,不會 NaN→null 繞一圈", () => {
+    const { report } = evaluateGate({
+      ...PASS,
+      scaleRefDetected: false,
+      gsdMmPerPx: null,
+      pxPerModule: NaN,
+    });
+    expect(report.pxPerModule).toBeNull();
+    // InspectionSession(含本報告)會 JSON 序列化送 ERP(C9);NaN 在這一步會靜默變 null,
+    // 等於「報告裡是 NaN、ERP 收到 null」兩種表示法並存。用 null 則往返前後一致。
+    const roundTrip = JSON.parse(JSON.stringify(report)) as typeof report;
+    expect(roundTrip.gsdMmPerPx).toBeNull();
+    expect(roundTrip.pxPerModule).toBeNull();
+    expect(roundTrip.gsdMmPerPx).toBe(report.gsdMmPerPx);
+    expect(roundTrip.pxPerModule).toBe(report.pxPerModule);
+  });
+
+  it("可得的數值不受型別放寬影響,原樣帶進報告", () => {
+    const { report } = evaluateGate({ ...PASS, gsdMmPerPx: 0.12, pxPerModule: 11 });
+    expect(report.gsdMmPerPx).toBe(0.12);
+    expect(report.pxPerModule).toBe(11);
   });
 });
 

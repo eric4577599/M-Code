@@ -84,7 +84,8 @@ const isMeasured = (v: number | null | undefined): v is number => Number.isFinit
 
 /**
  * 「不可得」在 GateCheck.value 上的統一表示法。
- * GateCheck.value 型別是 number(domain/types.ts,不在本次改動範圍),放不進 null;
+ * GateCheck.value 型別是 number(domain/types.ts),放不進 null —— 這與報告頂層的
+ * gsdMmPerPx / pxPerModule 不同,那兩欄已放寬為 number | null,不可得時填 null;
  * 也刻意不用 NaN —— InspectionSession(含本報告)會被 JSON 序列化送 ERP,
  * `JSON.stringify(NaN)` 產出的是 `null`,等於繞一圈又把 null 漏進報告。
  * 故一律用 -1:閘門的量測值(變異數、比例、角度、像素數)皆為非負,-1 必定在值域外,
@@ -331,13 +332,12 @@ export function evaluateGate(m: GateMeasurements): GateEvaluation {
     report: {
       passedAll,
       measurementEnabled: m.scaleRefDetected,
-      // GSD 不可得時報告以 NaN 表示「量不出來」,不可補 0 或任何假值
-      // (CaptureQualityReport.gsdMmPerPx 目前型別為 number,不在本次改動範圍)。
-      gsdMmPerPx: isMeasured(m.gsdMmPerPx) ? m.gsdMmPerPx : NaN,
-      // pxPerModule 同理:不可得一律正規化成 NaN,至少不讓 null 直接躺在 number 欄位裡。
-      // 註:報告頂層這兩欄用 NaN 是既有約定(GateCheck.value 則用 -1,見 UNAVAILABLE 說明);
-      // 兩者不一致的根因是這兩欄型別在 domain/types.ts,不在本次改動範圍。
-      pxPerModule: isMeasured(m.pxPerModule) ? m.pxPerModule : NaN,
+      // 報告頂層這兩欄不可得時一律 null(C3.1 型別為 number | null),不補 0、也不用 NaN:
+      // NaN 型別上仍是合法 number,消費端不會被逼著處理,且 JSON.stringify 又把它變回 null。
+      // 註:GateCheck.value 仍用 -1 而非 null(見 UNAVAILABLE 說明)—— 該欄型別是 number,
+      // 值域非負,-1 必在值域外;兩處表示法不同是刻意的,依「該欄型別能否放 null」而定。
+      gsdMmPerPx: isMeasured(m.gsdMmPerPx) ? m.gsdMmPerPx : null,
+      pxPerModule: isMeasured(m.pxPerModule) ? m.pxPerModule : null,
       checks,
     },
   };

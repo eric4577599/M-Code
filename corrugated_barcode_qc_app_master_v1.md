@@ -282,10 +282,12 @@ interface InspectionSession {
 
 interface CaptureQualityReport {
   passedAll: boolean;
-  // GSD 不可得（C4.2「GSD 不可得」分支）時目前以 NaN 承載「量不出來」，不得補 0 或假值。
-  // 放寬為 number | null 是待辦（見 docs/todolist20260703-1.md「技術」段），尚未實作。
-  gsdMmPerPx: number;
-  pxPerModule: number;
+  measurementEnabled: boolean;      // C4.2：scaleRef 偵測到才可量測
+  // null = 量不出來（C4.2「不可得」分支），不得補 0 或假值。刻意不用 NaN：
+  // NaN 型別上仍是合法 number，消費端不會被逼著處理，且 JSON.stringify(NaN) 產出 null，
+  // 序列化送 ERP（C9）後又變成另一種表示法。null 則往返前後一致。
+  gsdMmPerPx: number | null;
+  pxPerModule: number | null;
   checks: GateCheck[];
 }
 interface GateCheck { key: string; status: GateStatus; value: number; threshold: string; }
@@ -382,9 +384,11 @@ stateDiagram-v2
 | `focus` | Laplacian 變異數（ROI，正規化 8-bit） | varLap | ≥120 | — | <120 |
 | `glare` | 高光占比（L>250 像素比例） | % | ≤1% | 1–4% | >4% |
 | `washboard` | 跨楞向亮度剖面 FFT，2–10mm 帶主峰/均值 | ampRatio | ≤0.08 | 0.08–0.15 | >0.15 |
-| `whiteBalance` | 參考卡白塊 RGB 增益偏差 | Δgain | ≤5% | — | >5%（要 AWB lock） |
+| `whiteBalance` | 參考卡白塊 RGB 增益偏差 | Δgain | ≤5% | >5%（建議 AWB lock） | — |
 | `scaleRef` | 參考卡/硬幣偵測且角點解析 | bool | 偵測到 | — | 未偵測（量測停用，仍可解碼） |
 | `picket` | 符號主軸與垂直夾角 | deg | ≤10° | 10–25° | >25°（D2：必須 picket fence，橫躺不得放行） |
+
+> `whiteBalance` 的 FAIL 欄是 **`—`（不存在）**，不是漏填：白平衡是**建議燈，永不 FAIL、永不鎖快門**。可讀性取決於條碼與底色的色差對比（由 [C5](#c5-解碼引擎) 解碼與 [C7](#c7-分級引擎相對代理) 的 SC / MOD / 邊緣對比把關），而非絕對白平衡是否中性；有色光源下灰界偏差極易超標，當硬閘門會使現場明明拍得出可解讀影像卻鎖死快門。此列曾長期停在「>5% → FAIL」的舊語意而與程式不符，2026-07-31 由 `tests/gate-spec-sync.test.ts` 抓出並更正。
 
 附加（並入放行）：**透視傾斜** ≤5° 否則 FAIL；**解析度**依 GSD 是否可得分兩支：
 
@@ -415,7 +419,8 @@ stateDiagram-v2
 | `scaleRef` | 沿用 falsy → FAIL | 輸入是 bool 不是量測值，本來就落在嚴側 |
 
 - `threshold` 字串一律標明不可得（`measurement unavailable: <原門檻>`；`gsd` 不可得沿用既有的 `GSD unavailable: …`），且比照上文**只陳述事實、不歸因**。
-- `GateCheck.value` 型別是 `number`，不可得時一律填 **`-1`**：閘門的量測值（變異數、比例、角度、像素數）皆為非負，`-1` 必在值域外，不會與真實讀數混淆，真正的語意由 `status` 與 `threshold` 承載。**不用 `NaN`** 是因為 `InspectionSession`（含本報告）會 JSON 序列化送 ERP（[C9](#c9-erp--api-串接付費版)），`JSON.stringify(NaN)` 產出的是 `null`，等於繞一圈又把 `null` 漏回報告。報告頂層的 `gsdMmPerPx` / `pxPerModule` 兩欄仍沿用既有的 `NaN` 約定（型別在 [C3.1](#c31-核心實體)），兩者尚未統一。
+- `GateCheck.value` 型別是 `number`，不可得時一律填 **`-1`**：閘門的量測值（變異數、比例、角度、像素數）皆為非負，`-1` 必在值域外，不會與真實讀數混淆，真正的語意由 `status` 與 `threshold` 承載。**不用 `NaN`** 是因為 `InspectionSession`（含本報告）會 JSON 序列化送 ERP（[C9](#c9-erp--api-串接付費版)），`JSON.stringify(NaN)` 產出的是 `null`，等於繞一圈又把 `null` 漏回報告。
+- 報告頂層的 `gsdMmPerPx` / `pxPerModule` 兩欄則型別為 `number | null`（[C3.1](#c31-核心實體)），不可得時直接填 **`null`**。**兩處表示法不同是刻意的**，依「該欄型別放不放得進 `null`」而定：`GateCheck.value` 是 `number` 只能用哨兵值 `-1`，報告頂層放得進 `null` 就不該退而求其次用哨兵值或 `NaN`。
 - 守衛只擋不可得，**不動任何門檻數字**；正常數值路徑行為與改動前完全一致。
 
 > 對應實作：`src/engines/gate.ts` 的 `isMeasured` / `UNAVAILABLE` 與各 `classify*`。

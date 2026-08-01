@@ -18,8 +18,17 @@ export interface CaptureQualityReport {
   passedAll: boolean;
   /** C4.2:scaleRef 偵測到才可量測;false 時量測停用、僅解碼/分級。 */
   measurementEnabled: boolean;
-  gsdMmPerPx: number;
-  pxPerModule: number;
+  /**
+   * 地面取樣距離(mm/px)。**`null` = 量不出來**(C4.2「GSD 不可得」分支),
+   * 不得補 0 或任何假值充數(A4.5:無實體基準則只有像素、量不出 mm)。
+   * 刻意用 `null` 而非 `NaN`:NaN 會傳染 —— `JSON.stringify(NaN)` 產出 `null`
+   * (本報告會隨 InspectionSession 序列化送 ERP,C9)、`toFixed()` 印出 "NaN"、
+   * 任何算術一路污染下去,而型別上仍是合法 `number`,呼叫端不會被逼著處理。
+   * 用 `null` 則消費端在 `strict` 下必須明確面對不可得的情形。
+   */
+  gsdMmPerPx: number | null;
+  /** 最窄模組的像素數。`null` 同上,代表量不出來,不得以 0 或 NaN 承載。 */
+  pxPerModule: number | null;
   checks: GateCheck[];
 }
 

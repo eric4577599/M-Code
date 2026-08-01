@@ -151,17 +151,22 @@ describe("toCsvRow", () => {
     expect(row.split(",")[14]).toBe("-0.3"); // 數字型不前置單引號
   });
 
-  // 守門測試:GSD 不可得時 evaluateGate 會把 capture.gsdMmPerPx 填成 NaN
-  // (CaptureQualityReport.gsdMmPerPx 型別為 number,無法放 null)。
-  // §C9.4 的欄位清單本來就不含 GSD,故此 NaN 不得外洩到匯出檔;
-  // 本測試鎖住「CSV 不消費 capture.gsdMmPerPx」這個現況,防止日後加欄位時把 NaN 帶出去。
-  it("capture.gsdMmPerPx 為 NaN 時,匯出內容不得出現字面 'NaN'", () => {
+  // 守門測試:GSD 不可得時 evaluateGate 會把 capture.gsdMmPerPx 填成 null
+  // (CaptureQualityReport.gsdMmPerPx 型別已放寬為 number | null)。
+  // §C9.4 的欄位清單本來就不含 GSD,故不得外洩到匯出檔;
+  // 本測試鎖住「CSV 不消費 capture.gsdMmPerPx」這個現況,防止日後加欄位時把不可得值帶出去。
+  // 兩種承載法都測:null 是現況,NaN 是型別放寬前的舊法 —— 舊資料仍可能存著 NaN,
+  // 且 escapeField 對兩者的處理不同(null → 空字串、NaN → 字面 "NaN"),不可只測一種。
+  it.each([
+    ["null(現況)", null],
+    ["NaN(型別放寬前的舊承載法,可能存在舊資料裡)", NaN],
+  ])("capture.gsdMmPerPx 為 %s 時,匯出內容不得出現字面 'NaN'", (_label, gsd) => {
     const session = makeSession({
       capture: {
         passedAll: false,
         measurementEnabled: false,
-        gsdMmPerPx: NaN,
-        pxPerModule: 8,
+        gsdMmPerPx: gsd,
+        pxPerModule: null,
         checks: [],
       },
     });
