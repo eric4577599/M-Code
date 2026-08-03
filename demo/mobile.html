@@ -302,6 +302,7 @@ import {
   toGray, varianceOfLaplacian, glareRatio, grayWorldWbDeviation, washboardAmpRatio,
   roiPhotometric, roi1DGeometry, quadGeometry, lineAngleDeg, finderDamageProxy,
   pickBestResolution, scaleRoi, fitRoiToBudget,
+  rectifyQuad, rectifyPlan, resolveTiltDeg, focalPxFromSettings, TILT_SOURCE_LABEL,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -493,10 +494,15 @@ async function inspect() {
 const MAX_ROI_PIXELS = 4e6;
 // 取出 ROI 灰階(規格 §3.1 記憶體護欄:全解析度影像只對 ROI 取像素,絕不對全張
 // getImageData)。輸入:全解析度照片 canvas、全解析度座標的 ROI;
-// 輸出:{ gray, w, h, scale } —— 已裁成 ROI 的灰階陣列(座標原點即 ROI 左上角),
+// 輸出:{ gray, w, h, scale, x0, y0, sx, sy } —— 已裁成 ROI 的灰階陣列
+//   (座標原點即 ROI 左上角),
 //   w/h 是「實際取樣尺寸」、scale 是相對全解析度 ROI 的密度倍率(1 表示未縮)。
 //   scale 必須回傳出去:量測值是量在這個密度上,而規格 §6.1 明載 DEC / edgeContrasts
 //   會隨取樣密度系統性位移,少了密度標籤,前後對照就會拿不同尺度的數字互比。
+//   x0/y0(全解析度座標的 ROI 左上角)與 sx/sy(全解析度 → 本灰階的倍率)是階段 ④
+//   接線需要的座標橋:ZXing 定位點、主點、焦距都得換算到這張灰階的尺度,單應矩陣
+//   才會與它同座標系。sx/sy 分開回傳而非共用 scale —— fitRoiToBudget 的寬高各自
+//   Math.round,兩軸倍率不必然相同。
 // 邏輯:座標夾回與取樣預算都交給 imgproc.js 的純函式(scaleRoi / fitRoiToBudget),
 //   本函式只留 canvas I/O —— 面積在預算內就直接 getImageData(ROI 區域);超過則先用
 //   drawImage 等比縮進預算(GPU 路徑,不佔 CPU 記憶體)再取,量測值以該取樣尺寸為準。
@@ -505,14 +511,26 @@ function roiGrayOf(photo, roi) {
   const r = scaleRoi(roi, 1, photo.width, photo.height);
   const rw = r.x1 - r.x0, rh = r.y1 - r.y0;
   const fit = fitRoiToBudget(rw, rh, MAX_ROI_PIXELS);
+  const axes = { x0: r.x0, y0: r.y0, sx: fit.w / rw, sy: fit.h / rh };
   if (fit.scale === 1) {
     const img = photo.getContext("2d").getImageData(r.x0, r.y0, fit.w, fit.h);
-    return { gray: toGray(img.data, fit.w, fit.h), w: fit.w, h: fit.h, scale: 1 };
+    return { gray: toGray(img.data, fit.w, fit.h), w: fit.w, h: fit.h, scale: 1, ...axes };
   }
   const c = document.createElement("canvas"); c.width = fit.w; c.height = fit.h;
   c.getContext("2d").drawImage(photo, r.x0, r.y0, rw, rh, 0, 0, fit.w, fit.h);
   const img = c.getContext("2d").getImageData(0, 0, fit.w, fit.h);
-  return { gray: toGray(img.data, fit.w, fit.h), w: fit.w, h: fit.h, scale: fit.scale };
+  return { gray: toGray(img.data, fit.w, fit.h), w: fit.w, h: fit.h, scale: fit.scale, ...axes };
+}
+
+// 階段 ④ 接線(規格 §3.3):把 ZXing 的「降取樣版」定位點換算到 ROI 灰階座標系,
+// 再走 rectifyQuad 的完整管線。輸入:zx 解碼結果、kx/ky 降取樣→全解析度倍率、
+//   rg roiGrayOf 的輸出;輸出:rectifyQuad 的結果物件(退回時 ok=false 並帶原因)。
+// 座標鏈:降取樣版 →(×kx,×ky)→ 全解析度 →(−ROI 原點,×sx,×sy)→ ROI 灰階。
+//   三段都要走完:少一段,H 與 gray 就不在同一個座標系,矯正出來是錯位的影像。
+function rectifyRoi(zx, kx, ky, rg) {
+  if (!zx || !zx.points || !zx.points.length) return { ok: false, reason: "未解碼,無定位點", H: null, derivedCorner: false };
+  const pts = zx.points.map((p) => ({ x: (p.x * kx - rg.x0) * rg.sx, y: (p.y * ky - rg.y0) * rg.sy }));
+  return rectifyQuad(rg.gray, rg.w, rg.h, pts);
 }
 
 // 真實檢驗:輸入快門照片 canvas;ZXing 單次解碼 + 影像量測算分級參數(C7 proxy 實算)
@@ -552,10 +570,35 @@ function inspectReal(photo) {
   // DEC / edgeContrasts 會被系統性低估。把實際取樣尺寸與倍率記進取幀資訊,
   // 「提高解析度前 / 後」的對照才有正確的密度標籤可對齊。
   if (lastShotInfo) { lastShotInfo.roiSample = `${rg.w}×${rg.h}`; lastShotInfo.roiScale = rg.scale; }
-  // 量測全部在「已裁好的 ROI 灰階」上做,故 ROI 座標退化為原點到全幅
-  const gray = rg.gray, gw = rg.w;
-  const roi = { x0: 0, y0: 0, x1: rg.w, y1: rg.h };
+  // 階段 ④ 接線:四角可得且皆為實測時,量測改吃梯形矯正後的正射 ROI(規格 §3.3 / G3)。
+  // 採不採用由純函式 rectifyPlan 決定,本檔不自行判斷 —— demo/*.html 無自動化測試可覆蓋。
+  const rect = rectifyRoi(zx, kx, ky, rg);
+  const plan = rectifyPlan(rect);
+  if (lastShotInfo) lastShotInfo.rectify = plan.note;
+  // 量測全部在「已裁好的 ROI 灰階」(或其正射版)上做,故 ROI 座標退化為原點到全幅
+  const gray = plan.useRectified ? rect.gray : rg.gray;
+  const gw = plan.useRectified ? rect.w : rg.w;
+  const gh = plan.useRectified ? rect.h : rg.h;
+  const roi = { x0: 0, y0: 0, x1: gw, y1: gh };
   const pm = roiPhotometric(gray, gw, roi);
+  // 透視傾角(規格 §3.3 · 2026-08-03 裁示):先試 getSettings().focalLength 走單應矩陣
+  // 實算,不可得則退回 quadGeometry 的臂長差代理值並在結果頁標註為代理。
+  // 焦距與主點都要換算到「ROI 灰階」尺度 —— H 是在那個座標系上解出來的。
+  const camSettings = camTrack && camTrack.getSettings ? camTrack.getSettings() : null;
+  const focalFull = focalPxFromSettings(camSettings, photo.width);
+  const focalRoi = focalFull === null ? null : focalFull * rg.sx;
+  const pcx = (photo.width / 2 - rg.x0) * rg.sx, pcy = (photo.height / 2 - rg.y0) * rg.sy;
+  // 傾角寫回閘門並記進掃描紀錄。不可得(source="none")時**不覆寫** state.gate.tilt:
+  // 那個欄位由 resetPreviewGeometry 維持在預覽放行值,誠實化屬規格 §6.3 的即時化待辦,
+  // 硬塞 null 會讓 classifyPerspective 判 FAIL 而鎖死所有拍不到四角的符號(全部 1D)。
+  let tilt = { deg: null, source: "none" };
+  const applyTilt = (proxyDeg) => {
+    const t = resolveTiltDeg(plan.useHomography ? rect.H : null, focalRoi, pcx, pcy, proxyDeg);
+    if (t.deg !== null) state.gate.tilt = +t.deg.toFixed(1);
+    if (lastShotInfo) lastShotInfo.tiltSource = TILT_SOURCE_LABEL[t.source];
+    tilt = t;
+    return t;
+  };
   const photometric = { rLight: pm.rLight, rDark: pm.rDark, rDarkMin: pm.rDarkMin, edgeContrasts: pm.edgeContrasts };
   let grade;
   if (is2D(sym)) {
@@ -563,7 +606,11 @@ function inspectReal(photo) {
     const q = zx ? quadGeometry(zx.points) : { gridDeviation: 0.5, picketAngleDeg: 0, tiltDeg: 0 };
     grade = buildGradeResult(sym, { photometric,
       geometric: { finderTimingDamageRatio: finderDamageProxy(gray, gw, roi, pm), gridDeviation: q.gridDeviation } });
-    if (zx) { state.gate.picket = +q.picketAngleDeg.toFixed(1); state.gate.tilt = +q.tiltDeg.toFixed(1); }
+    if (zx) state.gate.picket = +q.picketAngleDeg.toFixed(1);
+    // QR 的三個 finder 中心補出的第四角構成平行四邊形,單應矩陣為仿射、傾角恆 0°
+    // (見 imgproc.js 的 quadFromZxingPoints 實測表)—— rectifyPlan 已擋掉那條路,
+    // 此處退回臂長差代理值。DataMatrix 有四個實測點,走的是單應矩陣實算。
+    applyTilt(zx ? q.tiltDeg : null);
   } else {
     // 1D:10 條掃描線的 DEC/DEF 實測;全部掃描線不可用時給最差半模組偏差
     // modulePx 量在「ROI 實際取樣尺寸」上(不再被 1024 上限壓低,但 ROI 超過
@@ -581,13 +628,19 @@ function inspectReal(photo) {
       if (lastShotInfo) lastShotInfo.pxPerModule = g1.modulePx;
     }
     if (zx) state.gate.picket = +lineAngleDeg(zx.points).toFixed(1);
+    // 1D:ZXing 只給掃描線兩端點,湊不出四角(rectifyQuad 回「四角不足」),也沒有
+    // 臂長差可當代理 → 傾角來源標「未量測」。**這裡誠實暴露的是規格 §1.3 的病灶**:
+    // state.gate.tilt 仍是預覽還原的 0°,透視閘門對 1D 從未擋過任何人。要真的量到
+    // 得等階段 ⑤ 的 bearer bar / 條端擬合,不是本階段補得起來的。
+    applyTilt(null);
   }
   const decoder = { decode: () => (zx ? { symbology: sym, data: zx.text } : null) };
   const decode = runDecode(decoder, { declaredSymbology: sym, handle: {} }, { expectedGtin: zx ? zx.text : state.expected });
   const acceptance = evaluateAcceptance(grade, policyOf());
   // 清單縮圖/報告原圖:由降取樣版再縮成 320px 寬 jpeg(不從全解析度直縮,省一次大圖重採樣)
   const tc = drawToCanvas(small, small.width, small.height, 320);
-  presentResult(decode, grade, acceptance, { type: "img", data: tc.toDataURL("image/jpeg", 0.7) });
+  presentResult(decode, grade, acceptance, { type: "img", data: tc.toDataURL("image/jpeg", 0.7) },
+    { rectify: plan.note, tilt });
 }
 
 // 模擬檢驗(無相機):沿用示範情境設定的 gate/grade 模擬值
@@ -603,11 +656,13 @@ function inspectSim() {
     ? buildGradeResult(sym, { photometric, geometric:{ finderTimingDamageRatio:g.fpd, gridDeviation:g.gnu, usedEC:g.uecUsed, totalEC:g.uecTotal } })
     : buildGradeResult(sym, Array.from({length:10}, () => ({ photometric, geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } })));
   const acceptance = evaluateAcceptance(grade, policyOf());
-  presentResult(decode, grade, acceptance, null);
+  presentResult(decode, grade, acceptance, null, null);
 }
 
 // 共用結果呈現:更新結果頁 DOM、存入清單(img 為 null 時退回 SVG 快照)、切頁
-function presentResult(decode, grade, acceptance, img) {
+// geom:階段 ④ 的幾何量測摘要 { rectify, tilt },**只有真實檢驗才有**;
+//   模擬檢驗傳 null —— 沿用上一張的摘要等於在沒有像素的情況下編造幾何量測結果。
+function presentResult(decode, grade, acceptance, img, geom) {
   // 此時 state.symbology 已收斂為具體類型(相機路徑由 ZXing 覆寫,其餘由 resolveSym)
   const symLabelR = (SYMS.find(([sv])=>sv===state.symbology)||[,state.symbology])[1];
   $("symBadge").textContent = "偵測類型：" + symLabelR;
@@ -638,6 +693,7 @@ function presentResult(decode, grade, acceptance, img) {
     `符號別：${symLabelR}`,
     `解碼：${decode.decoded ? "成功 · "+decode.data : "不可讀（綜合崩壞）"}`,
     `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
+    ...(geom ? [`幾何量測：${geom.rectify}；透視傾角 ${geom.tilt.deg === null ? "—" : geom.tilt.deg.toFixed(1) + "°"}（${TILT_SOURCE_LABEL[geom.tilt.source]}）`] : []),
     `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policyOf().requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
     ...(fullParams ? [
       `完整參數報告（付費版）：${grade.parameters.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
@@ -1058,6 +1114,8 @@ async function capturePhoto() {
 //   photo 照片原尺寸與面積上限縮放(僅 L1)、frame 串流畫面原尺寸(僅 L2/L3 且撞到
 //   面積上限時才有)、roiSample / roiScale 量測實際取樣尺寸與密度、
 //   pxPerModule 該張實測的 px/module(1D 才有)。後三者是 DEC/EC 代理值的解讀前提。
+//   rectify 梯形矯正採用與否及原因、tiltSource 透視傾角的來源(單應矩陣實算 /
+//   臂長差代理值 / 未量測)——階段 ④ 的誠實標註,規格 §3.3 要求退回時講得出原因。
 //   模擬檢驗(無相機)沒有取幀,lastShotInfo 為 null → 該欄留 null,不編造。
 function saveScan(decode, grade, acceptance, img) {
   scans.push({
@@ -1098,6 +1156,8 @@ function shotSummary(shot) {
   if (shot.roiSample) parts.push("ROI 取樣 " + esc(shot.roiSample)
     + (shot.roiScale < 1 ? `（密度 ${(shot.roiScale * 100).toFixed(0)}%）` : ""));
   if (shot.pxPerModule) parts.push("px/module " + esc(shot.pxPerModule));
+  if (shot.rectify) parts.push("矯正 " + esc(shot.rectify));
+  if (shot.tiltSource) parts.push("傾角 " + esc(shot.tiltSource));
   return parts.join(" · ");
 }
 function exportPdf() {

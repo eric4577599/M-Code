@@ -25,6 +25,13 @@ import {
   warpPerspective,
   MAX_WARP_PIXELS,
   tiltFromHomography,
+  FOCAL_PX_LIMITS,
+  focalPxFromSettings,
+  quadFromZxingPoints,
+  rectifyQuad,
+  rectifyPlan,
+  resolveTiltDeg,
+  TILT_SOURCE_LABEL,
 } from "../demo/imgproc.js";
 
 // 產生單色 RGBA 影像
@@ -1011,5 +1018,272 @@ describe("tiltFromHomography(由單應矩陣推透視傾角)", () => {
     const moved = rect.map((p) => ({ x: p.x * 1.3 + 50, y: p.y * 1.3 + 20 })); // 純縮放平移
     const H = solveHomography(moved, rect);
     expect(tiltFromHomography(H, CAM.f, CAM.cx, CAM.cy)).toBeCloseTo(0, 6);
+  });
+});
+
+// ── 階段 ④ 接線層(規格 §3.3 焦距來源 · 2026-08-03 裁示)──────────────────
+// 這四支的存在理由都是「把退回判斷從 demo/*.html 搬進測得到的地方」:
+// demo/*.html 全程無自動化測試可覆蓋(專案 CLAUDE.md 已載明),退回邏輯寫在那裡就驗不了。
+
+describe("focalPxFromSettings(像素焦距,裁示:先試 getSettings().focalLength)", () => {
+  it("同尺度:focalLength 已是分析影像尺度的像素值 → 原值回傳", () => {
+    expect(focalPxFromSettings({ focalLength: 1200, width: 1600 }, 1600)).toBe(1200);
+  });
+
+  it("換尺度:串流 1280 量到的焦距換算到 4032 的分析影像(第一層照片路徑)", () => {
+    // 不換算會低估約 3.15 倍,傾角直接算成三倍大 —— 這是第一層 ImageCapture 的常態
+    expect(focalPxFromSettings({ focalLength: 900, width: 1280 }, 4032)).toBeCloseTo((900 * 4032) / 1280, 6);
+  });
+
+  it("**本函式存在的理由**:毫米值(4.5)必須被擋下,不得當成像素焦距", () => {
+    // 4.5 是有限正數,tiltFromHomography 不會拒絕它,會算出一個看起來像角度的假數字
+    expect(focalPxFromSettings({ focalLength: 4.5, width: 1280 }, 1280)).toBeNull();
+    expect(focalPxFromSettings({ focalLength: 4.5, width: 1280 }, 4032)).toBeNull();
+    expect(focalPxFromSettings({ focalLength: 6.8 }, 1280)).toBeNull();
+  });
+
+  it("settings.width 不可得 → 假設同尺度,仍受合理帶把關", () => {
+    expect(focalPxFromSettings({ focalLength: 900 }, 1280)).toBe(900);
+    expect(focalPxFromSettings({ focalLength: 900, width: 0 }, 1280)).toBe(900);
+  });
+
+  it("離譜的大值同樣擋下(超過分析影像寬的 5 倍)", () => {
+    expect(focalPxFromSettings({ focalLength: 1e6, width: 1280 }, 1280)).toBeNull();
+  });
+
+  it("合理帶邊界:恰好 0.3W / 5W 通過,略微越界即不可得", () => {
+    const W = 1000;
+    expect(FOCAL_PX_LIMITS).toEqual({ minRatio: 0.3, maxRatio: 5 });
+    expect(focalPxFromSettings({ focalLength: FOCAL_PX_LIMITS.minRatio * W }, W)).toBe(300);
+    expect(focalPxFromSettings({ focalLength: FOCAL_PX_LIMITS.maxRatio * W }, W)).toBe(5000);
+    expect(focalPxFromSettings({ focalLength: 299.9 }, W)).toBeNull();
+    expect(focalPxFromSettings({ focalLength: 5000.1 }, W)).toBeNull();
+  });
+
+  it("容錯:殘缺 / 錯型別 / 非正數一律回 null,不 throw", () => {
+    for (const bad of [null, undefined, {}, { focalLength: null }, { focalLength: "900" },
+      { focalLength: NaN }, { focalLength: Infinity }, { focalLength: 0 }, { focalLength: -900 }]) {
+      expect(focalPxFromSettings(bad, 1280)).toBeNull();
+    }
+    for (const w of [0, -1280, NaN, Infinity, undefined, null, "1280"]) {
+      expect(focalPxFromSettings({ focalLength: 900 }, w)).toBeNull();
+    }
+  });
+});
+
+describe("quadFromZxingPoints(四角補點,依符號別分流)", () => {
+  it("QR 三個 finder 中心 [bl, tl, tr] → 第四角 tr + bl − tl,前三點原封不動", () => {
+    const bl = { x: 10, y: 110 }, tl = { x: 10, y: 10 }, tr = { x: 110, y: 10 };
+    const q = quadFromZxingPoints([bl, tl, tr]);
+    expect(q.corners).toHaveLength(4);
+    expect(q.corners.slice(0, 3)).toEqual([bl, tl, tr]);
+    expect(q.corners[3]).toEqual({ x: 110, y: 110 });
+    expect(q.derived).toBe(true); // 補點必須外傳,否則下游無從得知傾角不可信
+  });
+
+  it("DataMatrix 四點 → 直接取用且 derived=false;超過 4 點只取前 4(不猜哪些是真正的角)", () => {
+    const pts = [{ x: 0, y: 0 }, { x: 50, y: 2 }, { x: 52, y: 40 }, { x: 1, y: 38 }, { x: 25, y: 20 }];
+    expect(quadFromZxingPoints(pts)).toEqual({ corners: pts.slice(0, 4), derived: false });
+  });
+
+  it("**階段 ⑤ 的界線**:1D 掃描線兩端點 → null,本函式不猜四角", () => {
+    expect(quadFromZxingPoints([{ x: 5, y: 50 }, { x: 300, y: 52 }])).toBeNull();
+  });
+
+  it("容錯:非有限座標略過後不足三點 → null;null / 空陣列不 throw", () => {
+    expect(quadFromZxingPoints([{ x: NaN, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }])).toBeNull();
+    expect(quadFromZxingPoints(null)).toBeNull();
+    expect(quadFromZxingPoints([])).toBeNull();
+    // 五點含一個 NaN → 略過後仍湊得出四點
+    expect(quadFromZxingPoints([{ x: 0, y: 0 }, { x: NaN, y: 1 }, { x: 5, y: 0 }, { x: 5, y: 5 }, { x: 0, y: 5 }]).corners)
+      .toEqual([{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 5 }, { x: 0, y: 5 }]);
+  });
+
+  // ★ 2026-08-03 階段 ④ 接線時實測到的問題,這條測試就是它的護欄。
+  // 補點四邊形依定義是平行四邊形 → 對應矩形的單應矩陣是仿射 → 消失線在無窮遠 →
+  // tiltFromHomography 恆回 0.00°,而 0° 正是「≤5° 否則 FAIL」最寬鬆的放行值。
+  it("**補點四角恆推出 0° 傾角**:平行四邊形不帶透視資訊,絕不可拿去推傾角", () => {
+    const square = rectCorners({ w: 400, h: 400 });
+    const mkH = (q: Pt[]) => {
+      const o = orderCorners(q) as Pt[];
+      const s = targetRectSize(o);
+      return solveHomography(o, [{ x: 0, y: 0 }, { x: s.w, y: 0 }, { x: s.w, y: s.h }, { x: 0, y: s.h }]);
+    };
+    // 實測表(針孔 f=900、距離 833、400×400 方形),兩軸結果相同:
+    //   真實傾角 2° / 5° / 25° → 補點誤差 7.2 / 18.0 / 88.2 px,推得傾角一律 0.00°
+    const wantErr: Record<number, number> = { 0: 0, 2: 7.21, 5: 18.0, 25: 88.17 };
+    for (const axis of ["y", "x"] as const) {
+      for (const deg of [0, 2, 5, 25]) {
+        const proj = square.map((c) => project(planePoint(axis, c.x - 199.5, c.y - 199.5, deg))) as Pt[];
+        const [pTL, pTR, pBR, pBL] = proj;
+        const q = quadFromZxingPoints([pBL, pTL, pTR]);
+        const derived = q.corners[3]! as Pt;
+        expect(Math.hypot(derived.x - pBR!.x, derived.y - pBR!.y)).toBeCloseTo(wantErr[deg]!, 1);
+        // 真四角推得回真實傾角 —— 對照組,證明失準來自補點而非管線
+        expect(tiltFromHomography(mkH(proj), CAM.f, CAM.cx, CAM.cy)).toBeCloseTo(deg, 1);
+        // 補點四角:不論真實傾角多少一律 0.00°
+        expect(tiltFromHomography(mkH(q.corners), CAM.f, CAM.cx, CAM.cy)).toBeCloseTo(0, 6);
+      }
+    }
+  });
+});
+
+describe("rectifyQuad(階段 ④ 接線的單一入口)", () => {
+  const ORTHO4 = charBarcodeAt(12, 120);
+
+  it("正常傾斜(繞 Y 軸 25°):ok,DEC 從 0.5 掉回量化底限,H 可推回 25°", () => {
+    const { img, quad } = renderTilted(ORTHO4, 25, "y");
+    const r = rectifyQuad(img.data, img.w, img.h, quad);
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBe("");
+    expect(r.derivedCorner).toBe(false); // 四點皆實測
+    const froi = { x0: 0, y0: 0, x1: r.w, y1: r.h };
+    expect(decMaxDev(r.gray, r.w, froi)).toBeLessThan(0.1);
+    expect(tiltFromHomography(r.H, CAM.f, CAM.cx, CAM.cy)).toBeCloseTo(25, 1);
+  });
+
+  it("退回:1D 兩點 → 四角不足,原因指名屬階段 ⑤", () => {
+    const r = rectifyQuad(ORTHO4.gray, ORTHO4.w, ORTHO4.h, [{ x: 5, y: 50 }, { x: 600, y: 52 }]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("四角不足");
+    expect(r.reason).toContain("階段 ⑤");
+    expect(r.gray).toBeUndefined(); // 絕不代填一張假影像
+  });
+
+  it("退回:紙片狀四邊形 → 擬合信心不足,且**講得出是哪一項**", () => {
+    // 1000×2 的細長帶:最短邊 2px、長寬比 500,兩項都不過
+    const r = rectifyQuad(ORTHO4.gray, ORTHO4.w, ORTHO4.h,
+      [{ x: 0, y: 0 }, { x: 1000, y: 0 }, { x: 1000, y: 2 }, { x: 0, y: 2 }]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("擬合信心不足");
+    expect(r.reason).toContain("最短邊");
+    expect(r.reason).toContain("長寬比");
+    expect(r.conf.ok).toBe(false); // 實測值一併回傳,呼叫端可自行報數
+  });
+
+  it("退回:四點共線 → 不 throw,原因為擬合信心不足(填充率為 0)", () => {
+    const r = rectifyQuad(ORTHO4.gray, ORTHO4.w, ORTHO4.h,
+      [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 200, y: 0 }, { x: 300, y: 0 }]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("擬合信心不足");
+    expect(r.gray).toBeUndefined();
+  });
+
+  it("退回:來源影像不合法(null / 尺寸為 0)→ 正射重採樣失敗,不 throw", () => {
+    const { quad } = renderTilted(ORTHO4, 12, "y");
+    for (const bad of [[null, 900, 600], [ORTHO4.gray, 0, 600], [ORTHO4.gray, 900, 0]] as const) {
+      const r = rectifyQuad(bad[0], bad[1], bad[2], quad);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toContain("重採樣失敗");
+      expect(r.H).not.toBeNull(); // 前面幾關都過了,退回發生在最後一步
+    }
+  });
+
+  it("面積預算:maxPixels 壓低時仍成功,但回報 scale < 1(取樣密度已降低)", () => {
+    const { img, quad } = renderTilted(ORTHO4, 12, "y");
+    const full = rectifyQuad(img.data, img.w, img.h, quad);
+    const tight = rectifyQuad(img.data, img.w, img.h, quad, 10000);
+    expect(full.scale).toBe(1);
+    expect(tight.ok).toBe(true);
+    expect(tight.scale).toBeLessThan(1);
+    expect(tight.w * tight.h).toBeLessThanOrEqual(10000);
+    expect(tight.requested).toEqual(full.requested); // 請求尺寸不變,只是取樣得比較稀
+  });
+
+  it("預設面積上限與 MAX_WARP_PIXELS 同源(不在接線端另寫一份數字)", () => {
+    const { img, quad } = renderTilted(ORTHO4, 12, "y");
+    expect(rectifyQuad(img.data, img.w, img.h, quad))
+      .toEqual(rectifyQuad(img.data, img.w, img.h, quad, MAX_WARP_PIXELS));
+  });
+});
+
+describe("resolveTiltDeg(裁示 2026-08-03:實算 → 代理 → 不可得)", () => {
+  const ORTHO5 = charBarcodeAt(12, 120);
+  const { img, quad } = renderTilted(ORTHO5, 25, "y");
+  const H = (rectifyQuad(img.data, img.w, img.h, quad) as { H: number[] }).H;
+
+  it("焦距可得 → 單應矩陣實算,來源標 homography", () => {
+    const t = resolveTiltDeg(H, CAM.f, CAM.cx, CAM.cy, 3.2);
+    expect(t.source).toBe("homography");
+    expect(t.deg).toBeCloseTo(25, 1);
+    expect(t.deg).not.toBeCloseTo(3.2, 1); // 有代理值也不得蓋掉實算
+  });
+
+  it("焦距不可得但有代理值 → 退回代理,來源標 proxy(裁示的預設路徑)", () => {
+    for (const noFocal of [null, undefined, 0, NaN, -900]) {
+      const t = resolveTiltDeg(H, noFocal, CAM.cx, CAM.cy, 3.2);
+      expect(t.source).toBe("proxy");
+      expect(t.deg).toBe(3.2);
+    }
+  });
+
+  it("H 不可得(1D 未矯正)但有代理值 → 同樣退回代理", () => {
+    expect(resolveTiltDeg(null, CAM.f, CAM.cx, CAM.cy, 7.5)).toEqual({ deg: 7.5, source: "proxy" });
+  });
+
+  it("**兩者皆不可得 → deg 為 null,絕不代填 0**(0 是 ≤5° 閘門的放行值)", () => {
+    for (const badProxy of [null, undefined, NaN, Infinity, -1, "3.2"]) {
+      const t = resolveTiltDeg(null, null, 0, 0, badProxy);
+      expect(t).toEqual({ deg: null, source: "none" });
+      expect(t.deg).not.toBe(0);
+    }
+  });
+
+  it("代理值恰為 0 是合法量測值(等臂 → 0°),不可與「不可得」混為一談", () => {
+    expect(resolveTiltDeg(null, null, 0, 0, 0)).toEqual({ deg: 0, source: "proxy" });
+  });
+
+  it("來源標籤三個鍵齊全(結果頁與掃描紀錄的文案一律取自此表)", () => {
+    expect(TILT_SOURCE_LABEL).toEqual({
+      homography: "單應矩陣實算", proxy: "臂長差代理值", none: "未量測",
+    });
+    for (const k of ["homography", "proxy", "none"]) {
+      expect(TILT_SOURCE_LABEL[k as keyof typeof TILT_SOURCE_LABEL]).toBeTruthy();
+    }
+  });
+});
+
+describe("rectifyPlan(階段 ④:量測吃哪張影像、傾角走哪條路徑)", () => {
+  const ORTHO6 = charBarcodeAt(12, 120);
+  const { img, quad } = renderTilted(ORTHO6, 20, "y");
+
+  it("四點皆實測(DataMatrix / 階段 ⑤ 後的 1D)→ 用正射影像、用單應傾角", () => {
+    const rect = rectifyQuad(img.data, img.w, img.h, quad);
+    const plan = rectifyPlan(rect);
+    expect(plan).toEqual({ useRectified: true, useHomography: true, note: `已矯正 ${rect.w}×${rect.h}` });
+  });
+
+  it("**四角含補點(QR 三定位點)→ 兩者皆停用**,傾角改走代理值", () => {
+    // 拿同一張傾斜影像,只餵三個點(模擬 ZXing 的 QR finder 中心)
+    const three = [quad[3]!, quad[0]!, quad[1]!]; // [bl, tl, tr]
+    const rect = rectifyQuad(img.data, img.w, img.h, three);
+    expect(rect.ok).toBe(true);          // 矯正本身成功,不是失敗
+    expect(rect.derivedCorner).toBe(true);
+    const plan = rectifyPlan(rect);
+    expect(plan.useHomography).toBe(false); // 用了就是恆綠的 0°
+    expect(plan.useRectified).toBe(false);  // 只還原得了旋轉剪切,白付一次內插模糊
+    expect(plan.note).toContain("推算點");
+    // 護欄的實效:這個 H 真的會給出 0°,停用不是保守而是必要
+    expect(tiltFromHomography(rect.H, CAM.f, CAM.cx, CAM.cy)).toBeCloseTo(0, 6);
+  });
+
+  it("矯正失敗 → 兩者皆停用,note 直接沿用 rectifyQuad 的原因(不另造詞)", () => {
+    const rect = rectifyQuad(img.data, img.w, img.h, [{ x: 5, y: 50 }, { x: 600, y: 52 }]);
+    const plan = rectifyPlan(rect);
+    expect(plan.useRectified).toBe(false);
+    expect(plan.useHomography).toBe(false);
+    expect(plan.note).toBe(rect.reason);
+    expect(plan.note).toContain("四角不足");
+  });
+
+  it("縮過的正射輸出:note 帶密度標註(規格 §6.1 前後對照要對齊取樣密度)", () => {
+    const rect = rectifyQuad(img.data, img.w, img.h, quad, 10000);
+    expect(rectifyPlan(rect).note).toMatch(/^已矯正 \d+×\d+（密度 \d+%）$/);
+  });
+
+  it("容錯:null / 未定義 → 兩者皆停用,不 throw", () => {
+    for (const bad of [null, undefined]) {
+      expect(rectifyPlan(bad)).toEqual({ useRectified: false, useHomography: false, note: "未矯正" });
+    }
   });
 });

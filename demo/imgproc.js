@@ -751,6 +751,201 @@ export function tiltFromHomography(H, focalPx, cx = 0, cy = 0) {
 }
 
 /**
+ * 像素焦距的合理範圍,以「分析影像寬度的倍率」表示(規格 §3.3 焦距來源,
+ * 2026-08-03 裁示:先試 getSettings().focalLength,不可得則退回代理值)。
+ * **這道範圍檢查存在的理由是單位不明。** W3C Image Capture 的 focalLength 欄位
+ * 各家實作單位不一致(部分回**毫米**,如 4.5),而本專案要的是**像素焦距**。
+ * 直接拿 4.5 去餵 tiltFromHomography 不會出錯 —— 它是有限正數,會算出一個
+ * 「看起來像角度」的數字,而那個數字毫無意義。這正是規格 §1.3 / §1.5 一再批判的
+ * 病灶:用一個能通過型別檢查的假數字讓量測看起來有在跑。
+ * 數字來源:手機主鏡頭水平視角約 60–80°,f = W / (2·tan(FOV/2)) 約 0.6–0.87 W;
+ * 望遠鏡頭可到 2–3 W。取 [0.3 W, 5 W] 已涵蓋所有實機鏡頭並留足餘裕,
+ * 而毫米值(個位數)在任何分析影像寬度下都遠低於 0.3 W → 必然被擋。
+ */
+export const FOCAL_PX_LIMITS = Object.freeze({ minRatio: 0.3, maxRatio: 5 });
+
+/**
+ * 由 MediaStreamTrack.getSettings() 取像素焦距(規格 §3.3)。純函式,不碰 MediaStream。
+ * 輸入:
+ * - settings:getSettings() 的回傳,可能為 null / 殘缺;讀 focalLength 與 width
+ * - imageWidthPx:**分析影像**的寬度(不是預覽寬度)—— 焦距與影像尺度綁在一起,
+ *   換算不到同一尺度的焦距推出來的角度是錯的
+ * 輸出:像素焦距(number),或 **null 代表不可得**(呼叫端據此退回代理值)。
+ * 邏輯:
+ * 1. focalLength 必須是有限正數,否則不可得。
+ * 2. settings.width 可得時視為「焦距量在該寬度上」,等比換算到 imageWidthPx
+ *    —— 第一層 ImageCapture 的照片寬(如 4032)遠大於串流寬(如 1280),
+ *    不換算會低估焦距約 3 倍,傾角直接算成三倍大。
+ *    settings.width 不可得時只能假設兩者同尺度,並由下一步的範圍檢查把關。
+ * 3. 換算後的值必須落在 FOCAL_PX_LIMITS 的合理帶內,否則視為**單位不是像素**
+ *    (或裝置回報離譜)→ 回 null。**寧可退回代理值,不可用一個尺度錯的焦距。**
+ */
+export function focalPxFromSettings(settings, imageWidthPx) {
+  if (!Number.isFinite(imageWidthPx) || imageWidthPx <= 0) return null;
+  const s = settings && typeof settings === "object" ? settings : null;
+  const raw = s ? s.focalLength : undefined;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return null;
+  const sw = s && typeof s.width === "number" && Number.isFinite(s.width) && s.width > 0 ? s.width : 0;
+  const px = sw ? (raw * imageWidthPx) / sw : raw;
+  if (!Number.isFinite(px) || px <= 0) return null;
+  if (px < FOCAL_PX_LIMITS.minRatio * imageWidthPx) return null; // 多半是毫米值
+  if (px > FOCAL_PX_LIMITS.maxRatio * imageWidthPx) return null; // 離譜的回報值
+  return px;
+}
+
+/**
+ * 由 ZXing result points 補出四角(規格 §3.3「四角來源依符號別分流」)。純函式。
+ * 輸入:points,ZXing 的定位點陣列(座標系由呼叫端決定,本函式只做幾何)。
+ * 輸出:{ corners, derived } 或 null 代表湊不出四角。
+ * - corners:4 個 { x, y }(**未排序**,順序沿用輸入)
+ * - derived:第四角是否為**推算**而來(true 時該四邊形不帶透視資訊,見下)
+ * 邏輯:
+ * - ≥4 個有限點(DataMatrix:L 型兩端 + timing 兩端)→ 直接取前 4 個,derived = false。
+ * - 恰 3 個(QR:ZXing 給 [左下, 左上, 右上] 三個 finder 中心)→ 第四角以
+ *   **tr + bl − tl** 推算,derived = **true**。
+ * - 少於 3 個(**1D 只有掃描線兩端點**)→ null。1D 的四角要靠 bearer bar /
+ *   條端擬合,屬**階段 ⑤**,本函式不猜。
+ *
+ * **derived = true 的四邊形絕不可拿去推傾角(2026-08-03 階段 ④ 實測發現)。**
+ * tr + bl − tl 造出來的四邊形依定義是**平行四邊形**,而平行四邊形映到矩形的單應
+ * 矩陣是**仿射**的 —— 兩組對邊平行即消失點在無窮遠、消失線亦在無窮遠,
+ * tiltFromHomography 由消失線反推,故**不論真實傾角多少一律算出 0.00°**。
+ * 本輪針孔合成實測(400×400 方形、f=900、距離 833):
+ *
+ * | 真實傾角 | 補點與真實第四角的距離 | 三點推得的傾角 |
+ * |---|---|---|
+ * | 2° | 7.2 px | **0.00°** |
+ * | 5° | 18.0 px | **0.00°** |
+ * | 25° | 88.2 px | **0.00°** |
+ *
+ * 繞 X 軸與繞 Y 軸的結果完全相同。0° 是 gate.ts「≤5° 否則 FAIL」最寬鬆的放行值,
+ * 這與規格 §1.3 的即時迴圈 tilt = 0、§1.5 的 pxm = 9、tiltFromHomography 初版的
+ * 「焦距不可得回 0」是**同一個病灶**:用一個能通過型別檢查的假數字讓檢查看起來
+ * 有在跑,而且比現行的臂長差代理值更糟(代理值至少會隨傾斜變大)。
+ * 故 derived 必須外傳,由 rectifyPlan 統一擋掉,不留給呼叫端自行判斷。
+ * 註:規格 §3.3 表格原文「有 alignment pattern 時改用實測點」是唯一能讓 QR 拿到
+ * 真透視的路徑,ZXing 的 QRCodeReader 預設不外傳該點,屬後續待辦。
+ *
+ * 注意:QR 的四角是 **finder 中心**構成的方形,不是符號外框 —— 矯正輸出因此不含
+ *   最外圈約 3.5 模組與靜區。這對下游是量測範圍變小、不是變形,呼叫端不必補償。
+ */
+export function quadFromZxingPoints(points) {
+  const four = takeFinitePoints(points, 4);
+  if (four) return { corners: four, derived: false };
+  const three = takeFinitePoints(points, 3);
+  if (!three) return null;
+  const [bl, tl, tr] = three;
+  return { corners: [bl, tl, tr, { x: tr.x + bl.x - tl.x, y: tr.y + bl.y - tl.y }], derived: true };
+}
+
+// 把 quadConfidence 的實測值翻成「是哪一項不過」的中文原因(規格 §3.3:
+// 退回時要講得出原因,不能只回一個 null 讓呼叫端無話可說)。
+function confidenceReason(conf) {
+  const L = QUAD_CONFIDENCE_LIMITS;
+  const bad = [];
+  if (conf.minEdgePx < L.minEdgePx) bad.push(`最短邊 ${conf.minEdgePx.toFixed(1)}px < ${L.minEdgePx}`);
+  if (conf.fillRatio < L.minFillRatio) bad.push(`填充率 ${conf.fillRatio.toFixed(2)} < ${L.minFillRatio}`);
+  if (conf.aspectRatio > L.maxAspectRatio) bad.push(`長寬比 ${Number.isFinite(conf.aspectRatio) ? conf.aspectRatio.toFixed(1) : "∞"} > ${L.maxAspectRatio}`);
+  if (conf.minAngleDeg < L.minAngleDeg) bad.push(`最小內角 ${conf.minAngleDeg.toFixed(1)}° < ${L.minAngleDeg}`);
+  return "擬合信心不足（" + (bad.join("、") || "未指明") + "）";
+}
+
+/**
+ * 四角 → 正射 ROI 的完整管線(規格 §3.3,**階段 ④ 接線用的單一入口**)。純函式。
+ * 輸入:gray/w/h 來源灰階與尺寸、points 定位點(**須與 gray 同一座標系**)、
+ *   maxPixels 輸出面積上限。
+ * 輸出恆為物件、**永不 throw、永不代填數字**:
+ * - 成功:{ ok:true, gray, w, h, scale, H, corners, conf, requested, reason:"" }
+ *   —— w/h 是實際輸出尺寸(超預算已等比縮),scale 為實際/請求寬比,
+ *      H 是「來源 → 正射」矩陣,可直接餵 tiltFromHomography。
+ * - 退回:{ ok:false, reason, corners, conf, H },reason 講明是哪一關不過。
+ * 邏輯即把既有五支純函式串起來:quadFromZxingPoints → orderCornersRaw →
+ *   quadConfidence → targetRectSize → solveHomography → warpPerspective。
+ * **為什麼要有這一支:** 這條鏈的每一環都可能回 null,而每個 null 的意思都不同。
+ *   把串接寫在 demo/*.html 裡等於把「退回哪一條路徑」這個判斷放進**沒有自動化測試
+ *   可覆蓋**的檔案(專案 CLAUDE.md 已載明這條界線),退回邏輯就再也驗不了。
+ *   放在這裡則整條鏈連同退回原因都在 tests/imgproc.test.ts 的覆蓋範圍內。
+ */
+export function rectifyQuad(gray, w, h, points, maxPixels = MAX_WARP_PIXELS) {
+  const fail = (reason, corners, conf, H, derived) =>
+    ({ ok: false, reason, corners: corners || null, conf: conf || null, H: H || null, derivedCorner: !!derived });
+  const quad = quadFromZxingPoints(points);
+  if (!quad) return fail("四角不足（1D 掃描線僅兩端點,四角偵測屬階段 ⑤）");
+  const derived = quad.derived;
+  const corners = orderCornersRaw(quad.corners);
+  if (!corners) return fail("四角排序失敗（座標非有限）", null, null, null, derived);
+  const conf = quadConfidence(corners);
+  if (!conf) return fail("四角信心無法計算", corners, null, null, derived);
+  if (!conf.ok) return fail(confidenceReason(conf), corners, conf, null, derived);
+  const size = targetRectSize(corners);
+  if (!size) return fail("正射尺寸無法估計", corners, conf, null, derived);
+  const dst = [
+    { x: 0, y: 0 },
+    { x: size.w, y: 0 },
+    { x: size.w, y: size.h },
+    { x: 0, y: size.h },
+  ];
+  const H = solveHomography(corners, dst);
+  if (!H) return fail("單應矩陣奇異", corners, conf, null, derived);
+  const out = warpPerspective(gray, w, h, H, size.w, size.h, maxPixels);
+  if (!out) return fail("正射重採樣失敗", corners, conf, H, derived);
+  return { ok: true, reason: "", corners, conf, H, derivedCorner: derived,
+    gray: out.data, w: out.w, h: out.h, scale: out.scale, requested: size };
+}
+
+/**
+ * 由 rectifyQuad 的結果決定「量測吃哪張影像、傾角走哪條路徑」(階段 ④ 的接線判斷)。
+ * 純函式,輸入 rectifyQuad 的輸出(可為 null);輸出
+ * { useRectified, useHomography, note }。
+ * **為什麼這個判斷要獨立成純函式:** 它只有兩個布林值,寫進 demo/*.html 只是兩行 if,
+ * 但那兩行決定的是「量測吃不吃得到正射影像」與「透視閘門收到的是真值還是恆 0 的假值」
+ * —— 專案 CLAUDE.md 已載明 demo/*.html 無自動化測試可覆蓋,放在那裡等於這兩個判斷
+ * 永遠驗不了。放這裡則連同下方三條規則都在 tests/imgproc.test.ts 的覆蓋範圍內。
+ * 三條規則:
+ * 1. 矯正失敗(含 1D 四角不足)→ 兩者皆 false,note 為 rectifyQuad 給的原因。
+ * 2. **四角含補點(QR 三定位點)→ 兩者皆 false。** 補點四邊形是平行四邊形,其單應
+ *    矩陣為仿射:傾角必為 0.00°(恆綠,見 quadFromZxingPoints 的實測表),而矯正
+ *    本身也只還原得了旋轉與剪切、還原不了透視 —— 對 2D 的光度/FPD 量測是白付一次
+ *    雙線性內插的模糊代價,故一併不採用。傾角改走臂長差代理值(2026-08-03 裁示)。
+ * 3. 四角皆為實測(DataMatrix 四點,或階段 ⑤ 之後的 1D)→ 兩者皆 true。
+ */
+export function rectifyPlan(rect) {
+  if (!rect || !rect.ok) return { useRectified: false, useHomography: false, note: (rect && rect.reason) || "未矯正" };
+  if (rect.derivedCorner) {
+    return { useRectified: false, useHomography: false,
+      note: "未矯正（四角含推算點,平行四邊形不帶透視資訊）" };
+  }
+  return { useRectified: true, useHomography: true,
+    note: `已矯正 ${rect.w}×${rect.h}` + (rect.scale < 1 ? `（密度 ${(rect.scale * 100).toFixed(0)}%）` : "") };
+}
+
+/** 透視傾角的來源標籤(結果頁與掃描紀錄照這三個字串顯示,不另外造詞)。 */
+export const TILT_SOURCE_LABEL = Object.freeze({
+  homography: "單應矩陣實算",
+  proxy: "臂長差代理值",
+  none: "未量測",
+});
+
+/**
+ * 決定要送進閘門的透視傾角與其來源(規格 §3.3 焦距來源 · 2026-08-03 裁示)。純函式。
+ * 輸入:H(來源→正射,可為 null)、focalPx(像素焦距,**須與 H 同一座標尺度**)、
+ *   cx/cy 主點(同上尺度)、proxyDeg 呼叫端可用的代理傾角(quadGeometry 的臂長差,
+ *   沒有就傳 null)。
+ * 輸出:{ deg, source } —— source 為 "homography" / "proxy" / "none";
+ *   source 為 "none" 時 deg 為 **null**,呼叫端不得把它當 0 度餵進閘門。
+ * **裁示內容(2026-08-03):** 先試單應矩陣實算(需焦距);焦距不可得就退回臂長差
+ *   代理值,並在結果頁標註該值為代理。**兩者都拿不到時回 null,不代填 0** ——
+ *   gate.ts 的 classifyPerspective 對「不可得」判 FAIL 是刻意的(0° 是 ≤5° 最寬鬆的
+ *   放行值),本函式不繞過那道守衛。
+ */
+export function resolveTiltDeg(H, focalPx, cx, cy, proxyDeg) {
+  const real = tiltFromHomography(H, focalPx, cx, cy);
+  if (real !== null) return { deg: real, source: "homography" };
+  if (typeof proxyDeg === "number" && Number.isFinite(proxyDeg) && proxyDeg >= 0) return { deg: proxyDeg, source: "proxy" };
+  return { deg: null, source: "none" };
+}
+
+/**
  * FPD(固定圖樣損傷)proxy:暗類像素的標準差相對符號對比的比例。
  * 印刷刮白/針孔會讓暗模組亮度發散 → 比例升高。輸入:灰階、寬、ROI 與
  * 光度量測結果;輸出 0–1 損傷比例(僅為 proxy,非 ISO 15415 FPD 實測)。
