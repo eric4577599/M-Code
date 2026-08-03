@@ -793,18 +793,127 @@ export function focalPxFromSettings(settings, imageWidthPx) {
   return px;
 }
 
+// 以單應矩陣映射單點(齊次除法)。輸入:H(9 元素 row-major)與點;
+// 輸出:映射後的點,或 null(落在消失線上、或算出非有限座標)。
+function mapPoint(H, p) {
+  const w = H[6] * p.x + H[7] * p.y + H[8];
+  if (!w) return null;
+  const x = (H[0] * p.x + H[1] * p.y + H[2]) / w;
+  const y = (H[3] * p.x + H[4] * p.y + H[5]) / w;
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
+/**
+ * 還原 QR 的邊長模組數 N(dimension)。**算法刻意照抄 ZXing 自己的 computeDimension**
+ * —— 它才是決定 alignment pattern 該擺在哪個模組座標的那一份定義,自己另想一套會
+ * 在邊界情形跟 ZXing 的解碼結果不一致。
+ * 輸入:tl/tr/bl 三個 finder 中心、moduleSizePx 估計模組寬;
+ * 輸出:N(21–177 且 ≡1 mod 4),不可得或不合法回 null。
+ * 邏輯:兩條中心距各除以模組寬四捨五入(得中心間的模組數),取整數平均再 +7
+ *   (兩端各半個 finder 的 3.5 模組);合法 QR 尺寸恆為 4k+17 即 ≡1 mod 4,
+ *   故餘 0 進位、餘 2 退位、餘 3 直接視為量錯 —— 這三行是 ZXing 的原樣。
+ */
+function qrDimensionOf(tl, tr, bl, moduleSizePx) {
+  if (!Number.isFinite(moduleSizePx) || moduleSizePx <= 0) return null;
+  const d = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+  const tltr = Math.round(d(tl, tr) / moduleSizePx);
+  const tlbl = Math.round(d(tl, bl) / moduleSizePx);
+  let dim = Math.floor((tltr + tlbl) / 2) + 7;
+  switch (dim & 0x03) {
+    case 0: dim++; break;
+    case 2: dim--; break;
+    case 3: return null;
+    default: break;
+  }
+  return dim >= 21 && dim <= 177 ? dim : null;
+}
+
+/**
+ * QR 的四角(規格 §3.3 四角來源表 · §6.5 決策 ③ 2026-08-03 裁示選 (c))。純函式。
+ * 輸入:
+ * - points:ZXing QR 的 result points,順序為 **[bl, tl, tr] 或 [bl, tl, tr, alignment]**
+ * - moduleSizePx:三個 finder pattern 的估計模組寬(px)。ZXing 的前三個 result point
+ *   是 FinderPattern,帶 `getEstimatedModuleSize()`;拿不到就傳 null
+ * 輸出:{ corners, derived, dimension, source } 或 null(點數不足)。
+ *
+ * **這裡處理的是一個會讓所有 v≥2 QR 都 FAIL 的陷阱(2026-08-03 實測)。**
+ * ZXing 的 QR Detector 找到 alignment pattern 時會回**四個**點,但第四個是
+ * **alignment pattern 的中心,不是右下角** —— 它在模組座標 (N−6.5, N−6.5),
+ * 而右下角在 (N−3.5, N−3.5),差約 3 個模組。把它直接當角點餵進 solveHomography,
+ * 解出來的是一個數值合法、幾何錯誤的矩陣。針孔合成實測(dimension 25、每模組 12px):
+ *
+ * | 真實傾角 | alignment 當角點推得 | 本函式還原後推得 |
+ * |---|---|---|
+ * | **0°(完全拍正)** | **53.74°** | 0.00° |
+ * | 5° | 52.55° | 5.00° |
+ * | 30° | 47.81° | 30.00° |
+ *
+ * 53.74° ≫ gate.ts 的 ≤5° 門檻 → **每一張 v≥2 的 QR 都會 FAIL**,而 quadConfidence
+ * 的四重把關全程 ok=true(它是個正常的凸四邊形,擋不住)。方向雖與補點四角的
+ * 「恆綠」相反,同樣是「檢查在跑但量的是錯的東西」。
+ *
+ * 還原方式:alignment 的模組座標已知,故四個點的模組座標全部已知(下表),
+ * 解出「模組平面 → 影像」的單應矩陣後,把符號真正的四角 (0,0)(N,0)(N,N)(0,N)
+ * 映回影像即可。dimension N 依 ZXing 自己的 computeDimension 算法還原
+ * (兩條中心距 ÷ 模組寬 + 7,再修正到 ≡1 mod 4)。
+ *
+ * | 點 | 模組座標 |
+ * |---|---|
+ * | tl finder 中心 | (3.5, 3.5) |
+ * | tr finder 中心 | (N−3.5, 3.5) |
+ * | bl finder 中心 | (3.5, N−3.5) |
+ * | alignment 中心 | (N−6.5, N−6.5) |
+ *
+ * 註:傾角與「映回哪一個矩形」無關 —— 同一平面上的兩個矩形只差一個仿射,消失線不變。
+ * 取符號真四角而非 finder 中心方框,是為了讓矯正輸出涵蓋整個符號(含最外圈模組)。
+ *
+ * **拿不到 alignment 或拿不到模組寬時退回平行四邊形補點(derived = true)**,
+ * 語意與下方 quadFromZxingPoints 的三點路徑相同:v1 QR 本來就沒有 alignment pattern。
+ */
+export function qrQuadFromPoints(points, moduleSizePx) {
+  const three = takeFinitePoints(points, 3);
+  if (!three) return null;
+  const [bl, tl, tr] = three;
+  const parallelogram = () => ({
+    corners: [bl, tl, tr, { x: tr.x + bl.x - tl.x, y: tr.y + bl.y - tl.y }],
+    derived: true, dimension: null, source: "parallelogram",
+  });
+  const four = takeFinitePoints(points, 4);
+  if (!four) return parallelogram();
+  const align = four[3];
+  const N = qrDimensionOf(tl, tr, bl, moduleSizePx);
+  if (!N) return parallelogram();
+  // 模組平面 → 影像。四點順序必須與 [bl, tl, tr, align] 對齊
+  const H = solveHomography(
+    [{ x: 3.5, y: N - 3.5 }, { x: 3.5, y: 3.5 }, { x: N - 3.5, y: 3.5 }, { x: N - 6.5, y: N - 6.5 }],
+    [bl, tl, tr, align],
+  );
+  if (!H) return parallelogram();
+  const corners = [{ x: 0, y: 0 }, { x: N, y: 0 }, { x: N, y: N }, { x: 0, y: N }].map((p) => mapPoint(H, p));
+  if (corners.some((p) => !p)) return parallelogram();
+  return { corners, derived: false, dimension: N, source: "qr-alignment" };
+}
+
 /**
  * 由 ZXing result points 補出四角(規格 §3.3「四角來源依符號別分流」)。純函式。
- * 輸入:points,ZXing 的定位點陣列(座標系由呼叫端決定,本函式只做幾何)。
- * 輸出:{ corners, derived } 或 null 代表湊不出四角。
- * - corners:4 個 { x, y }(**未排序**,順序沿用輸入)
- * - derived:第四角是否為**推算**而來(true 時該四邊形不帶透視資訊,見下)
+ * 輸入:
+ * - points:ZXing 的定位點陣列(座標系由呼叫端決定,本函式只做幾何)
+ * - sym:符號別字串。**必須傳** —— 見下方「為什麼要知道符號別」
+ * - moduleSizePx:僅 QR 用,見 qrQuadFromPoints
+ * 輸出:{ corners, derived, dimension, source } 或 null 代表湊不出四角。
+ * - corners:4 個 { x, y }(**未排序**)
+ * - derived:**這組四角是不是全都可信的實測角點**。true 代表其中有推算成分或來源不明,
+ *   由 rectifyPlan 統一擋掉,不得拿去推傾角
+ * - source:"corners"(全實測)/ "qr-alignment"(由 alignment 還原)/
+ *   "parallelogram"(三點補點)/ "unknown"(符號別不明,保守不信任)
  * 邏輯:
- * - ≥4 個有限點(DataMatrix:L 型兩端 + timing 兩端)→ 直接取前 4 個,derived = false。
- * - 恰 3 個(QR:ZXing 給 [左下, 左上, 右上] 三個 finder 中心)→ 第四角以
- *   **tr + bl − tl** 推算,derived = **true**。
+ * - **QR** → 交給 qrQuadFromPoints。**不可以直接取前四點**:第四點是 alignment
+ *   pattern 中心而不是角點,詳見該函式的實測表
+ * - **其他符號別且 ≥4 個有限點**(DataMatrix:L 型兩端 + timing 兩端)→ 直接取前 4 個,
+ *   derived = false
+ * - 恰 3 個 → 第四角以 **tr + bl − tl** 推算,derived = **true**
  * - 少於 3 個(**1D 只有掃描線兩端點**)→ null。1D 的四角要靠 bearer bar /
- *   條端擬合,屬**階段 ⑤**,本函式不猜。
+ *   條端擬合,屬**階段 ⑤**,本函式不猜
  *
  * **derived = true 的四邊形絕不可拿去推傾角(2026-08-03 階段 ④ 實測發現)。**
  * tr + bl − tl 造出來的四邊形依定義是**平行四邊形**,而平行四邊形映到矩形的單應
@@ -822,20 +931,26 @@ export function focalPxFromSettings(settings, imageWidthPx) {
  * 這與規格 §1.3 的即時迴圈 tilt = 0、§1.5 的 pxm = 9、tiltFromHomography 初版的
  * 「焦距不可得回 0」是**同一個病灶**:用一個能通過型別檢查的假數字讓檢查看起來
  * 有在跑,而且比現行的臂長差代理值更糟(代理值至少會隨傾斜變大)。
- * 故 derived 必須外傳,由 rectifyPlan 統一擋掉,不留給呼叫端自行判斷。
- * 註:規格 §3.3 表格原文「有 alignment pattern 時改用實測點」是唯一能讓 QR 拿到
- * 真透視的路徑,ZXing 的 QRCodeReader 預設不外傳該點,屬後續待辦。
  *
- * 注意:QR 的四角是 **finder 中心**構成的方形,不是符號外框 —— 矯正輸出因此不含
- *   最外圈約 3.5 模組與靜區。這對下游是量測範圍變小、不是變形,呼叫端不必補償。
+ * **為什麼要知道符號別:** 「四個點」對 DataMatrix 是四個角,對 QR 卻是三個角加一個
+ * alignment 中心 —— 同樣的陣列長度、完全不同的幾何意義。少了 sym 就分不出來,
+ * 而分錯的代價是 QR 全數 FAIL(見 qrQuadFromPoints 的實測表)。故 **sym 不明時
+ * 一律保守標 derived = true**:寧可退回代理值,不可拿一組意義不明的點去解矩陣。
  */
-export function quadFromZxingPoints(points) {
+export function quadFromZxingPoints(points, sym, moduleSizePx) {
+  if (sym === "QR") return qrQuadFromPoints(points, moduleSizePx);
   const four = takeFinitePoints(points, 4);
-  if (four) return { corners: four, derived: false };
+  if (four) {
+    const known = typeof sym === "string" && sym.length > 0;
+    return { corners: four, derived: !known, dimension: null, source: known ? "corners" : "unknown" };
+  }
   const three = takeFinitePoints(points, 3);
   if (!three) return null;
   const [bl, tl, tr] = three;
-  return { corners: [bl, tl, tr, { x: tr.x + bl.x - tl.x, y: tr.y + bl.y - tl.y }], derived: true };
+  return {
+    corners: [bl, tl, tr, { x: tr.x + bl.x - tl.x, y: tr.y + bl.y - tl.y }],
+    derived: true, dimension: null, source: "parallelogram",
+  };
 }
 
 // 把 quadConfidence 的實測值翻成「是哪一項不過」的中文原因(規格 §3.3:
@@ -853,7 +968,9 @@ function confidenceReason(conf) {
 /**
  * 四角 → 正射 ROI 的完整管線(規格 §3.3,**階段 ④ 接線用的單一入口**)。純函式。
  * 輸入:gray/w/h 來源灰階與尺寸、points 定位點(**須與 gray 同一座標系**)、
- *   maxPixels 輸出面積上限。
+ *   opts = { sym, moduleSizePx, maxPixels }。**sym 必須傳** —— 「四個點」對
+ *   DataMatrix 是四個角、對 QR 卻是三個角加一個 alignment 中心,分錯的代價見
+ *   qrQuadFromPoints 的實測表;不傳則保守走不信任路徑。
  * 輸出恆為物件、**永不 throw、永不代填數字**:
  * - 成功:{ ok:true, gray, w, h, scale, H, corners, conf, requested, reason:"" }
  *   —— w/h 是實際輸出尺寸(超預算已等比縮),scale 為實際/請求寬比,
@@ -866,19 +983,22 @@ function confidenceReason(conf) {
  *   可覆蓋**的檔案(專案 CLAUDE.md 已載明這條界線),退回邏輯就再也驗不了。
  *   放在這裡則整條鏈連同退回原因都在 tests/imgproc.test.ts 的覆蓋範圍內。
  */
-export function rectifyQuad(gray, w, h, points, maxPixels = MAX_WARP_PIXELS) {
-  const fail = (reason, corners, conf, H, derived) =>
-    ({ ok: false, reason, corners: corners || null, conf: conf || null, H: H || null, derivedCorner: !!derived });
-  const quad = quadFromZxingPoints(points);
+export function rectifyQuad(gray, w, h, points, opts = {}) {
+  const { sym = null, moduleSizePx = null, maxPixels = MAX_WARP_PIXELS } = opts || {};
+  const fail = (reason, corners, conf, H, derived, q) => ({
+    ok: false, reason, corners: corners || null, conf: conf || null, H: H || null,
+    derivedCorner: !!derived, quadSource: (q && q.source) || null, dimension: (q && q.dimension) || null,
+  });
+  const quad = quadFromZxingPoints(points, sym, moduleSizePx);
   if (!quad) return fail("四角不足（1D 掃描線僅兩端點,四角偵測屬階段 ⑤）");
   const derived = quad.derived;
   const corners = orderCornersRaw(quad.corners);
-  if (!corners) return fail("四角排序失敗（座標非有限）", null, null, null, derived);
+  if (!corners) return fail("四角排序失敗（座標非有限）", null, null, null, derived, quad);
   const conf = quadConfidence(corners);
-  if (!conf) return fail("四角信心無法計算", corners, null, null, derived);
-  if (!conf.ok) return fail(confidenceReason(conf), corners, conf, null, derived);
+  if (!conf) return fail("四角信心無法計算", corners, null, null, derived, quad);
+  if (!conf.ok) return fail(confidenceReason(conf), corners, conf, null, derived, quad);
   const size = targetRectSize(corners);
-  if (!size) return fail("正射尺寸無法估計", corners, conf, null, derived);
+  if (!size) return fail("正射尺寸無法估計", corners, conf, null, derived, quad);
   const dst = [
     { x: 0, y: 0 },
     { x: size.w, y: 0 },
@@ -886,10 +1006,11 @@ export function rectifyQuad(gray, w, h, points, maxPixels = MAX_WARP_PIXELS) {
     { x: 0, y: size.h },
   ];
   const H = solveHomography(corners, dst);
-  if (!H) return fail("單應矩陣奇異", corners, conf, null, derived);
+  if (!H) return fail("單應矩陣奇異", corners, conf, null, derived, quad);
   const out = warpPerspective(gray, w, h, H, size.w, size.h, maxPixels);
-  if (!out) return fail("正射重採樣失敗", corners, conf, H, derived);
+  if (!out) return fail("正射重採樣失敗", corners, conf, H, derived, quad);
   return { ok: true, reason: "", corners, conf, H, derivedCorner: derived,
+    quadSource: quad.source, dimension: quad.dimension,
     gray: out.data, w: out.w, h: out.h, scale: out.scale, requested: size };
 }
 
@@ -912,11 +1033,15 @@ export function rectifyQuad(gray, w, h, points, maxPixels = MAX_WARP_PIXELS) {
 export function rectifyPlan(rect) {
   if (!rect || !rect.ok) return { useRectified: false, useHomography: false, note: (rect && rect.reason) || "未矯正" };
   if (rect.derivedCorner) {
-    return { useRectified: false, useHomography: false,
-      note: "未矯正（四角含推算點,平行四邊形不帶透視資訊）" };
+    const why = rect.quadSource === "unknown"
+      ? "四角來源不明（未指定符號別）"
+      : "四角含推算點,平行四邊形不帶透視資訊";
+    return { useRectified: false, useHomography: false, note: `未矯正（${why}）` };
   }
+  const how = rect.quadSource === "qr-alignment"
+    ? `,QR 四角由 alignment pattern 還原（N=${rect.dimension}）` : "";
   return { useRectified: true, useHomography: true,
-    note: `已矯正 ${rect.w}×${rect.h}` + (rect.scale < 1 ? `（密度 ${(rect.scale * 100).toFixed(0)}%）` : "") };
+    note: `已矯正 ${rect.w}×${rect.h}` + (rect.scale < 1 ? `（密度 ${(rect.scale * 100).toFixed(0)}%）` : "") + how };
 }
 
 /** 透視傾角的來源標籤(結果頁與掃描紀錄照這三個字串顯示,不另外造詞)。 */

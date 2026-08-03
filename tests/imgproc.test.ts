@@ -30,6 +30,8 @@ import {
   quadFromZxingPoints,
   rectifyQuad,
   rectifyPlan,
+  qrQuadFromPoints,
+  orderCornersRaw,
   resolveTiltDeg,
   TILT_SOURCE_LABEL,
 } from "../demo/imgproc.js";
@@ -1074,7 +1076,7 @@ describe("focalPxFromSettings(像素焦距,裁示:先試 getSettings().focalLeng
 describe("quadFromZxingPoints(四角補點,依符號別分流)", () => {
   it("QR 三個 finder 中心 [bl, tl, tr] → 第四角 tr + bl − tl,前三點原封不動", () => {
     const bl = { x: 10, y: 110 }, tl = { x: 10, y: 10 }, tr = { x: 110, y: 10 };
-    const q = quadFromZxingPoints([bl, tl, tr]);
+    const q = quadFromZxingPoints([bl, tl, tr], "QR");
     expect(q.corners).toHaveLength(4);
     expect(q.corners.slice(0, 3)).toEqual([bl, tl, tr]);
     expect(q.corners[3]).toEqual({ x: 110, y: 110 });
@@ -1083,19 +1085,20 @@ describe("quadFromZxingPoints(四角補點,依符號別分流)", () => {
 
   it("DataMatrix 四點 → 直接取用且 derived=false;超過 4 點只取前 4(不猜哪些是真正的角)", () => {
     const pts = [{ x: 0, y: 0 }, { x: 50, y: 2 }, { x: 52, y: 40 }, { x: 1, y: 38 }, { x: 25, y: 20 }];
-    expect(quadFromZxingPoints(pts)).toEqual({ corners: pts.slice(0, 4), derived: false });
+    expect(quadFromZxingPoints(pts, "DATAMATRIX"))
+      .toEqual({ corners: pts.slice(0, 4), derived: false, dimension: null, source: "corners" });
   });
 
   it("**階段 ⑤ 的界線**:1D 掃描線兩端點 → null,本函式不猜四角", () => {
-    expect(quadFromZxingPoints([{ x: 5, y: 50 }, { x: 300, y: 52 }])).toBeNull();
+    expect(quadFromZxingPoints([{ x: 5, y: 50 }, { x: 300, y: 52 }], "ITF14")).toBeNull();
   });
 
   it("容錯:非有限座標略過後不足三點 → null;null / 空陣列不 throw", () => {
-    expect(quadFromZxingPoints([{ x: NaN, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }])).toBeNull();
-    expect(quadFromZxingPoints(null)).toBeNull();
-    expect(quadFromZxingPoints([])).toBeNull();
+    expect(quadFromZxingPoints([{ x: NaN, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }], "DATAMATRIX")).toBeNull();
+    expect(quadFromZxingPoints(null, "DATAMATRIX")).toBeNull();
+    expect(quadFromZxingPoints([], "DATAMATRIX")).toBeNull();
     // 五點含一個 NaN → 略過後仍湊得出四點
-    expect(quadFromZxingPoints([{ x: 0, y: 0 }, { x: NaN, y: 1 }, { x: 5, y: 0 }, { x: 5, y: 5 }, { x: 0, y: 5 }]).corners)
+    expect(quadFromZxingPoints([{ x: 0, y: 0 }, { x: NaN, y: 1 }, { x: 5, y: 0 }, { x: 5, y: 5 }, { x: 0, y: 5 }], "DATAMATRIX").corners)
       .toEqual([{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 5 }, { x: 0, y: 5 }]);
   });
 
@@ -1116,7 +1119,7 @@ describe("quadFromZxingPoints(四角補點,依符號別分流)", () => {
       for (const deg of [0, 2, 5, 25]) {
         const proj = square.map((c) => project(planePoint(axis, c.x - 199.5, c.y - 199.5, deg))) as Pt[];
         const [pTL, pTR, pBR, pBL] = proj;
-        const q = quadFromZxingPoints([pBL, pTL, pTR]);
+        const q = quadFromZxingPoints([pBL, pTL, pTR], "QR");
         const derived = q.corners[3]! as Pt;
         expect(Math.hypot(derived.x - pBR!.x, derived.y - pBR!.y)).toBeCloseTo(wantErr[deg]!, 1);
         // 真四角推得回真實傾角 —— 對照組,證明失準來自補點而非管線
@@ -1133,7 +1136,7 @@ describe("rectifyQuad(階段 ④ 接線的單一入口)", () => {
 
   it("正常傾斜(繞 Y 軸 25°):ok,DEC 從 0.5 掉回量化底限,H 可推回 25°", () => {
     const { img, quad } = renderTilted(ORTHO4, 25, "y");
-    const r = rectifyQuad(img.data, img.w, img.h, quad);
+    const r = rectifyQuad(img.data, img.w, img.h, quad, { sym: "DATAMATRIX" });
     expect(r.ok).toBe(true);
     expect(r.reason).toBe("");
     expect(r.derivedCorner).toBe(false); // 四點皆實測
@@ -1172,7 +1175,7 @@ describe("rectifyQuad(階段 ④ 接線的單一入口)", () => {
   it("退回:來源影像不合法(null / 尺寸為 0)→ 正射重採樣失敗,不 throw", () => {
     const { quad } = renderTilted(ORTHO4, 12, "y");
     for (const bad of [[null, 900, 600], [ORTHO4.gray, 0, 600], [ORTHO4.gray, 900, 0]] as const) {
-      const r = rectifyQuad(bad[0], bad[1], bad[2], quad);
+      const r = rectifyQuad(bad[0], bad[1], bad[2], quad, { sym: "DATAMATRIX" });
       expect(r.ok).toBe(false);
       expect(r.reason).toContain("重採樣失敗");
       expect(r.H).not.toBeNull(); // 前面幾關都過了,退回發生在最後一步
@@ -1181,8 +1184,8 @@ describe("rectifyQuad(階段 ④ 接線的單一入口)", () => {
 
   it("面積預算:maxPixels 壓低時仍成功,但回報 scale < 1(取樣密度已降低)", () => {
     const { img, quad } = renderTilted(ORTHO4, 12, "y");
-    const full = rectifyQuad(img.data, img.w, img.h, quad);
-    const tight = rectifyQuad(img.data, img.w, img.h, quad, 10000);
+    const full = rectifyQuad(img.data, img.w, img.h, quad, { sym: "DATAMATRIX" });
+    const tight = rectifyQuad(img.data, img.w, img.h, quad, { sym: "DATAMATRIX", maxPixels: 10000 });
     expect(full.scale).toBe(1);
     expect(tight.ok).toBe(true);
     expect(tight.scale).toBeLessThan(1);
@@ -1192,15 +1195,15 @@ describe("rectifyQuad(階段 ④ 接線的單一入口)", () => {
 
   it("預設面積上限與 MAX_WARP_PIXELS 同源(不在接線端另寫一份數字)", () => {
     const { img, quad } = renderTilted(ORTHO4, 12, "y");
-    expect(rectifyQuad(img.data, img.w, img.h, quad))
-      .toEqual(rectifyQuad(img.data, img.w, img.h, quad, MAX_WARP_PIXELS));
+    expect(rectifyQuad(img.data, img.w, img.h, quad, { sym: "DATAMATRIX" }))
+      .toEqual(rectifyQuad(img.data, img.w, img.h, quad, { sym: "DATAMATRIX", maxPixels: MAX_WARP_PIXELS }));
   });
 });
 
 describe("resolveTiltDeg(裁示 2026-08-03:實算 → 代理 → 不可得)", () => {
   const ORTHO5 = charBarcodeAt(12, 120);
   const { img, quad } = renderTilted(ORTHO5, 25, "y");
-  const H = (rectifyQuad(img.data, img.w, img.h, quad) as { H: number[] }).H;
+  const H = (rectifyQuad(img.data, img.w, img.h, quad, { sym: "DATAMATRIX" }) as { H: number[] }).H;
 
   it("焦距可得 → 單應矩陣實算,來源標 homography", () => {
     const t = resolveTiltDeg(H, CAM.f, CAM.cx, CAM.cy, 3.2);
@@ -1248,7 +1251,7 @@ describe("rectifyPlan(階段 ④:量測吃哪張影像、傾角走哪條路徑)"
   const { img, quad } = renderTilted(ORTHO6, 20, "y");
 
   it("四點皆實測(DataMatrix / 階段 ⑤ 後的 1D)→ 用正射影像、用單應傾角", () => {
-    const rect = rectifyQuad(img.data, img.w, img.h, quad);
+    const rect = rectifyQuad(img.data, img.w, img.h, quad, { sym: "DATAMATRIX" });
     const plan = rectifyPlan(rect);
     expect(plan).toEqual({ useRectified: true, useHomography: true, note: `已矯正 ${rect.w}×${rect.h}` });
   });
@@ -1256,7 +1259,7 @@ describe("rectifyPlan(階段 ④:量測吃哪張影像、傾角走哪條路徑)"
   it("**四角含補點(QR 三定位點)→ 兩者皆停用**,傾角改走代理值", () => {
     // 拿同一張傾斜影像,只餵三個點(模擬 ZXing 的 QR finder 中心)
     const three = [quad[3]!, quad[0]!, quad[1]!]; // [bl, tl, tr]
-    const rect = rectifyQuad(img.data, img.w, img.h, three);
+    const rect = rectifyQuad(img.data, img.w, img.h, three, { sym: "QR" });
     expect(rect.ok).toBe(true);          // 矯正本身成功,不是失敗
     expect(rect.derivedCorner).toBe(true);
     const plan = rectifyPlan(rect);
@@ -1277,7 +1280,7 @@ describe("rectifyPlan(階段 ④:量測吃哪張影像、傾角走哪條路徑)"
   });
 
   it("縮過的正射輸出:note 帶密度標註(規格 §6.1 前後對照要對齊取樣密度)", () => {
-    const rect = rectifyQuad(img.data, img.w, img.h, quad, 10000);
+    const rect = rectifyQuad(img.data, img.w, img.h, quad, { sym: "DATAMATRIX", maxPixels: 10000 });
     expect(rectifyPlan(rect).note).toMatch(/^已矯正 \d+×\d+（密度 \d+%）$/);
   });
 
@@ -1285,5 +1288,105 @@ describe("rectifyPlan(階段 ④:量測吃哪張影像、傾角走哪條路徑)"
     for (const bad of [null, undefined]) {
       expect(rectifyPlan(bad)).toEqual({ useRectified: false, useHomography: false, note: "未矯正" });
     }
+  });
+});
+
+// ── QR 的 alignment pattern(規格 §6.5 決策 ③,2026-08-03 裁示選 (c))────────
+// ZXing 的 QR Detector 找到 alignment pattern 時回**四個**點,第四個是 alignment
+// **中心**而不是右下角。把它直接當角點會讓每一張 v≥2 的 QR 都 FAIL。
+describe("qrQuadFromPoints(由 alignment pattern 還原 QR 四角)", () => {
+  const N = 25, PX = 12;                       // dimension 25、每模組 12px
+  const HALF = (N * PX) / 2;
+  // 模組座標 → 傾斜拍攝的影像座標(沿用本檔的針孔相機模型,無亂數)
+  const shoot = (axis: "x" | "y", deg: number, mx: number, my: number): Pt =>
+    project(planePoint(axis, mx * PX - HALF, my * PX - HALF, deg));
+  // ZXing 的回傳順序:[bl, tl, tr, alignment]
+  const zxPts = (axis: "x" | "y", deg: number): Pt[] => [
+    shoot(axis, deg, 3.5, N - 3.5), shoot(axis, deg, 3.5, 3.5),
+    shoot(axis, deg, N - 3.5, 3.5), shoot(axis, deg, N - 6.5, N - 6.5),
+  ];
+  const tiltOf = (corners: Pt[]) => {
+    const o = orderCornersRaw(corners) as Pt[];
+    const size = targetRectSize(o);
+    const H = solveHomography(o, [{ x: 0, y: 0 }, { x: size.w, y: 0 }, { x: size.w, y: size.h }, { x: 0, y: size.h }]);
+    return tiltFromHomography(H, CAM.f, CAM.cx, CAM.cy);
+  };
+
+  it("dimension 還原正確,四角標為實測(derived=false)", () => {
+    const q = qrQuadFromPoints(zxPts("y", 10), PX);
+    expect(q.dimension).toBe(N);
+    expect(q.derived).toBe(false);
+    expect(q.source).toBe("qr-alignment");
+    expect(q.corners).toHaveLength(4);
+  });
+
+  it("**還原後傾角正確;把 alignment 當角點則連拍正的 QR 都算出 53.74°**", () => {
+    // 實測表(dimension 25、每模組 12px、f=900、距離 833),繞 Y 軸:
+    //   真實 0° → alignment 當角點 53.74° / 還原後 0.00°
+    //   真實 5° → 52.55° / 5.00°;真實 30° → 47.81° / 30.00°
+    const wantBad: Record<number, number> = { 0: 53.74, 5: 52.55, 30: 47.81 };
+    for (const deg of [0, 5, 30]) {
+      const pts = zxPts("y", deg);
+      // ① 還原後:誤差在 0.01° 內
+      expect(tiltOf(qrQuadFromPoints(pts, PX).corners)).toBeCloseTo(deg, 1);
+      // ② 直接把四點當四角(本輪之前的行為):錯得離譜,且與真實傾角幾乎無關
+      expect(tiltOf(pts)).toBeCloseTo(wantBad[deg]!, 1);
+    }
+  });
+
+  it("繞 X 軸同樣還原得回來(不是只對單一旋轉軸成立)", () => {
+    for (const deg of [0, 3, 12, 25]) {
+      expect(tiltOf(qrQuadFromPoints(zxPts("x", deg), PX).corners)).toBeCloseTo(deg, 1);
+    }
+  });
+
+  it("**擋得住 0° 的假 FAIL**:拍正的 QR 還原後過 ≤5° 閘門,不還原則過不了", () => {
+    const pts = zxPts("y", 0);
+    expect(tiltOf(qrQuadFromPoints(pts, PX).corners)).toBeLessThanOrEqual(5);
+    expect(tiltOf(pts)).toBeGreaterThan(5); // 不還原 → 拍正的 QR 也被判 FAIL
+  });
+
+  it("沒有 alignment(v1 QR 只有三點)→ 退回平行四邊形補點並標 derived", () => {
+    const q = qrQuadFromPoints(zxPts("y", 10).slice(0, 3), PX);
+    expect(q.derived).toBe(true);
+    expect(q.source).toBe("parallelogram");
+    expect(q.dimension).toBeNull();
+  });
+
+  it("模組寬不可得 / 不合法 → 同樣退回補點,絕不用一個猜的 dimension", () => {
+    for (const bad of [null, undefined, 0, -12, NaN, Infinity, "12"]) {
+      const q = qrQuadFromPoints(zxPts("y", 10), bad);
+      expect(q.derived).toBe(true);
+      expect(q.source).toBe("parallelogram");
+    }
+  });
+
+  it("模組寬離譜到算出不合法的 dimension → 退回補點(不硬套 ≡1 mod 4 的修正)", () => {
+    // 模組寬給成 1000px:兩條中心距各除得 0 → dim=7,低於 QR 最小的 21
+    const q = qrQuadFromPoints(zxPts("y", 10), 1000);
+    expect(q.source).toBe("parallelogram");
+  });
+
+  it("點數不足(<3)→ null,不 throw", () => {
+    expect(qrQuadFromPoints([{ x: 1, y: 1 }, { x: 2, y: 2 }], PX)).toBeNull();
+    expect(qrQuadFromPoints(null, PX)).toBeNull();
+  });
+
+  it("quadFromZxingPoints 對 QR 一律走還原路徑,不得直接取前四點", () => {
+    const pts = zxPts("y", 10);
+    expect(quadFromZxingPoints(pts, "QR", PX)).toEqual(qrQuadFromPoints(pts, PX));
+    // 同一組點若被當成 DataMatrix 就會走「四點即四角」—— 兩者結果必須不同
+    expect(quadFromZxingPoints(pts, "DATAMATRIX", PX).corners).toEqual(pts);
+  });
+
+  it("**符號別不明時保守不信任**:四點仍回傳,但標 derived 讓 rectifyPlan 擋下", () => {
+    const pts = zxPts("y", 10);
+    for (const sym of [undefined, null, ""]) {
+      const q = quadFromZxingPoints(pts, sym, PX);
+      expect(q.derived).toBe(true);
+      expect(q.source).toBe("unknown");
+    }
+    expect(rectifyPlan({ ok: true, derivedCorner: true, quadSource: "unknown", w: 10, h: 10, scale: 1 }).note)
+      .toContain("四角來源不明");
   });
 });

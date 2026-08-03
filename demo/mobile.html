@@ -530,7 +530,12 @@ function roiGrayOf(photo, roi) {
 function rectifyRoi(zx, kx, ky, rg) {
   if (!zx || !zx.points || !zx.points.length) return { ok: false, reason: "未解碼,無定位點", H: null, derivedCorner: false };
   const pts = zx.points.map((p) => ({ x: (p.x * kx - rg.x0) * rg.sx, y: (p.y * ky - rg.y0) * rg.sy }));
-  return rectifyQuad(rg.gray, rg.w, rg.h, pts);
+  // 模組寬跟著點一起換算 —— qrDimensionOf 拿它去除中心距,兩者不同尺度就會算錯
+  // dimension(而 dimension 錯,alignment 的模組座標就錯,四角跟著全錯)。
+  // 縮放是等比的(kx≈ky、sx≈sy),取 x 軸那組即可。
+  const ms = typeof zx.moduleSizePx === "number" && zx.moduleSizePx > 0
+    ? zx.moduleSizePx * kx * rg.sx : null;
+  return rectifyQuad(rg.gray, rg.w, rg.h, pts, { sym: zx.sym, moduleSizePx: ms });
 }
 
 // 真實檢驗:輸入快門照片 canvas;ZXing 單次解碼 + 影像量測算分級參數(C7 proxy 實算)
@@ -903,8 +908,18 @@ function zxDecodeCanvas(c) {
       new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(c))));
     const sym = ZX_FORMAT_TO_SYM[ZXing.BarcodeFormat[res.getBarcodeFormat()]];
     if (!sym) return null;
-    const points = (res.getResultPoints() || []).map((p) => ({ x: p.getX(), y: p.getY() }));
-    return { sym, text: res.getText(), points };
+    const rp = res.getResultPoints() || [];
+    const points = rp.map((p) => ({ x: p.getX(), y: p.getY() }));
+    // QR 的前三個 result point 是 FinderPattern,帶 getEstimatedModuleSize();
+    // 第四個(alignment pattern)沒有這個方法,1D / DataMatrix 也沒有。
+    // 這個數字是還原 QR dimension 的唯一來源,而 dimension 決定 alignment pattern
+    // 該擺在哪個模組座標 —— 少了它,四角就只能退回平行四邊形補點(見 imgproc.js
+    // 的 qrQuadFromPoints)。方法名在本 bundle 的壓縮版仍保留,但仍以 typeof 守著。
+    const ms = rp
+      .map((p) => (typeof p.getEstimatedModuleSize === "function" ? p.getEstimatedModuleSize() : null))
+      .filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0);
+    const moduleSizePx = ms.length ? ms.reduce((a, b) => a + b, 0) / ms.length : null;
+    return { sym, text: res.getText(), points, moduleSizePx };
   } catch (e) {
     return null; // NotFoundException 等:照片上無可讀條碼
   } finally {
