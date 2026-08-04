@@ -1389,6 +1389,52 @@ export function quadFrom1DEdges(gray, w, h, points, opts = {}) {
   return { ok: true, corners, source: "1d-edges", fit, metrics, reason: "" };
 }
 
+/** 條端擬合取像範圍的餘裕(見 edgeFitRoi)。裁切邊界不得被當成條端,故要留白。 */
+export const EDGE_FIT_ROI_PAD = Object.freeze({ ratio: 0.15, minPx: 8 });
+
+/**
+ * 1D 條端擬合要用的**取像範圍**(規格 §3.3「取像範圍」段)。純函式。
+ * 輸入:points 兩個(以上)定位點、imgW / imgH 來源影像尺寸(**與 points 同一座標系**);
+ * 輸出:{ x0, y0, x1, y1 } 整數矩形,或 `null`(點不足 / 座標非有限 / 定位線退化)。
+ *
+ * **為什麼不能沿用量測 ROI —— 2026-08-04 實測發現的整合缺口。**
+ * 量測 ROI 由「定位點 bbox 外擴 25%(下限 24px)」而來。這對 2D 沒問題(三四個點
+ * 撐得出高度),但 **1D 的兩個定位點 y 幾乎相同 ⇒ bbox 高度 ≈ 0 ⇒ 垂直只外擴到保底的
+ * 24px,ROI 高度僅約 48px**,而條高動輒一兩百 px —— **條的上下端整個落在 ROI 之外**,
+ * quadFrom1DEdges 必定回「上下邊取樣點不足(有效邊界點 0 個)」。
+ * 實測(合成 ITF、900×600 相機影像):沿用量測 ROI(高 49px)→ 失敗;
+ * 同一組點餵整張影像 → `ok`、`source: "1d-edges"`。
+ * 也就是說**階段 ⑤ 的功能寫好了卻在真實呼叫端一次都走不到**,而單元測試餵的是整張圖,
+ * 全綠也照樣看不出來。故取像範圍必須另算,不可與量測 ROI 共用。
+ *
+ * **為什麼不是把量測 ROI 一起放大:** 量測 ROI 一放大就多吃進大片靜區白底,
+ * `roiPhotometric` 的 rLight / rDark / edgeContrasts 會系統性位移,而
+ * `policies.ts` 的允收門檻是在舊取樣條件下定的(規格 §6.1 明令未經實拍對照不得動)。
+ * 兩者職責不同,分開算才不會互相污染。
+ *
+ * 垂直半徑取 `searchHalfSpanRatio × 定位線長` —— 與 quadFrom1DEdges 的搜尋半徑**同源**,
+ * 保證「搜尋搆得到的範圍」都在裁切內;再加 EDGE_FIT_ROI_PAD 的餘裕,避免條端正好壓在
+ * 裁切邊界上被「不得用畫面邊界當條端」那道守衛擋掉。
+ * 水平沿用 `crossOverscanRatio`(求左右邊時掃描線的外延量),同樣加餘裕。
+ */
+export function edgeFitRoi(points, imgW, imgH) {
+  const two = takeFinitePoints(points, 2);
+  if (!two || !(imgW > 0) || !(imgH > 0)) return null;
+  const [p0, p1] = two;
+  const len = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+  if (!(len >= LINE_FIT_LIMITS.minLocatorLenPx)) return null;
+  const pad = (v) => v * (1 + EDGE_FIT_ROI_PAD.ratio) + EDGE_FIT_ROI_PAD.minPx;
+  const halfV = pad(LINE_FIT_LIMITS.searchHalfSpanRatio * len);
+  const halfH = pad(LINE_FIT_LIMITS.crossOverscanRatio * len);
+  // 以定位線 bbox 為中心外擴。定位線本身可能是斜的,故兩軸都由 bbox 起算而非中點。
+  const bx0 = Math.min(p0.x, p1.x), bx1 = Math.max(p0.x, p1.x);
+  const by0 = Math.min(p0.y, p1.y), by1 = Math.max(p0.y, p1.y);
+  const x0 = Math.max(0, Math.floor(bx0 - halfH)), y0 = Math.max(0, Math.floor(by0 - halfV));
+  const x1 = Math.min(imgW, Math.ceil(bx1 + halfH)), y1 = Math.min(imgH, Math.ceil(by1 + halfV));
+  if (!(x1 - x0 >= 2 && y1 - y0 >= 2)) return null;
+  return { x0, y0, x1, y1 };
+}
+
 // 把 quadConfidence 的實測值翻成「是哪一項不過」的中文原因(規格 §3.3:
 // 退回時要講得出原因,不能只回一個 null 讓呼叫端無話可說)。
 function confidenceReason(conf) {

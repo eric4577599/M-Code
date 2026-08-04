@@ -39,6 +39,8 @@ import {
   LINE_FIT_LIMITS,
   fitLineTLS,
   quadFrom1DEdges,
+  edgeFitRoi,
+  EDGE_FIT_ROI_PAD,
 } from "../demo/imgproc.js";
 
 // 產生單色 RGBA 影像
@@ -2075,5 +2077,71 @@ describe("1D 四角偵測的 edge case(規格 §5.4e)", () => {
   it("正方形標籤(條高 = 符號寬)仍在涵蓋範圍內", () => {
     expect(symW).toBeLessThan(heightCap); // 1:1 落在上限之內才談得上「近正方形涵蓋得到」
     expect(okAt(symW).ok).toBe(true);
+  });
+});
+
+
+// ── 真實呼叫端的整合守門(2026-08-04)─────────────────────────────────────────
+// 這一組存在的理由:階段 ⑤ 的 411 個測試全綠,但功能在 demo/mobile.html 的實際呼叫端
+// **一次都走不到** —— 單元測試餵整張影像,真實管線餵的是「定位點 bbox 外擴」裁出來的
+// 細長 ROI。1D 兩個定位點 y 幾乎相同 ⇒ ROI 高度約 48px ⇒ 條的上下端整個被裁掉。
+// 故這裡直接把 inspectReal 的裁法搬過來重演一次,不再只餵整張圖。
+describe("1D 條端擬合的取像範圍(規格 §3.3「取像範圍」段)", () => {
+  // 完全照 demo/mobile.html inspectReal 的量測 ROI 算法(定位點 bbox 外擴 25%,下限 24px)
+  const measureRoi = (pts: Pt[], w: number, h: number) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    const mx = Math.max(24, (x1 - x0) * 0.25), my = Math.max(24, (y1 - y0) * 0.25);
+    return { x0: Math.max(0, Math.floor(x0 - mx)), y0: Math.max(0, Math.floor(y0 - my)),
+             x1: Math.min(w, Math.ceil(x1 + mx)), y1: Math.min(h, Math.ceil(y1 + my)) };
+  };
+  // 裁一塊子影像並把定位點換算進去(對應 roiGrayOf + rectifyRoi 的座標換算,scale=1)
+  const cropAndFit = (s: ReturnType<typeof shootLabel>, roi: { x0: number; y0: number; x1: number; y1: number }) => {
+    const rw = roi.x1 - roi.x0, rh = roi.y1 - roi.y0;
+    const crop = new Uint8ClampedArray(rw * rh);
+    for (let y = 0; y < rh; y++) {
+      for (let x = 0; x < rw; x++) crop[y * rw + x] = s.img.data[(roi.y0 + y) * s.img.w + (roi.x0 + x)]!;
+    }
+    const local = s.pts.map((p: Pt) => ({ x: p.x - roi.x0, y: p.y - roi.y0 }));
+    return rectifyQuad(crop, rw, rh, local, { sym: "ITF14" });
+  };
+
+  it("**量測 ROI 太矮,條端擬合必定失敗** —— 這是 edgeFitRoi 存在的理由,不是缺陷", () => {
+    const s = shootLabel(ITF, 0, "y");
+    const m = measureRoi(s.pts, s.img.w, s.img.h);
+    expect(m.y1 - m.y0).toBeLessThan(60); // 1D 兩點 y 相同 ⇒ 垂直只外擴到保底的 24px
+    const r = cropAndFit(s, m);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("取樣點不足");
+  });
+
+  it("**改用 edgeFitRoi 的取像範圍,同一張圖就擬合得出四角**(整合回歸守門)", () => {
+    for (const deg of [0, 12, 25]) {
+      const s = shootLabel(ITF, deg, "y");
+      const ef = edgeFitRoi(s.pts, s.img.w, s.img.h);
+      expect(ef).not.toBeNull();
+      const r = cropAndFit(s, ef!);
+      expect(r.ok).toBe(true);
+      expect(r.quadSource).toBe("1d-edges");
+      expect(r.derivedCorner).toBe(false);
+    }
+  });
+
+  it("垂直半徑與 quadFrom1DEdges 的搜尋半徑同源,且留有餘裕", () => {
+    const s = shootLabel(ITF, 0, "y");
+    const ef = edgeFitRoi(s.pts, s.img.w, s.img.h)!;
+    const len = Math.hypot(s.pts[1]!.x - s.pts[0]!.x, s.pts[1]!.y - s.pts[0]!.y);
+    const need = LINE_FIT_LIMITS.searchHalfSpanRatio * len; // 搜尋搆得到的半徑
+    const got = (ef.y1 - ef.y0) / 2;
+    expect(got).toBeGreaterThan(need); // 搜尋範圍必須整個在裁切內
+    expect(got).toBeGreaterThanOrEqual(need * (1 + EDGE_FIT_ROI_PAD.ratio)); // 且有餘裕
+  });
+
+  it("退化輸入不 throw,回 null", () => {
+    expect(edgeFitRoi(null, 900, 600)).toBeNull();
+    expect(edgeFitRoi([{ x: 1, y: 1 }], 900, 600)).toBeNull();          // 只有一點
+    expect(edgeFitRoi([{ x: 10, y: 10 }, { x: 12, y: 10 }], 900, 600)).toBeNull(); // 定位線過短
+    expect(edgeFitRoi([{ x: 0, y: 0 }, { x: NaN, y: 5 }], 900, 600)).toBeNull();
+    expect(edgeFitRoi([{ x: 0, y: 0 }, { x: 500, y: 0 }], 0, 0)).toBeNull();
   });
 });

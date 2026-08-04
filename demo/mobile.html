@@ -303,6 +303,7 @@ import {
   roiPhotometric, roi1DGeometry, quadGeometry, lineAngleDeg, finderDamageProxy,
   pickBestResolution, scaleRoi, fitRoiToBudget,
   rectifyQuad, rectifyPlan, resolveTiltDeg, focalPxFromSettings, TILT_SOURCE_LABEL,
+  ONE_D_SYMBOLOGIES, edgeFitRoi,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -527,15 +528,25 @@ function roiGrayOf(photo, roi) {
 //   rg roiGrayOf 的輸出;輸出:rectifyQuad 的結果物件(退回時 ok=false 並帶原因)。
 // 座標鏈:降取樣版 →(×kx,×ky)→ 全解析度 →(−ROI 原點,×sx,×sy)→ ROI 灰階。
 //   三段都要走完:少一段,H 與 gray 就不在同一個座標系,矯正出來是錯位的影像。
-function rectifyRoi(zx, kx, ky, rg) {
-  if (!zx || !zx.points || !zx.points.length) return { ok: false, reason: "未解碼,無定位點", H: null, derivedCorner: false };
-  const pts = zx.points.map((p) => ({ x: (p.x * kx - rg.x0) * rg.sx, y: (p.y * ky - rg.y0) * rg.sy }));
+// 1D 另取一塊較高的取像範圍(範圍由純函式 edgeFitRoi 算,本檔只做座標換算與取像)。
+//   量測 ROI 是「定位點 bbox 外擴」,1D 兩點 y 幾乎相同 → ROI 高度只有約 48px,
+//   條的上下端整個被裁掉,條端擬合必定失敗(2026-08-04 實測,見 edgeFitRoi 的註解)。
+//   量測 ROI 維持原樣不放大 —— 放大會位移 DEC / edgeContrasts(規格 §6.1)。
+// 回傳 { rect, geo }:geo 是 rect.H 所在的座標系,呼叫端算焦距與主點時必須用它而非 rg。
+function rectifyRoi(zx, kx, ky, rg, photo) {
+  if (!zx || !zx.points || !zx.points.length) {
+    return { rect: { ok: false, reason: "未解碼,無定位點", H: null, derivedCorner: false }, geo: rg };
+  }
+  const ptsFull = zx.points.map((p) => ({ x: p.x * kx, y: p.y * ky }));
+  const efRoi = ONE_D_SYMBOLOGIES.includes(zx.sym) ? edgeFitRoi(ptsFull, photo.width, photo.height) : null;
+  const geo = efRoi ? roiGrayOf(photo, efRoi) : rg;
+  const pts = ptsFull.map((p) => ({ x: (p.x - geo.x0) * geo.sx, y: (p.y - geo.y0) * geo.sy }));
   // 模組寬跟著點一起換算 —— qrDimensionOf 拿它去除中心距,兩者不同尺度就會算錯
   // dimension(而 dimension 錯,alignment 的模組座標就錯,四角跟著全錯)。
   // 縮放是等比的(kx≈ky、sx≈sy),取 x 軸那組即可。
   const ms = typeof zx.moduleSizePx === "number" && zx.moduleSizePx > 0
-    ? zx.moduleSizePx * kx * rg.sx : null;
-  return rectifyQuad(rg.gray, rg.w, rg.h, pts, { sym: zx.sym, moduleSizePx: ms });
+    ? zx.moduleSizePx * kx * geo.sx : null;
+  return { rect: rectifyQuad(geo.gray, geo.w, geo.h, pts, { sym: zx.sym, moduleSizePx: ms }), geo };
 }
 
 // 真實檢驗:輸入快門照片 canvas;ZXing 單次解碼 + 影像量測算分級參數(C7 proxy 實算)
@@ -577,7 +588,7 @@ function inspectReal(photo) {
   if (lastShotInfo) { lastShotInfo.roiSample = `${rg.w}×${rg.h}`; lastShotInfo.roiScale = rg.scale; }
   // 階段 ④ 接線:四角可得且皆為實測時,量測改吃梯形矯正後的正射 ROI(規格 §3.3 / G3)。
   // 採不採用由純函式 rectifyPlan 決定,本檔不自行判斷 —— demo/*.html 無自動化測試可覆蓋。
-  const rect = rectifyRoi(zx, kx, ky, rg);
+  const { rect, geo } = rectifyRoi(zx, kx, ky, rg, photo);
   const plan = rectifyPlan(rect);
   if (lastShotInfo) lastShotInfo.rectify = plan.note;
   // 量測全部在「已裁好的 ROI 灰階」(或其正射版)上做,故 ROI 座標退化為原點到全幅
@@ -588,11 +599,12 @@ function inspectReal(photo) {
   const pm = roiPhotometric(gray, gw, roi);
   // 透視傾角(規格 §3.3 · 2026-08-03 裁示):先試 getSettings().focalLength 走單應矩陣
   // 實算,不可得則退回 quadGeometry 的臂長差代理值並在結果頁標註為代理。
-  // 焦距與主點都要換算到「ROI 灰階」尺度 —— H 是在那個座標系上解出來的。
+  // 焦距與主點都要換算到「H 所在的座標系」尺度 —— 那是 geo 不是 rg:1D 走的是另一塊
+  // 較高的取像範圍(見 rectifyRoi),用 rg 會讓焦距與主點跟 H 對不起來。
   const camSettings = camTrack && camTrack.getSettings ? camTrack.getSettings() : null;
   const focalFull = focalPxFromSettings(camSettings, photo.width);
-  const focalRoi = focalFull === null ? null : focalFull * rg.sx;
-  const pcx = (photo.width / 2 - rg.x0) * rg.sx, pcy = (photo.height / 2 - rg.y0) * rg.sy;
+  const focalRoi = focalFull === null ? null : focalFull * geo.sx;
+  const pcx = (photo.width / 2 - geo.x0) * geo.sx, pcy = (photo.height / 2 - geo.y0) * geo.sy;
   // 傾角寫回閘門並記進掃描紀錄。不可得(source="none")時**不覆寫** state.gate.tilt:
   // 那個欄位由 resetPreviewGeometry 維持在預覽放行值,誠實化屬規格 §6.3 的即時化待辦,
   // 硬塞 null 會讓 classifyPerspective 判 FAIL 而鎖死所有拍不到四角的符號(全部 1D)。
