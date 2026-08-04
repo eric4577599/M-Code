@@ -633,10 +633,10 @@ function inspectReal(photo) {
       if (lastShotInfo) lastShotInfo.pxPerModule = g1.modulePx;
     }
     if (zx) state.gate.picket = +lineAngleDeg(zx.points).toFixed(1);
-    // 1D:ZXing 只給掃描線兩端點,湊不出四角(rectifyQuad 回「四角不足」),也沒有
-    // 臂長差可當代理 → 傾角來源標「未量測」。**這裡誠實暴露的是規格 §1.3 的病灶**:
-    // state.gate.tilt 仍是預覽還原的 0°,透視閘門對 1D 從未擋過任何人。要真的量到
-    // 得等階段 ⑤ 的 bearer bar / 條端擬合,不是本階段補得起來的。
+    // 1D:ZXing 只給掃描線兩端點,四角改由 imgproc 的 quadFrom1DEdges 從條端擬合
+    // (rectifyQuad 內部分流,本檔不判斷)。擬合得出來 → rectifyPlan 兩布林皆 true →
+    // 上面的 applyTilt 走單應矩陣實算;擬合不出來就沒有臂長差可當代理,傾角來源標
+    // 「未量測」,state.gate.tilt 仍是預覽還原值(誠實暴露規格 §1.3 的病灶,屬 §6.3 待辦)。
     applyTilt(null);
   }
   const decoder = { decode: () => (zx ? { symbology: sym, data: zx.text } : null) };

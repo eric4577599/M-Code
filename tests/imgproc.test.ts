@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 // 影像處理層(demo/imgproc.js)為純函式,可直接在 Node 測試
 // @ts-expect-error — 純 JS 模組,無型別宣告
 import {
@@ -34,6 +35,10 @@ import {
   orderCornersRaw,
   resolveTiltDeg,
   TILT_SOURCE_LABEL,
+  ONE_D_SYMBOLOGIES,
+  LINE_FIT_LIMITS,
+  fitLineTLS,
+  quadFrom1DEdges,
 } from "../demo/imgproc.js";
 
 // 產生單色 RGBA 影像
@@ -1145,11 +1150,15 @@ describe("rectifyQuad(階段 ④ 接線的單一入口)", () => {
     expect(tiltFromHomography(r.H, CAM.f, CAM.cx, CAM.cy)).toBeCloseTo(25, 1);
   });
 
-  it("退回:1D 兩點 → 四角不足,原因指名屬階段 ⑤", () => {
+  // **本輪(階段 ⑤)唯一動到的既有測試**:1D 條端擬合上線後,「屬階段 ⑤」這句話
+  // 依規格 §3.5 必須從程式碼中消失(grep 得到即未完成),斷言它的測試自然要跟著改。
+  // 兩點 + 沒給符號別 = 不知道該不該做 1D 偵測 → 保守不啟動,原因改為指名符號別不明。
+  it("退回:1D 兩點但符號別不明 → 四角不足,原因指名符號別不明(不啟動 1D 偵測)", () => {
     const r = rectifyQuad(ORTHO4.gray, ORTHO4.w, ORTHO4.h, [{ x: 5, y: 50 }, { x: 600, y: 52 }]);
     expect(r.ok).toBe(false);
     expect(r.reason).toContain("四角不足");
-    expect(r.reason).toContain("階段 ⑤");
+    expect(r.reason).toContain("符號別不明");
+    expect(r.reason).not.toContain("階段 ⑤");
     expect(r.gray).toBeUndefined(); // 絕不代填一張假影像
   });
 
@@ -1388,5 +1397,683 @@ describe("qrQuadFromPoints(由 alignment pattern 還原 QR 四角)", () => {
     }
     expect(rectifyPlan({ ok: true, derivedCorner: true, quadSource: "unknown", w: 10, h: 10, scale: 1 }).note)
       .toContain("四角來源不明");
+  });
+});
+
+// ── 階段 ⑤:1D 四角偵測(規格 §3.3 一維段 / 驗收 §5.1–§5.6)──────────────────
+// 沿用本檔上方的針孔相機模型(CAM / planePoint / project),無亂數。
+// 既有的 charBarcodeAt 各列完全相同、上下沒有留白 → **沒有條端可偵測**,故另備標籤合成。
+
+const LABEL_LIGHT = 220, LABEL_DARK = 40;
+
+// 兩個區間的重疊長度(面積抗鋸齒用)
+function overlap1D(a0: number, a1: number, b0: number, b1: number) {
+  return Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+}
+// 三角波,週期 period、值域 [-1, 1]。固定函式,**不是亂數** —— 用來造「條端雜訊」。
+function triWave(x: number, period: number) {
+  const p = (((x % period) + period) % period) / period;
+  return 4 * Math.abs(p - 0.5) - 1;
+}
+
+/**
+ * 白底條碼標籤:條碼水平置中、上下留白;bearer=true 時上下各加一條粗黑橫槓
+ * (ITF-14 bearer bar),false 時只有條端(GS1-128)。
+ * 輸入:pxPerModule 每模組像素、barHeightPx 條高、marginPx 四周留白、
+ *   opts.bearer / opts.sawAmp / opts.sawPeriod(條端固定週期鋸齒,非亂數)。
+ * 輸出:{ gray, w, h, leftCenter, rightCenter, midY, bar } ——
+ *   leftCenter / rightCenter 是最左 / 最右**暗元素的水平中心**(模擬 ZXing 的兩個定位點),
+ *   bar 是暗元素的外接矩形(不含 bearer bar)。
+ * 抗鋸齒:水平沿用 charBarcodeAt 的面積覆蓋率,垂直同樣以覆蓋率混色,完全決定於輸入。
+ */
+function barcodeLabelAt(
+  pxPerModule: number,
+  barHeightPx = 120,
+  marginPx = 40,
+  opts: { bearer?: boolean; sawAmp?: number; sawPeriod?: number } = {},
+) {
+  const bearer = !!opts.bearer;
+  const sawAmp = opts.sawAmp ?? 0, sawPeriod = opts.sawPeriod ?? 37;
+  const profile = charBarcodeAt(pxPerModule, 1).gray; // 水平已抗鋸齒的一列
+  const w = profile.length;
+  let m = CHAR_QUIET + CHAR_PHASE;
+  const darkSegs: { a: number; b: number }[] = [];
+  for (let i = 0; i < CHAR_PATTERN.length; i++) {
+    const width = CHAR_PATTERN[i]!;
+    if (i % 2 === 0) darkSegs.push({ a: m, b: m + width }); // 偶數索引為暗元素
+    m += width;
+  }
+  const first = darkSegs[0]!, last = darkSegs[darkSegs.length - 1]!;
+  const darkX0 = first.a * pxPerModule, darkX1 = last.b * pxPerModule;
+  const bt = bearer ? Math.round(pxPerModule * 1.5) : 0;  // bearer 厚度
+  const gap = bearer ? Math.round(pxPerModule * 0.8) : 0; // bearer 與條之間的空白
+  const barY0 = marginPx + bt + gap, barY1 = barY0 + barHeightPx;
+  const h = barY1 + gap + bt + marginPx;
+  const gray = new Uint8ClampedArray(w * h).fill(LABEL_LIGHT);
+  for (let x = 0; x < w; x++) {
+    const hFrac = (LABEL_LIGHT - profile[x]!) / (LABEL_LIGHT - LABEL_DARK);
+    const d = sawAmp ? sawAmp * triWave(x, sawPeriod) : 0;
+    const t0 = barY0 + d, t1 = barY1 - d;
+    const bCov = bearer ? overlap1D(x, x + 1, darkX0, darkX1) : 0;
+    for (let y = 0; y < h; y++) {
+      let dark = hFrac * overlap1D(y, y + 1, t0, t1);
+      if (bCov) {
+        dark += bCov * (overlap1D(y, y + 1, marginPx, marginPx + bt)
+          + overlap1D(y, y + 1, barY1 + gap, barY1 + gap + bt));
+      }
+      if (dark > 0) gray[y * w + x] = Math.round(LABEL_LIGHT + (LABEL_DARK - LABEL_LIGHT) * Math.min(1, dark));
+    }
+  }
+  return {
+    gray, w, h,
+    leftCenter: ((first.a + first.b) / 2) * pxPerModule,
+    rightCenter: ((last.a + last.b) / 2) * pxPerModule,
+    midY: (barY0 + barY1) / 2,
+    bar: { x0: darkX0, x1: darkX1, y0: barY0, y1: barY1 },
+  };
+}
+type Label = ReturnType<typeof barcodeLabelAt>;
+
+// 把標籤貼在平面上傾斜拍攝。jitterPx 給定位點加**固定**偏移(非亂數)驗容忍度。
+// 輸出:{ img 相機影像、quad 標籤四角、pts 兩個模擬定位點、barQuad 條區四角 }。
+function shootLabel(label: Label, tiltDeg: number, axis: "x" | "y" = "y", jitterPx = 0) {
+  const cx = (label.w - 1) / 2, cy = (label.h - 1) / 2;
+  const proj = (x: number, y: number) => project(planePoint(axis, x - cx, y - cy, tiltDeg));
+  const corners = rectCorners({ w: label.w, h: label.h });
+  const quad = corners.map((c) => proj(c.x, c.y));
+  const H = solveHomography(corners, quad); // 正射 → 影像
+  const img = warpPerspective(label.gray, label.w, label.h, H, CAM.w, CAM.h);
+  const raw = [proj(label.leftCenter, label.midY), proj(label.rightCenter, label.midY)];
+  const pts = jitterPx
+    ? [{ x: raw[0]!.x + jitterPx, y: raw[0]!.y - jitterPx }, { x: raw[1]!.x - jitterPx, y: raw[1]!.y + jitterPx }]
+    : raw;
+  const b = label.bar;
+  const barQuad = [proj(b.x0, b.y0), proj(b.x1, b.y0), proj(b.x1, b.y1), proj(b.x0, b.y1)];
+  return { img, quad, pts, barQuad };
+}
+// 走完整條 1D 接線:模擬定位點 → rectifyQuad(內部分流到 quadFrom1DEdges)
+function shootAndRectify(label: Label, deg: number, axis: "x" | "y" = "y", jitterPx = 0, sym = "ITF14") {
+  const s = shootLabel(label, deg, axis, jitterPx);
+  return { ...s, rect: rectifyQuad(s.img.data, s.img.w, s.img.h, s.pts, { sym }) };
+}
+// 直接對 quadFrom1DEdges 取四角(不經 rectifyQuad,退回路徑測試用)
+function edgesOf(label: Label, deg: number, axis: "x" | "y" = "y") {
+  const s = shootLabel(label, deg, axis);
+  return quadFrom1DEdges(s.img.data, s.img.w, s.img.h, s.pts, { sym: "ITF14" });
+}
+// 由任意四角推傾角(與 rectifyQuad 內部同一條鏈)
+function tiltOfCorners(corners: Pt[]) {
+  const o = orderCornersRaw(corners) as Pt[];
+  const size = targetRectSize(o);
+  const H = solveHomography(o, [{ x: 0, y: 0 }, { x: size.w, y: 0 }, { x: size.w, y: size.h }, { x: 0, y: size.h }]);
+  return tiltFromHomography(H, CAM.f, CAM.cx, CAM.cy);
+}
+// 直線的方向角(0–180°),用來證明上下兩條線是各自擬合的
+function dirDeg(fit: { nx: number; ny: number }) {
+  const a = (Math.atan2(fit.nx, -fit.ny) * 180) / Math.PI;
+  return ((a % 180) + 180) % 180;
+}
+// 以 2×2 超取樣填一塊實心暗凸四邊形(白底),用來構造「相鄰兩線夾角過小」的情境
+function solidQuadImage(w: number, h: number, q: Pt[]) {
+  const gray = new Uint8ClampedArray(w * h).fill(LABEL_LIGHT);
+  const insideQuad = (x: number, y: number) => {
+    let sign = 0;
+    for (let i = 0; i < 4; i++) {
+      const a = q[i]!, b = q[(i + 1) % 4]!;
+      const cr = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+      if (cr === 0) continue;
+      const s = cr > 0 ? 1 : -1;
+      if (!sign) sign = s;
+      else if (s !== sign) return false;
+    }
+    return true;
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let c = 0;
+      for (const dy of [0.25, 0.75]) for (const dx of [0.25, 0.75]) if (insideQuad(x + dx, y + dy)) c++;
+      if (c) gray[y * w + x] = Math.round(LABEL_LIGHT + (LABEL_DARK - LABEL_LIGHT) * (c / 4));
+    }
+  }
+  return gray;
+}
+
+// 每模組 **12.5px**(刻意不取整數)。整數 ppm 在繞 Y 軸 25° 的透視壓縮後,矯正影像的
+// 模組寬會落在整數**下緣**(12px/module → 11.85),roi1DGeometry 的模組寬估計器
+//(run 長度 10 百分位)整數截斷成 11,量到的 0.18 是**估計器本身的偏差**而不是矯正殘差
+// —— 本檔上方「取樣密度對 DEC 代理值的系統性影響」那一組特性化測試記錄的正是同一個偏差。
+// 12.5 讓矯正後的模組寬落在 12.33,估計器截到 12,量到的才是矯正的真實殘差。
+const ITF = barcodeLabelAt(12.5, 120, 40, { bearer: true });  // ITF-14:上下有 bearer bar
+const C128 = barcodeLabelAt(12.5, 120, 40, { bearer: false }); // GS1-128:只有條端
+
+// ── 規格 ↔ 程式的同步守門(比照 tests/gate-spec-sync.test.ts 的做法)─────────────
+// 舊版本檔把規格的門檻**再抄一份字面值**進來 toEqual,只擋得住「改程式不改測試」;
+// RD 一次改兩邊(程式 + 測試字面值)規格就靜默過期而測試全綠 —— 那正是規格 §5.1
+// 自承已栽過兩次的坑。故改為**直接讀 docs/spec20260731-1.md 與 src/domain/types.ts**,
+// 讓「權威表在規格、清單在 types.ts」從承諾變成機制。
+const SPEC_PATH = new URL("../docs/spec20260731-1.md", import.meta.url);
+const TYPES_PATH = new URL("../src/domain/types.ts", import.meta.url);
+
+/**
+ * 取出規格兩個標題之間的章節原文。
+ * 輸入:起始標題前綴、結束標題前綴;輸出:區間內的 markdown 字串。
+ * 任一標題找不到就讓測試失敗 —— 標題被改名時要有人來看,不可靜默跳過整段比對。
+ */
+function specSection(startHeading: string, endHeading: string): string {
+  const md = readFileSync(SPEC_PATH, "utf8");
+  const start = md.indexOf(startHeading);
+  expect(start, `規格找不到章節「${startHeading}」`).toBeGreaterThan(-1);
+  const end = md.indexOf(endHeading, start);
+  expect(end, `規格找不到「${endHeading}」(無法界定章節範圍)`).toBeGreaterThan(start);
+  return md.slice(start, end);
+}
+
+/**
+ * 從 markdown 區段取出指定表格的資料列。
+ * 輸入:區段原文、表頭必須含有的字串;輸出:每列一個 cell 陣列(已去頭尾空白)。
+ * 邏輯:把連續的 `|` 開頭行切成表格區塊,選出表頭命中的那一塊,丟掉表頭與 `---` 分隔列。
+ */
+function parseTable(section: string, headerMustContain: string): string[][] {
+  const blocks: string[][] = [];
+  let current: string[] = [];
+  for (const line of section.split("\n")) {
+    if (line.trimStart().startsWith("|")) current.push(line.trim());
+    else if (current.length) { blocks.push(current); current = []; }
+  }
+  if (current.length) blocks.push(current);
+  const block = blocks.find((b) => b[0]!.includes(headerMustContain));
+  expect(block, `規格找不到表頭含「${headerMustContain}」的表格`).toBeDefined();
+  return block!
+    .slice(1)
+    .filter((line) => !/^\|[\s:|-]+\|$/.test(line))
+    .map((line) => line.slice(1, -1).split("|").map((c) => c.trim()));
+}
+
+/** 取出一段文字裡所有反引號內容(規格用它標常數名與字面值)。 */
+const backticked = (s: string): string[] => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
+
+/**
+ * 規格的「值」儲存格 → 數字。
+ * 輸入:如 "8" / "**48**(草稿 24 → 實測 48)" / "**0.08**(新增)";輸出:8 / 48 / 0.08。
+ * 邏輯:只取開頭的數字(粗體記號剝掉),括號內的沿革註記是給人看的,不參與比對。
+ */
+function specNumber(cell: string): number {
+  const m = /^\*{0,2}(-?[\d.]+)\*{0,2}/.exec(cell.trim());
+  expect(m, `無法從規格儲存格「${cell}」解析出數值`).not.toBeNull();
+  return Number(m![1]);
+}
+
+const ONE_D_SPEC = specSection("#### 1D 四角偵測(階段 ⑤", "### 3.4 提案 C");
+
+describe("1D 擬合門檻與符號別清單(規格 §5.5 常數守門)", () => {
+  it("1D 擬合門檻**逐項讀規格 §3.3 的權威表**比對,任一邊單獨改動都會紅", () => {
+    const rows = parseTable(ONE_D_SPEC, "判什麼 / 為什麼是這個值");
+    const fromSpec: Record<string, number> = {};
+    for (const row of rows) {
+      const name = backticked(row[0]!)[0];
+      expect(name, `權威表有一列的常數名沒用反引號標:「${row[0]}」`).toBeDefined();
+      fromSpec[name!] = specNumber(row[1]!);
+    }
+    // 逐項值相同,且**欄位集合與順序**也相同 —— 規格漏列或多列一項同樣要紅
+    expect(LINE_FIT_LIMITS).toEqual(fromSpec);
+    expect(Object.keys(LINE_FIT_LIMITS)).toEqual(Object.keys(fromSpec));
+    expect(Object.isFrozen(LINE_FIT_LIMITS)).toBe(true);
+  });
+
+  it("走 1D 條端擬合的符號別**逐項讀 types.ts 的 Symbology**,新符號別必須明確歸類", () => {
+    const src = readFileSync(TYPES_PATH, "utf8");
+    const union = /export type Symbology\s*=\s*([^;]+);/.exec(src);
+    expect(union, "src/domain/types.ts 找不到 Symbology 的字面聯集").not.toBeNull();
+    const symbology = [...union![1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    expect(symbology.length).toBeGreaterThan(0);
+
+    // 1D 清單必須是 Symbology 的子集(打錯字、留下已移除的符號別都會在此紅)
+    for (const s of ONE_D_SYMBOLOGIES) expect(symbology, `Symbology 沒有「${s}」`).toContain(s);
+    // 2D 走 quadFromZxingPoints,不得混進 1D 清單
+    const TWO_D = ["QR", "DATAMATRIX"];
+    for (const s of TWO_D) expect(ONE_D_SYMBOLOGIES).not.toContain(s);
+    // **完整分割**:Symbology 的每一個值不是 1D 就是 2D。日後在 types.ts 增列符號別
+    // (如 CODE39)卻忘了同步這裡,會在此變紅而不是讓 rectifyQuad 靜默退回「四角不足」。
+    expect([...ONE_D_SYMBOLOGIES, ...TWO_D].slice().sort()).toEqual(symbology.slice().sort());
+    expect(Object.isFrozen(ONE_D_SYMBOLOGIES)).toBe(true);
+
+    // 第三邊:規格 §3.3 新增匯出表登記的清單也要一致(規格漏改同樣會紅)。
+    // 刻意併在同一條測試裡而不另開一條 —— 規格 §5.1 的測試數權威表是人工維護的,
+    // 本輪只修守門機制、不動測試總數,免得那張表又靜默過期。
+    const row = parseTable(ONE_D_SPEC, "名稱").find((r) => backticked(r[0]!)[0] === "ONE_D_SYMBOLOGIES");
+    expect(row, "規格 §3.3 新增匯出表找不到 ONE_D_SYMBOLOGIES").toBeDefined();
+    const listed = [...(backticked(row![1]!)[0] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    expect(listed).toEqual([...ONE_D_SYMBOLOGIES]);
+  });
+
+  it("minCornerAngleDeg 與 quadConfidence 的最小內角同值同源(不各寫一份)", () => {
+    expect(LINE_FIT_LIMITS.minCornerAngleDeg).toBe(QUAD_CONFIDENCE_LIMITS.minAngleDeg);
+    expect(LINE_FIT_LIMITS.minInliers).toBe(QUAD_CONFIDENCE_LIMITS.minEdgePx);
+  });
+});
+
+describe("fitLineTLS(總體最小平方直線擬合 + MAD 離群剔除)", () => {
+  it("水平線與**垂直線**都擬合得出來 —— 這正是不能用 y = ax + b 的理由", () => {
+    const horiz = fitLineTLS([...Array(10)].map((_, i) => ({ x: i * 3, y: 17 })));
+    expect(Math.abs(horiz.ny)).toBeCloseTo(1, 9); // 法向垂直 → 線水平
+    expect(horiz.rmsPx).toBeCloseTo(0, 9);
+    // 條垂直(符號旋轉 90°)時 y = ax + b 的斜率發散,TLS 照樣給得出來
+    const vert = fitLineTLS([...Array(10)].map((_, i) => ({ x: 42, y: i * 3 })));
+    expect(Math.abs(vert.nx)).toBeCloseTo(1, 9);
+    expect(vert.rmsPx).toBeCloseTo(0, 9);
+    expect(42 * vert.nx + vert.c).toBeCloseTo(0, 9);
+  });
+
+  it("離群點被 MAD 剔除,內點數/比例如實回報", () => {
+    const pts = [...Array(20)].map((_, i) => ({ x: i * 5, y: 100 + i * 0.5 }));
+    pts[7] = { x: 35, y: 160 };  // 兩個離群點
+    pts[13] = { x: 65, y: 40 };
+    const f = fitLineTLS(pts);
+    expect(f.samples).toBe(20);
+    expect(f.inliers).toBe(18);
+    expect(f.rmsPx).toBeLessThan(0.01); // 剔乾淨後殘差回到 0
+  });
+
+  it("**近乎完美的一組點不得被自己的 MAD 剔光**(尺度下限 0.1px)", () => {
+    // 這組資料是為了讓下限**非生效不可**而建構的,不是隨手取的近乎完美點:
+    // 30 點中 16 點殘差恰為 0(奇數半數以上)⇒ median|r| 就是 0 ⇒ 沒有下限時
+    // 尺度 0 ⇒ cut = madK × 0 = 0 ⇒ 只有殘差恰為 0 的那 16 點留得下來,
+    // 內點比例 16/30 = 0.533 < minInlierRatio 0.6,整條線會被判失敗。
+    // 有下限時 cut = 2.5 × 0.1 = 0.25px,遠大於 3/64、4/64 的次像素偏移 ⇒ 30 點全留。
+    // 偏移點成對放在 x 的對稱位置(a 與 29−a 同偏移量)且偏移量總和為 0,
+    // 使 Sxy = 0、質心 y = 50 ⇒ TLS 解恰為 y = 50,零殘差是精確的 0 而非約等於。
+    const offsets = new Map<number, number>();
+    for (const a of [0, 1, 2, 3]) { offsets.set(a, 3 / 64); offsets.set(29 - a, 3 / 64); }
+    for (const a of [4, 5, 6]) { offsets.set(a, -4 / 64); offsets.set(29 - a, -4 / 64); }
+    const pts = [...Array(30)].map((_, i) => ({ x: i, y: 50 + (offsets.get(i) ?? 0) }));
+    expect(pts.filter((p) => p.y === 50)).toHaveLength(16); // 半數以上殘差為 0 ⇒ median = 0
+
+    const f = fitLineTLS(pts);
+    expect(f.samples).toBe(30);
+    expect(f.inliers).toBe(30); // 拿掉 imgproc.js 的 Math.max(…, 0.1) 這裡會變成 16
+    expect(f.inliers / f.samples).toBeGreaterThanOrEqual(LINE_FIT_LIMITS.minInlierRatio);
+  });
+
+  it("點數不足 / 全部點重合 / 非有限座標 → null,不 throw", () => {
+    expect(fitLineTLS([{ x: 1, y: 1 }])).toBeNull();
+    expect(fitLineTLS([])).toBeNull();
+    expect(fitLineTLS(null)).toBeNull();
+    expect(fitLineTLS(undefined)).toBeNull();
+    expect(fitLineTLS([{ x: 5, y: 5 }, { x: 5, y: 5 }, { x: 5, y: 5 }])).toBeNull();
+    expect(fitLineTLS([{ x: NaN, y: 0 }, { x: 1, y: 1 }])).toBeNull(); // 濾掉後只剩 1 點
+    expect(fitLineTLS([{ x: Infinity, y: 0 }, { x: 0, y: 0 }, { x: 10, y: 0 }]).inliers).toBe(2);
+  });
+
+  it("完全決定於輸入(無亂數,跑兩次結果相同)", () => {
+    const pts = [...Array(15)].map((_, i) => ({ x: i * 2.3, y: 7 + i * 1.7 }));
+    expect(fitLineTLS(pts)).toEqual(fitLineTLS(pts));
+  });
+});
+
+describe("quadFrom1DEdges(1D 條端擬合四角,規格 §5.1 傾角還原 ±1°)", () => {
+  it("繞 Y 軸 0 / 5 / 12 / 25°(ITF-14,有 bearer bar):誤差 ≤ 1°,來源為單應矩陣實算", () => {
+    for (const deg of [0, 5, 12, 25]) {
+      const { rect } = shootAndRectify(ITF, deg, "y");
+      expect(rect.ok).toBe(true);
+      const t = resolveTiltDeg(rect.H, CAM.f, CAM.cx, CAM.cy, null);
+      expect(t.source).toBe("homography");
+      expect(Math.abs(t.deg - deg)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("繞 X 軸 8 / 20 / 30°(ITF-14):誤差 ≤ 1°", () => {
+    for (const deg of [8, 20, 30]) {
+      const { rect } = shootAndRectify(ITF, deg, "x");
+      expect(rect.ok).toBe(true);
+      const t = resolveTiltDeg(rect.H, CAM.f, CAM.cx, CAM.cy, null);
+      expect(Math.abs(t.deg - deg)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("GS1-128(無 bearer bar,只有條端)兩軸同樣在 ±1° 內", () => {
+    for (const [axis, degs] of [["y", [0, 5, 12, 25]], ["x", [8, 20, 30]]] as const) {
+      for (const deg of degs) {
+        const { rect } = shootAndRectify(C128, deg, axis, 0, "GS1_128");
+        expect(rect.ok).toBe(true);
+        const t = resolveTiltDeg(rect.H, CAM.f, CAM.cx, CAM.cy, null);
+        expect(Math.abs(t.deg - deg)).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it("定位點帶 ±2px 固定偏移時,25° 那組仍在 ±1° 內(不吃 ZXing 端點精度)", () => {
+    for (const label of [ITF, C128]) {
+      const sym = label === ITF ? "ITF14" : "GS1_128";
+      const { rect } = shootAndRectify(label, 25, "y", 2, sym);
+      expect(rect.ok).toBe(true);
+      expect(Math.abs(resolveTiltDeg(rect.H, CAM.f, CAM.cx, CAM.cy, null).deg - 25)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("完全決定於輸入(同參數跑兩次,四角與正射影像逐像素相同)", () => {
+    const a = shootAndRectify(ITF, 25, "y");
+    const b = shootAndRectify(ITF, 25, "y");
+    expect(a.rect.corners).toEqual(b.rect.corners);
+    expect(Array.from(a.rect.gray)).toEqual(Array.from(b.rect.gray));
+  });
+});
+
+describe("1D 四角偵測的護欄(規格 §5.2:四條邊必須各自獨立擬合)", () => {
+  // 2026-08-03 在 QR 補點四角上犯過一次:兩組對邊平行 ⇒ 單應矩陣是仿射 ⇒ 消失線在無窮遠
+  // ⇒ 傾角恆 0.00°,而 0° 正是「≤5° 否則 FAIL」最寬鬆的放行值。C1 禁的就是再犯一次。
+  it("**下邊取成上邊的平移就恆推出 0° 傾角**:同一張 25° 圖,本實作必須不是那個值", () => {
+    const s = shootLabel(ITF, 25, "y");
+    const e = quadFrom1DEdges(s.img.data, s.img.w, s.img.h, s.pts, { sym: "ITF14" });
+    expect(e.ok).toBe(true);
+    // (a) 本實作:四條邊各自擬合 → 還原得回真實傾角,而且明確不是 0°
+    const real = tiltOfCorners(e.corners);
+    expect(Math.abs(real - 25)).toBeLessThanOrEqual(1);
+    expect(real).not.toBeCloseTo(0, 1);
+    // (b) 對照組:把下邊改成「上邊平移」構成平行四邊形 → 不論真實傾角一律 0.00°
+    const c = orderCornersRaw(e.corners) as Pt[];
+    const dx = c[3]!.x - c[0]!.x, dy = c[3]!.y - c[0]!.y; // 左邊向量
+    const para = [c[0]!, c[1]!, { x: c[1]!.x + dx, y: c[1]!.y + dy }, { x: c[0]!.x + dx, y: c[0]!.y + dy }];
+    expect(tiltOfCorners(para)).toBeCloseTo(0, 2);
+  });
+
+  it("fit.top 與 fit.bottom 的方向角明顯不同(> 0.5°),證明不是同一條線的平移", () => {
+    // **繞 Y 軸**(畫面垂直軸)時上下兩邊才會聚:本檔的針孔模型下 y = f·t/(dist − s·sinθ),
+    // 固定 t 的那條線的 y 隨 s 變化,上下兩邊斜率反號。規格 §5.2 草稿寫的是繞 X 軸,
+    // 但繞 X 軸時 Z 只跟 t 有關,上下兩邊在影像中**恰好保持水平且平行**(見下一條斷言)。
+    const s = shootLabel(ITF, 30, "y");
+    const e = quadFrom1DEdges(s.img.data, s.img.w, s.img.h, s.pts, { sym: "ITF14" });
+    expect(e.ok).toBe(true);
+    const diff = Math.abs(dirDeg(e.fit.top) - dirDeg(e.fit.bottom));
+    expect(Math.min(diff, 180 - diff)).toBeGreaterThan(0.5);
+    // 四條線都要各自可讀,護欄才驗得下去
+    for (const k of ["top", "bottom", "left", "right"] as const) {
+      expect(e.fit[k].inliers).toBeGreaterThanOrEqual(LINE_FIT_LIMITS.minInliers);
+      expect(e.fit[k].rmsPx).toBeLessThanOrEqual(LINE_FIT_LIMITS.maxRmsPx);
+    }
+  });
+
+  it("**繞 X 軸時上下兩邊本來就平行,不得因此判失敗** —— C1 禁的是強制平行,不是結果平行", () => {
+    const s = shootLabel(ITF, 30, "x");
+    const e = quadFrom1DEdges(s.img.data, s.img.w, s.img.h, s.pts, { sym: "ITF14" });
+    expect(e.ok).toBe(true); // 上下兩線幾乎同向,只檢查相鄰線對才過得了這一關
+    const diff = Math.abs(dirDeg(e.fit.top) - dirDeg(e.fit.bottom));
+    expect(Math.min(diff, 180 - diff)).toBeLessThan(0.1);
+    // 而傾角照樣量得回來 —— 透視資訊在**左右**兩邊的會聚上,不在上下
+    expect(Math.abs(tiltOfCorners(e.corners) - 30)).toBeLessThanOrEqual(1);
+    const ld = Math.abs(dirDeg(e.fit.left) - dirDeg(e.fit.right));
+    expect(Math.min(ld, 180 - ld)).toBeGreaterThan(0.5);
+  });
+
+  it("**真的拍正(0°)不得因為四線近乎平行就判失敗** —— 那是正確答案不是缺陷", () => {
+    for (const label of [ITF, C128]) {
+      const s = shootLabel(label, 0, "y");
+      const e = quadFrom1DEdges(s.img.data, s.img.w, s.img.h, s.pts, {});
+      expect(e.ok).toBe(true);
+      expect(Math.abs(tiltOfCorners(e.corners))).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe("quadFrom1DEdges 的退回路徑(規格 §5.3:誠實退回、講得出是哪一項不過)", () => {
+  // 每條都要:不 throw、ok=false、reason 為可讀中文且指名項目、不含「階段 ⑤」
+  const expectFail = (r: { ok: boolean; corners: unknown; reason: string }, needle: string) => {
+    expect(r.ok).toBe(false);
+    expect(r.corners).toBeNull();
+    expect(r.reason).toContain("1D 邊界擬合失敗");
+    expect(r.reason).toContain(needle);
+    expect(r.reason).not.toContain("階段 ⑤");
+  };
+
+  it("條端雜訊過大(固定週期鋸齒)→ 指名殘差 RMS", () => {
+    const noisy = barcodeLabelAt(12, 120, 40, { bearer: false, sawAmp: 6, sawPeriod: 37 });
+    const r = quadFrom1DEdges(noisy.gray, noisy.w, noisy.h,
+      [{ x: noisy.leftCenter, y: noisy.midY }, { x: noisy.rightCenter, y: noisy.midY }], {});
+    expectFail(r, "殘差 RMS");
+    expect(r.metrics.maxRmsPx).toBeGreaterThan(LINE_FIT_LIMITS.maxRmsPx);
+  });
+
+  it("條高不足(3px)→ 指名條高;大量取樣位置落在空白 → 指名內點數", () => {
+    const thin = barcodeLabelAt(12, 3, 20, { bearer: false });
+    const a = quadFrom1DEdges(thin.gray, thin.w, thin.h,
+      [{ x: thin.leftCenter, y: thin.midY }, { x: thin.rightCenter, y: thin.midY }], {});
+    expectFail(a, "條高");
+    expect(a.metrics.barHeightPx).toBeLessThan(LINE_FIT_LIMITS.minBarHeightPx);
+
+    // 只有 3 根短條、其餘全是空白:48 個取樣位置絕大多數作廢(不補值)
+    const w = 600, h = 400;
+    const sparse = new Uint8ClampedArray(w * h).fill(LABEL_LIGHT);
+    for (const bx of [100, 300, 500]) {
+      for (let y = 200; y < 260; y++) for (let x = bx; x < bx + 6; x++) sparse[y * w + x] = LABEL_DARK;
+    }
+    const b = quadFrom1DEdges(sparse, w, h, [{ x: 60, y: 230 }, { x: 540, y: 230 }], {});
+    expectFail(b, "內點數");
+  });
+
+  it("四線近乎平行(交點在無窮遠)→ 指名夾角過小", () => {
+    // 實心暗平行四邊形:左右兩邊相對上下兩邊只斜 17.7°,四角交點求得出來但不可信
+    const w = 900, h = 300;
+    const q = [{ x: 100, y: 120 }, { x: 620, y: 120 }, { x: 745, y: 160 }, { x: 225, y: 160 }];
+    const gray = solidQuadImage(w, h, q);
+    const r = quadFrom1DEdges(gray, w, h, [{ x: 168, y: 140 }, { x: 677, y: 140 }], {});
+    expectFail(r, "四線近乎平行");
+    expect(r.metrics.minCornerAngleDeg).toBeLessThan(LINE_FIT_LIMITS.minCornerAngleDeg);
+  });
+
+  it("端點退化(重合 / 1 點 / 0 點 / NaN / Infinity)→ 指名定位點或定位線", () => {
+    const g = ITF.gray, w = ITF.w, h = ITF.h;
+    expectFail(quadFrom1DEdges(g, w, h, [{ x: 100, y: 100 }, { x: 100, y: 100 }], {}), "定位線過短");
+    expectFail(quadFrom1DEdges(g, w, h, [{ x: 100, y: 100 }, { x: 110, y: 100 }], {}), "定位線過短");
+    expectFail(quadFrom1DEdges(g, w, h, [{ x: 100, y: 100 }], {}), "定位點不足");
+    expectFail(quadFrom1DEdges(g, w, h, [], {}), "定位點不足");
+    expectFail(quadFrom1DEdges(g, w, h, null, {}), "定位點不足");
+    expectFail(quadFrom1DEdges(g, w, h, undefined, {}), "定位點不足");
+    expectFail(quadFrom1DEdges(g, w, h, [{ x: NaN, y: 0 }, { x: 300, y: 100 }], {}), "定位點不足");
+    expectFail(quadFrom1DEdges(g, w, h, [{ x: Infinity, y: 0 }, { x: -Infinity, y: 5 }], {}), "定位點不足");
+  });
+
+  it("對比不足(全白 / 全黑 / 極低對比)→ 指名 Otsu 分不出兩類", () => {
+    const w = 400, h = 300, pts = [{ x: 40, y: 150 }, { x: 360, y: 150 }];
+    expectFail(quadFrom1DEdges(new Uint8ClampedArray(w * h).fill(255), w, h, pts, {}), "對比不足");
+    expectFail(quadFrom1DEdges(new Uint8ClampedArray(w * h).fill(0), w, h, pts, {}), "對比不足");
+    // 極低對比:條 120、底 135,兩類分得出來但差只有 15 級
+    const faint = new Uint8ClampedArray(w * h).fill(135);
+    for (let y = 100; y < 200; y++) for (let x = 20; x < 380; x++) if (Math.floor(x / 8) % 2 === 0) faint[y * w + x] = 120;
+    expectFail(quadFrom1DEdges(faint, w, h, pts, {}), "對比不足");
+  });
+
+  it("來源影像不合法(null / 尺寸為 0 / 緩衝區太小)→ 不 throw", () => {
+    const pts = [{ x: 40, y: 150 }, { x: 360, y: 150 }];
+    expectFail(quadFrom1DEdges(null, 400, 300, pts, {}), "來源影像不合法");
+    expectFail(quadFrom1DEdges(ITF.gray, 0, 300, pts, {}), "來源影像不合法");
+    expectFail(quadFrom1DEdges(ITF.gray, 400, NaN, pts, {}), "來源影像不合法");
+    expectFail(quadFrom1DEdges(new Uint8ClampedArray(10), 400, 300, pts, {}), "來源影像不合法");
+  });
+
+  it("條被畫面切掉 → 該位置作廢,**不得用畫面邊界當條端**", () => {
+    // 把標籤上半截掉:上端點群整批取不到,內點數不足 → 誠實退回,不拿 y=0 充數
+    const cut = 120;
+    const g = new Uint8ClampedArray((ITF.h - cut) * ITF.w);
+    g.set(ITF.gray.subarray(cut * ITF.w));
+    const r = quadFrom1DEdges(g, ITF.w, ITF.h - cut,
+      [{ x: ITF.leftCenter, y: ITF.midY - cut }, { x: ITF.rightCenter, y: ITF.midY - cut }], {});
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("取樣點不足");
+  });
+});
+
+describe("階段 ⑤ 接線(規格 §5.6:rectifyQuad / rectifyPlan)", () => {
+  it("sym ITF14 + 兩個定位點 → 四角實測、走正射與單應傾角", () => {
+    const { rect } = shootAndRectify(ITF, 20, "y", 0, "ITF14");
+    expect(rect.ok).toBe(true);
+    expect(rect.quadSource).toBe("1d-edges");
+    expect(rect.derivedCorner).toBe(false); // 擬合出來的是實測角,不是推算
+    const plan = rectifyPlan(rect);
+    expect(plan.useRectified).toBe(true);
+    expect(plan.useHomography).toBe(true);
+    expect(plan.note).toContain("已矯正");
+    expect(plan.note).toContain("1D 四角由條端擬合");
+  });
+
+  it("sym GS1_128 同上;CODE128 也走同一條路", () => {
+    for (const sym of ["GS1_128", "CODE128"]) {
+      const { rect } = shootAndRectify(C128, 15, "y", 0, sym);
+      expect(rect.ok).toBe(true);
+      expect(rect.quadSource).toBe("1d-edges");
+      expect(rectifyPlan(rect)).toMatchObject({ useRectified: true, useHomography: true });
+    }
+  });
+
+  it("擬合失敗時 reason 原封不動傳出來,gray 為 undefined、兩布林皆 false", () => {
+    const r = rectifyQuad(ITF.gray, ITF.w, ITF.h, [{ x: 100, y: 100 }, { x: 105, y: 100 }], { sym: "ITF14" });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("1D 邊界擬合失敗");
+    expect(r.gray).toBeUndefined();
+    expect(rectifyPlan(r)).toEqual({ useRectified: false, useHomography: false, note: r.reason });
+  });
+
+  it("**符號別不明或非 1D 時不啟動 1D 偵測**(既有的保守行為不變)", () => {
+    const s = shootLabel(ITF, 20, "y");
+    for (const sym of [null, undefined, "", "QR", "DATAMATRIX", "PDF417"]) {
+      const r = rectifyQuad(s.img.data, s.img.w, s.img.h, s.pts, { sym });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toContain("四角不足");
+      expect(r.reason).not.toContain("1D 邊界擬合失敗");
+      expect(r.reason).not.toContain("階段 ⑤");
+      expect(r.gray).toBeUndefined();
+    }
+    // 已知的 2D 符號別要把符號別講出來,不明則指名不明
+    expect(rectifyQuad(s.img.data, s.img.w, s.img.h, s.pts, { sym: "QR" }).reason).toContain("QR");
+    expect(rectifyQuad(s.img.data, s.img.w, s.img.h, s.pts, { sym: null }).reason).toContain("符號別不明");
+  });
+
+  it("程式碼中不得再出現「階段 ⑤」的退回理由(規格 §3.5)", () => {
+    // 這條是字串守門:1D 條端擬合上線後,那句話代表的是「還沒做」,留著就是說謊
+    const r = rectifyQuad(ITF.gray, ITF.w, ITF.h, [{ x: 5, y: 50 }, { x: 600, y: 52 }], { sym: "ITF14" });
+    expect(r.reason).not.toContain("階段 ⑤");
+  });
+});
+
+describe("階段 ⑤ 幾何改善(規格 §5.4:矯正後 DEC 代理值與模組寬變異數雙雙下降)", () => {
+  it("繞 Y 軸 25° 的 ITF-14 標籤:maxWidthDeviation 降到矯正前的 1/3 以下", () => {
+    const s = shootAndRectify(ITF, 25, "y");
+    expect(s.rect.ok).toBe(true);
+    const before = decMaxDev(s.img.data, s.img.w, innerRoi(s.barQuad as Pt[]));
+    const after = decMaxDev(s.rect.gray, s.rect.w, { x0: 0, y0: 0, x1: s.rect.w, y1: s.rect.h });
+    expect(before).toBeGreaterThan(0.3);
+    expect(after).toBeLessThan(before / 3);
+  });
+
+  it("模組寬變異數同樣下降,且矯正後不比同一張圖 0° 拍攝的基準值差", () => {
+    // 與 roi1DGeometry 同一套去頭尾慣例:首尾 run 必被 ROI / 正射邊界切到,一律丟掉,
+    // 剩下的與 CHAR_PATTERN[1..] 一一對應(不可沿用 moduleWidthStats:那支假設 ROI 含靜區)
+    const statsCut = (gray: Uint8ClampedArray, w: number, roi: { x0: number; y0: number; x1: number; y1: number }) => {
+      const r = cropGray(gray, w, roi);
+      const t = otsu(r.data);
+      const y = Math.floor(r.h / 2);
+      let runs = scanlineRuns(r.data.subarray(y * r.w, (y + 1) * r.w), t) as { len: number; dark: boolean }[];
+      // 先對齊到「暗起頭、暗結尾」(邊界可能多出一小段亮的殘段),再去掉必然被切到的首尾兩段
+      if (runs.length && !runs[0]!.dark) runs = runs.slice(1);
+      if (runs.length && !runs[runs.length - 1]!.dark) runs = runs.slice(0, -1);
+      runs = runs.slice(1, -1);
+      const per = runs.map((run, i) => run.len / CHAR_PATTERN[i + 1]!);
+      const mean = per.reduce((a, b) => a + b, 0) / per.length;
+      return { n: per.length, variance: per.reduce((a, b) => a + (b - mean) ** 2, 0) / per.length };
+    };
+    const s = shootAndRectify(ITF, 25, "y");
+    const before = statsCut(s.img.data, s.img.w, innerRoi(s.barQuad as Pt[]));
+    const after = statsCut(s.rect.gray, s.rect.w, { x0: 0, y0: 0, x1: s.rect.w, y1: s.rect.h });
+    expect(before.n).toBe(after.n);
+    expect(before.variance).toBeGreaterThan(1);
+    expect(after.variance).toBeLessThan(before.variance / 10);
+
+    // 0° 拍攝的基準:矯正後不應該比它差
+    const flat = shootAndRectify(ITF, 0, "y");
+    const base = statsCut(flat.rect.gray, flat.rect.w, { x0: 0, y0: 0, x1: flat.rect.w, y1: flat.rect.h });
+    expect(after.variance).toBeLessThanOrEqual(base.variance);
+  });
+});
+
+// ── 規格 §6 點名為風險、§5 驗收清單原本漏列的兩個 edge case(規格 §5.4e)──
+// 兩者都不是新功能,而是「已經會動、但沒有任何測試守著」的行為。
+describe("1D 四角偵測的 edge case(規格 §5.4e)", () => {
+  // 把標籤原地旋轉 90°:條由垂直變水平、定位線由水平變垂直。
+  // 輸入 barcodeLabelAt 的輸出;輸出旋轉後的灰階與**兩個定位點**(x 相同、y 不同)。
+  // 座標對應 (x, y) → (h − 1 − y, x)。
+  const rotateLabel90 = (label: Label) => {
+    const { gray, w, h } = label;
+    const out = new Uint8ClampedArray(h * w);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) out[x * h + (h - 1 - y)] = gray[y * w + x]!;
+    }
+    const map = (p: Pt): Pt => ({ x: h - 1 - p.y, y: p.x });
+    return {
+      gray: out, w: h, h: w,
+      p0: map({ x: label.leftCenter, y: label.midY }),
+      p1: map({ x: label.rightCenter, y: label.midY }),
+    };
+  };
+  // 旋轉版的傾斜拍攝(shootLabel 假設定位線水平,故另寫一支)
+  const shootRotated = (r: ReturnType<typeof rotateLabel90>, deg: number, axis: "x" | "y" = "y") => {
+    const cx = (r.w - 1) / 2, cy = (r.h - 1) / 2;
+    const proj = (x: number, y: number) => project(planePoint(axis, x - cx, y - cy, deg));
+    const corners = rectCorners({ w: r.w, h: r.h });
+    const H = solveHomography(corners, corners.map((c) => proj(c.x, c.y)));
+    return {
+      img: warpPerspective(r.gray, r.w, r.h, H, CAM.w, CAM.h),
+      pts: [proj(r.p0.x, r.p0.y), proj(r.p1.x, r.p1.y)],
+    };
+  };
+
+  // (a) 規格 §6 的「符號旋轉 90°」。舊版只由 fitLineTLS 的單元測試間接覆蓋 ——
+  //     把 tlsOf 換回 y = ax + b,只有那條單元測試會紅,quadFrom1DEdges 全程一條都不會紅。
+  it("**符號旋轉 90°(定位線垂直)走完整條 quadFrom1DEdges**:斜率發散不得讓偵測失敗", () => {
+    const small = barcodeLabelAt(6, 60, 20, { bearer: true }); // 縮小以容進 900×600 的合成相機
+    const rot = rotateLabel90(small);
+    expect(rot.p0.x).toBeCloseTo(rot.p1.x, 6); // 前提:定位線真的是垂直的
+    for (const deg of [0, 20]) {
+      const s = shootRotated(rot, deg, "y");
+      const e = quadFrom1DEdges(s.img.data, s.img.w, s.img.h, s.pts, { sym: "ITF14" });
+      expect(e.ok).toBe(true);
+      expect(Math.abs(tiltOfCorners(e.corners) - deg)).toBeLessThanOrEqual(1);
+      for (const k of ["top", "bottom", "left", "right"] as const) {
+        expect(e.fit[k].inliers).toBeGreaterThanOrEqual(LINE_FIT_LIMITS.minInliers);
+      }
+    }
+  });
+
+  // (b) 規格 §6 的「近正方形標籤(條高極大)」。這一條同時是 §3.3 那格錯誤宣稱的來源:
+  //     舊文寫「0.6 對應條高可達**符號寬**的 1.2 倍」,但 1.2 倍的基準是**定位線長**。
+  //     定位點落在最外側暗元素的**中心**,故定位線長恆短於符號寬,兩者不可互換。
+  const probe = barcodeLabelAt(12.5, 120, 40, { bearer: false });
+  const symW = probe.bar.x1 - probe.bar.x0;
+  const locLen = probe.rightCenter - probe.leftCenter;
+  const heightCap = 2 * LINE_FIT_LIMITS.searchHalfSpanRatio * locLen; // 上下各搜半徑一次
+  const okAt = (barH: number) => {
+    const lab = barcodeLabelAt(12.5, Math.round(barH), 40, { bearer: false });
+    const s = shootLabel(lab, 0, "y");
+    return quadFrom1DEdges(s.img.data, s.img.w, s.img.h, s.pts, { sym: "GS1_128" });
+  };
+
+  it("**條高上限的基準量是定位線長,不是符號寬** —— 規格 §3.3 舊文的宣稱不成立", () => {
+    expect(locLen).toBeLessThan(symW); // 定位點是元素中心,不是符號邊緣
+    // 舊文宣稱的 1.2 × 符號寬 落在上限之外 —— 若哪天真的做到了,這條會紅,提醒回頭改規格
+    expect(heightCap).toBeLessThan(1.2 * symW);
+    // 實測涵蓋到的是 1.2 × 定位線長,換算成符號寬約 1.14 倍(比值隨最外側元素寬度浮動)
+    expect(heightCap / symW).toBeCloseTo(1.145, 2);
+  });
+
+  it("條高略低於上限 → 偵測成功;略高於上限 → 誠實退回且指名取樣點不足", () => {
+    const under = okAt(heightCap * 0.97);
+    expect(under.ok).toBe(true);
+    const over = okAt(heightCap * 1.03);
+    expect(over.ok).toBe(false);
+    expect(over.reason).toContain("取樣點不足");
+    expect(over.corners).toBeNull();
+    expect((over as { gray?: unknown }).gray).toBeUndefined(); // 退回不得代填影像
+  });
+
+  it("正方形標籤(條高 = 符號寬)仍在涵蓋範圍內", () => {
+    expect(symW).toBeLessThan(heightCap); // 1:1 落在上限之內才談得上「近正方形涵蓋得到」
+    expect(okAt(symW).ok).toBe(true);
   });
 });

@@ -451,7 +451,7 @@ export const QUAD_CONFIDENCE_LIMITS = Object.freeze({
  *   (正矩形 1.0、45° 正方形 0.5),對 1D 不成立 —— 長寬比 10:1 的四邊形只要在畫面內轉
  *   25°(picket 閘門本身只判 WARN、明確放行)填充率就掉到 0.205,15:1 轉 20° 更直接
  *   0.171 → ok=false → orderCorners 回 null,角點稍有雜訊就靜默退回不矯正,
- *   而規格 §3.3 說「一維是最硬的一段」,階段 ⑤ 的 bearer bar 擬合正靠這道把關。
+ *   而規格 §3.3 說「一維是最硬的一段」,quadFrom1DEdges 的條端四角正靠這道把關。
  * - **maxAspectRatio = 25**:最小面積外接矩形的長邊 / 短邊,即「細長斜帶」的獨立判準
  *   (旋轉不變性由 minFillRatio 交還之後,細長與否得自己明講,不能再靠填充率順便擋)。
  *   數字用真實 1D 幾何定,不沿用正方形推來的值:ITF-14 100% 總寬約 142.7mm(§D2)、
@@ -913,7 +913,7 @@ export function qrQuadFromPoints(points, moduleSizePx) {
  *   derived = false
  * - 恰 3 個 → 第四角以 **tr + bl − tl** 推算,derived = **true**
  * - 少於 3 個(**1D 只有掃描線兩端點**)→ null。1D 的四角要靠 bearer bar /
- *   條端擬合,屬**階段 ⑤**,本函式不猜
+ *   條端擬合,那是 quadFrom1DEdges 的事(它要吃像素,本函式只做幾何、不碰影像)
  *
  * **derived = true 的四邊形絕不可拿去推傾角(2026-08-03 階段 ④ 實測發現)。**
  * tr + bl − tl 造出來的四邊形依定義是**平行四邊形**,而平行四邊形映到矩形的單應
@@ -953,6 +953,442 @@ export function quadFromZxingPoints(points, sym, moduleSizePx) {
   };
 }
 
+// ── 1D 四角偵測(規格 §3.3「1D 四角偵測」節 · 階段 ⑤)────────────────────
+// 由掃描線兩端點出發,**四條邊各自獨立擬合**,交點得四角。
+//
+// **C1:絕不可把下邊取成上邊的平行線,也不可用單一「條高帶」推對邊。**
+// 兩組對邊平行 ⇒ 四邊形是平行四邊形 ⇒ 映到矩形的單應矩陣是**仿射** ⇒ 消失線在無窮遠
+// ⇒ tiltFromHomography 不論真實傾角一律回 0.00°,而 0° 正是 gate.ts「≤5° 否則 FAIL」
+// **最寬鬆的放行值**。2026-08-03 已在 QR 補點四角上犯過一次(見 quadFromZxingPoints
+// 的實測表),不可再犯。這條禁的是**強制**平行,不是禁止結果剛好平行 —— 真的拍正時
+// 四條線本來就近乎平行、傾角本來就是 0°,那是正確答案,不得因此判失敗。
+
+/**
+ * 走 1D 條端擬合的符號別(規格 §3.1)。**權威定義是 src/domain/types.ts 的 Symbology**,
+ * 符號別是跨層契約,散成兩份遲早對不起來(2026-08-03 的 QR 就是「四個點對 DataMatrix
+ * 是四個角、對 QR 是三角加一個 alignment 中心」分不出來才踩坑)。
+ * 本檔是瀏覽器直載的純 JS、不能 import TS 型別,下面這行字面值是**技術上不得不有的副本**;
+ * 同源改由機制強制:tests/imgproc.test.ts 直接讀 types.ts 解析 Symbology 聯集,要求
+ * 「1D 清單 ∪ 2D 清單 = Symbology」,日後在 types.ts 增列符號別卻沒同步這裡就會當場變紅
+ * (不加這道守門的話,rectifyQuad 的 includes() 會靜默退回「四角不足」,理由看起來還很正常)。
+ * QR / DATAMATRIX 不在內:它們的 result points 本來就 ≥3 個,走 quadFromZxingPoints 那條路。
+ */
+export const ONE_D_SYMBOLOGIES = Object.freeze(["ITF14", "GS1_128", "CODE128"]);
+
+/**
+ * 1D 直線擬合與四角求交的門檻(**權威表在規格 §3.3「1D 四角偵測」節,改這裡就要改那裡**)。
+ * 比照 QUAD_CONFIDENCE_LIMITS 凍結匯出,
+ * 測試直接引用本表而非重寫字面值;另有一條守門測試**直接讀 docs/spec20260731-1.md §3.3
+ * 的權威表**逐項比對(不是在測試檔裡再抄一份字面值 —— 那只擋得住改程式不改測試,
+ * 一次改兩邊規格就靜默過期),值、欄位集合與順序任一邊單獨改動都會當場變紅。
+ * 每個數字的理由:
+ * - **samples = 48**:沿定位線的取樣位置數。1D 符號的暗/亮元素各占約一半,落在空白的
+ *   位置一律作廢(不補值),故有效位置只剩約一半;再扣掉離群,48 才穩定給得出
+ *   ≥ minInliers 的內點。規格草稿建議的 24 實測只剩約 13 個有效位置,離 8 太近。
+ * - **crossSamples = 21**:求左右邊時,條高帶內的平行掃描線數。ITF-14 的條與 bearer bar
+ *   之間有空白間隙,落在間隙的掃描線整條都是亮的、一律作廢,實測 21 條會廢掉約 2 條;
+ *   規格草稿建議的 9 條在同一情境只剩 7 條 < minInliers,永遠過不了。
+ * - **minInliers = 8**:兩點就定得出一條線,但兩點的線沒有殘差可算,信心無從判斷。
+ *   8 個點在 maxRmsPx 下才有統計意義,也與 QUAD_CONFIDENCE_LIMITS.minEdgePx = 8 同源
+ *   (一條邊短於 8px 連一個模組都放不下)。
+ * - **minInlierRatio = 0.6**:每條線的最低內點比例。分母是**實際餵進 fitLineTLS 的點數**
+ *   (已作廢的取樣位置不算在內)—— 作廢過多由 minInliers 這一關擋,本項專擋「點都取到了
+ *   但散成一片」,兩關語意不重疊。
+ * - **maxRmsPx = 1.5**:子像素內插後,合成無雜訊情形殘差應 ≪ 1px;1.5px 是給實拍的模糊
+ *   與印刷毛邊留的餘裕,再大就不是一條直線了。
+ * - **madK = 2.5**:離群剔除的 MAD 倍數(1.4826 × median|r| 為尺度,即常態下的 σ)。
+ * - **minBarHeightPx = 12**:上下兩線在定位線中點的間距。GS1-128 最低條高 13mm,取樣密度
+ *   ≥8px/module 時遠高於 12px;低於 12px 的條高帶擠不下 crossSamples 條掃描線。
+ * - **minCornerAngleDeg = 20**:相鄰兩線的最小夾角,與 QUAD_CONFIDENCE_LIMITS.minAngleDeg
+ *   同值同源 —— DLT 在近共線組態下對 1px 誤差極度敏感。**只判相鄰線對**:上下兩線近乎
+ *   平行是拍正時的正常結果,不得因此判失敗。
+ * - **minLocatorLenPx = 24**:定位線最短長度。短於此的兩點連方向都不可信。
+ * - **searchHalfSpanRatio = 0.6**:沿 ±n 找條端的搜尋半徑,以定位線長度的倍率表示
+ *   (規格草稿寫的是絕對值 searchHalfSpanPx,但條高與符號寬是綁在一起的:ITF-14 約
+ *   4.5:1、GS1-128 最細長約 12.7:1,絕對像素值會隨拍攝距離失效)。0.6 對應「條高可達
+ *   符號寬的 1.2 倍」,連近正方形標籤都涵蓋得到(規格 §6 的 edge case)。
+ * - **trackHalfSpanRatio = 0.08**:沿 ±n 走的時候,每一步重新對準所在暗 run 中心的側向
+ *   搜尋半徑。**為什麼要對準:** 繞畫面水平軸傾斜時,條在影像中是**會聚**的、並不平行於
+ *   n,直直往上走會走出條外,在 GS1-128(沒有 bearer bar 兜底)上會把條端記錯位置。
+ *   0.08 倍符號寬容得下任何單一元素(最寬的元素也才幾個模組,約符號寬的 1/17),
+ *   又遠小於整條 bearer bar 的寬度 —— 對準得到單根條,對不準整條 bearer bar
+ *   (兩側都搜不到亮 ⇒ 維持原側向偏移),兩種情形都是要的行為。
+ * - **crossOverscanRatio = 0.15**:求左右邊時,掃描線往定位線兩端各外延的倍率。
+ *   ZXing 的兩個定位點落在最外側暗元素的**中心**附近,不是符號的左右緣;透視傾斜下
+ *   上下兩端的左右緣還會再外移。不外延就會把左右緣切在掃描邊界上(那種樣本一律作廢)。
+ * - **minBandContrast = 24**:定位線周邊帶內「亮類平均 − 暗類平均」的最小值(0–255)。
+ *   Otsu 在單峰直方圖上照樣回得出一個閾值,分出來的兩類卻毫無意義 —— 全白/全黑由
+ *   「某一類是空的」擋下,極低對比則靠本項。24/255 ≈ 0.094,與 roiPhotometric 的
+ *   edgeContrasts 同一個尺度。
+ */
+export const LINE_FIT_LIMITS = Object.freeze({
+  samples: 48,
+  crossSamples: 21,
+  minInliers: 8,
+  minInlierRatio: 0.6,
+  maxRmsPx: 1.5,
+  madK: 2.5,
+  minBarHeightPx: 12,
+  minCornerAngleDeg: 20,
+  minLocatorLenPx: 24,
+  searchHalfSpanRatio: 0.6,
+  trackHalfSpanRatio: 0.08,
+  crossOverscanRatio: 0.15,
+  minBandContrast: 24,
+});
+
+// 相鄰兩個取樣值跨越閾值 t 的次像素比例(0–1);兩值相同時回 0.5(無從內插,取中點)。
+// **整數像素量化在 ±1° 的判準下會直接吃掉誤差預算**,故所有邊界點一律做這一步。
+function crossFraction(v0, v1, t) {
+  const d = v1 - v0;
+  if (!d) return 0.5;
+  const s = (t - v0) / d;
+  return s < 0 ? 0 : s > 1 ? 1 : s;
+}
+
+// 已排序陣列的中位數(偶數個取中間兩個的平均)
+function medianOfSorted(sorted) {
+  const n = sorted.length, m = n >> 1;
+  return n % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+}
+
+// 總體最小平方(TLS)直線擬合的核心:輸入點陣列,輸出 { nx, ny, c } 法式直線,
+// 全部點重合(二階中心矩為 0)時回 null。
+// 以二階中心矩矩陣 [[Sxx,Sxy],[Sxy,Syy]] 的**最小特徵向量**取法向 —— 這才是
+// 「垂直距離平方和最小」的解;y = ax + b 的最小平方在條垂直(符號旋轉 90°)時斜率發散。
+function tlsOf(pts) {
+  const n = pts.length;
+  let mx = 0, my = 0;
+  for (const p of pts) { mx += p.x; my += p.y; }
+  mx /= n; my /= n;
+  let sxx = 0, sxy = 0, syy = 0;
+  for (const p of pts) {
+    const dx = p.x - mx, dy = p.y - my;
+    sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+  }
+  const trace = sxx + syy;
+  if (!(trace > 0)) return null; // 全部點重合:沒有任何方向可言
+  const lmin = (trace - Math.hypot(sxx - syy, 2 * sxy)) / 2;
+  // 特徵向量兩種等價寫法,取模長較大的那一組(另一組在退化方向上會整個歸零)
+  let nx = sxy, ny = lmin - sxx;
+  if (Math.hypot(nx, ny) < Math.hypot(lmin - syy, sxy)) { nx = lmin - syy; ny = sxy; }
+  const len = Math.hypot(nx, ny);
+  if (!(len > 0)) return null;
+  nx /= len; ny /= len;
+  return { nx, ny, c: -(nx * mx + ny * my) };
+}
+
+/**
+ * 總體最小平方直線擬合 + MAD 離群剔除(規格 §3.2)。純函式、**無亂數**。
+ * 輸入:
+ * - pts:`[{x, y}, ...]`,座標非有限的點直接略過
+ * - opts = { madK }:離群剔除的 MAD 倍數,預設取自 LINE_FIT_LIMITS
+ * 輸出:`{ nx, ny, c, rmsPx, inliers, samples }` —— 直線以**法式** nx·x + ny·y + c = 0
+ *   表示(nx² + ny² = 1),rmsPx 為**內點**殘差的 RMS,inliers / samples 為內點數 /
+ *   餵進來的有限點數;點數不足(< 2)或退化(全部點重合)回 **null**。
+ * 邏輯:第一輪用全部點做 TLS → 算殘差 → 以 MAD(1.4826 × median|r|,常態下即 σ)為尺度
+ *   剔除 |r| > madK × scale 的離群點 → 用內點重擬合一次。
+ * **尺度下限 0.1px 的用意:** 一組近乎完美的點,MAD 會小到 0.01px 等級,
+ *   `|r| > madK × 0.01` 就把散度只有次像素內插誤差的**完美內點**剔成離群,內點比例
+ *   莫名其妙掉下去。子像素邊界內插的解析度約 0.1px,比它更小的散度是量化不是離群,
+ *   故尺度不低於 0.1px。這個下限只影響「本來就很準」的情形,擋不到真正的離群點
+ *   (真離群的殘差是好幾個 px,遠大於 madK × 0.1)。
+ */
+export function fitLineTLS(pts, opts = {}) {
+  const madK = typeof (opts && opts.madK) === "number" && Number.isFinite(opts.madK) && opts.madK > 0
+    ? opts.madK : LINE_FIT_LIMITS.madK;
+  const src = [];
+  if (pts && typeof pts.length === "number") {
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) src.push({ x: p.x, y: p.y });
+    }
+  }
+  const samples = src.length;
+  if (samples < 2) return null;
+  const first = tlsOf(src);
+  if (!first) return null;
+  const res = src.map((p) => Math.abs(first.nx * p.x + first.ny * p.y + first.c));
+  const scale = Math.max(1.4826 * medianOfSorted(res.slice().sort((a, b) => a - b)), 0.1);
+  const cut = madK * scale;
+  const keep = src.filter((p, i) => res[i] <= cut);
+  if (keep.length < 2) return null;
+  const line = tlsOf(keep);
+  if (!line) return null;
+  let sum2 = 0;
+  for (const p of keep) {
+    const r = line.nx * p.x + line.ny * p.y + line.c;
+    sum2 += r * r;
+  }
+  return { nx: line.nx, ny: line.ny, c: line.c, rmsPx: Math.sqrt(sum2 / keep.length), inliers: keep.length, samples };
+}
+
+// 兩條法式直線求交。輸入兩個 fitLineTLS 形狀的物件;
+// 輸出 { p, angleDeg } —— 交點與**兩線夾角**(0–90°),平行或算不出有限交點時回 null。
+// 兩個單位法向的行列式恰是夾角的正弦,故 angleDeg = asin(|det|)。
+function intersectLines(l1, l2) {
+  if (!l1 || !l2) return null;
+  const det = l1.nx * l2.ny - l1.ny * l2.nx;
+  const angleDeg = (Math.asin(Math.min(1, Math.abs(det))) * 180) / Math.PI;
+  if (!det) return null;
+  const x = (l1.ny * l2.c - l2.ny * l1.c) / det;
+  const y = (l2.nx * l1.c - l1.nx * l2.c) / det;
+  return Number.isFinite(x) && Number.isFinite(y) ? { p: { x, y }, angleDeg } : null;
+}
+
+/**
+ * 1D 四角偵測(規格 §3.3「1D 四角偵測」節,該節為權威定義)。純函式,**恆回物件、永不 throw、永不代填數字**。
+ * 輸入:
+ * - gray / w / h:來源灰階與尺寸,**與 points 同一座標系**(即 rectifyQuad 收到的那組)
+ * - points:ZXing 的 result points,**只用前兩個有限點**(1D 掃描線兩端)
+ * - opts = { sym, samples, crossSamples },皆可省略(預設取自 LINE_FIT_LIMITS)
+ * 輸出:
+ * - 成功:`{ ok:true, corners, source:"1d-edges", fit, metrics, reason:"" }`
+ *   - corners:4 個 { x, y },**未排序**(交給既有 orderCornersRaw)
+ *   - fit:`{ top, bottom, left, right }`,各為 fitLineTLS 的輸出 —— **四條線各自可讀**,
+ *     護欄測試要靠它證明上下邊不是同一條的平移
+ *   - metrics:`{ samples, minInliers, minInlierRatio, maxRmsPx, minCornerAngleDeg, barHeightPx }`
+ *     全是**實測值**(同名門檻在 LINE_FIT_LIMITS,兩者不要混看)。其中 **samples 的語意是
+ *     「上下端點取樣時成功產出端點對的位置數」**(即演算法 3. 沒有作廢的 q_i 個數,上下
+ *     兩群等長),**不含**左右兩條線的掃描線數,也不是 LINE_FIT_LIMITS.samples;
+ *     minInliers / minInlierRatio / maxRmsPx 取四條線中最差的那條,算不到的維持 null
+ * - 失敗:`{ ok:false, corners:null, reason:"1D 邊界擬合失敗（…）", fit, metrics }`,
+ *   reason 逐項指名**是哪一項不過 + 實測值 + 門檻**(比照 confidenceReason 的寫法)
+ *
+ * 演算法:
+ * 1. **定位線與法向。** 取前兩個有限點 p0、p1,u = normalize(p1 − p0)、n = (−u.y, u.x)。
+ *    |p1 − p0| < minLocatorLenPx 判端點退化,退回。
+ * 2. **閾值。** 以定位線周邊帶(沿 n 各取 searchHalfSpanRatio × 定位線長、沿 u 全長)的子影像算 otsu,
+ *    **不用整張 gray** —— ROI 外的背景會把閾值拉偏。帶內只有一類、或兩類平均差
+ *    < minBandContrast 時判對比不足,退回。
+ * 3. **上下端點取樣。** 沿定位線取 samples 個位置 q_i = p0 + u·L·(i+0.5)/samples。
+ *    q_i 本身不是暗 ⇒ 落在空白/靜區 ⇒ **作廢**(不補值);否則沿 ±n 逐像素走,
+ *    走到**最後一次**「暗 → 亮」的跨越點即該側的條端,跨越點**線性內插到子像素**。
+ *    走的時候每一步都重新對準所在暗 run 的側向中心(見 trackHalfSpanRatio):條在影像中
+ *    是會聚的,直直走會走出條外。走出畫面或走滿搜尋半徑仍未跨越 ⇒ 該位置作廢,
+ *    **不得用畫面邊界當條端**。
+ * 4. **上下兩條線分別擬合**(C1:兩次獨立呼叫、兩組獨立資料,絕不取平行線)。
+ * 5. **左右兩條線分別擬合。** 取 crossSamples 條掃描線,**每條都沿上下兩線做線性內插**
+ *    ——第 k 條的每一點都是「該處上邊界與下邊界之間走固定比例 f」的位置(f 取
+ *    (k+1)/(crossSamples+1)),而**不是**平行於定位線的直線:透視下上下兩線是會聚的,
+ *    平行線會在一端跑出條高帶外(實測見下方 railAt 上方的註解)。各條線 scanlineRuns:
+ *    第一個暗 run 的起點得左邊界點、最後一個暗 run 的終點得右邊界點(同樣做子像素內插)。
+ *    掃描線兩端各外延 crossOverscanRatio 倍定位線長,以涵蓋定位點外側的真正左右緣;
+ *    整條都亮、或暗 run 貼到掃描邊界(代表被切掉)的那條作廢。
+ * 6. **求交點。** corners = [上×左, 上×右, 下×右, 下×左](順序無所謂,orderCornersRaw 會重排)。
+ *    **只檢查相鄰線對** —— 上下兩線近乎平行是拍正時的正常結果,不得因此判失敗(C1 註)。
+ * 7. 通過後把 corners 交還 rectifyQuad,由既有鏈(orderCornersRaw → quadConfidence →
+ *    targetRectSize → solveHomography → warpPerspective)**再把一次關**,不繞過、不放寬。
+ */
+export function quadFrom1DEdges(gray, w, h, points, opts = {}) {
+  const L = LINE_FIT_LIMITS;
+  const o = opts || {};
+  const posInt = (v, dflt) => (typeof v === "number" && Number.isFinite(v) && v >= 1 ? Math.floor(v) : dflt);
+  const sampleN = posInt(o.samples, L.samples);
+  const crossN = posInt(o.crossSamples, L.crossSamples);
+  const fit = { top: null, bottom: null, left: null, right: null };
+  const metrics = {
+    samples: 0, minInliers: null, minInlierRatio: null,
+    maxRmsPx: null, minCornerAngleDeg: null, barHeightPx: null,
+  };
+  const fail = (reason) => ({ ok: false, corners: null, reason: `1D 邊界擬合失敗（${reason}）`, fit, metrics });
+
+  const sw = Number.isFinite(w) ? Math.floor(w) : 0, sh = Number.isFinite(h) ? Math.floor(h) : 0;
+  if (!gray || !(sw > 0) || !(sh > 0) || gray.length < sw * sh) return fail("來源影像不合法");
+  const inside = (x, y) => x >= 0 && y >= 0 && x <= sw - 1 && y <= sh - 1;
+
+  // 1. 定位線與法向
+  const two = takeFinitePoints(points, 2);
+  if (!two) return fail("定位點不足（需要 2 個座標有限的點,1D 掃描線兩端）");
+  const [p0, p1] = two;
+  const len = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+  if (!(len >= L.minLocatorLenPx)) {
+    return fail(`定位線過短（${len.toFixed(1)}px < ${L.minLocatorLenPx}px,兩定位點重合或過近）`);
+  }
+  const u = { x: (p1.x - p0.x) / len, y: (p1.y - p0.y) / len };
+  const n = { x: -u.y, y: u.x };
+  const span = Math.max(1, Math.round(L.searchHalfSpanRatio * len));
+  const track = Math.max(1, Math.round(L.trackHalfSpanRatio * len));
+
+  // 2. 帶內 Otsu(取樣格上限 256×96,避免大圖時掃出百萬點;格距固定,無亂數)
+  const stepU = Math.max(1, Math.round(len / 256)), stepN = Math.max(1, Math.round((2 * span + 1) / 96));
+  const band = [];
+  for (let s = -span; s <= span; s += stepN) {
+    for (let a = 0; a <= len; a += stepU) {
+      const x = p0.x + u.x * a + n.x * s, y = p0.y + u.y * a + n.y * s;
+      if (inside(x, y)) band.push(sampleBilinear(gray, sw, sh, x, y));
+    }
+  }
+  if (band.length < 4) return fail("定位線周邊帶取不到樣本（定位點落在影像外）");
+  const t = otsu(Uint8ClampedArray.from(band));
+  let dSum = 0, dN = 0, lSum = 0, lN = 0;
+  for (const v of band) { if (v < t) { dSum += v; dN++; } else { lSum += v; lN++; } }
+  if (!dN || !lN) return fail(`對比不足,Otsu 分不出兩類（帶內只有${dN ? "暗" : "亮"}的一類）`);
+  const contrast = lSum / lN - dSum / dN;
+  if (contrast < L.minBandContrast) {
+    return fail(`對比不足,Otsu 分不出兩類（暗亮兩類平均差 ${contrast.toFixed(1)} < ${L.minBandContrast}）`);
+  }
+
+  // 由 (bx,by) 沿 ±u 找出所在暗 run 的兩側邊界,回傳重新對準後的側向偏移;
+  // 兩側在 track 內都找不到亮(例如寬達整個符號的 bearer bar)或走出畫面 → 回 null(維持原偏移)
+  const recenter = (bx, by, lat) => {
+    const edge = (dir) => {
+      let prev = sampleBilinear(gray, sw, sh, bx, by);
+      for (let k = 1; k <= track; k++) {
+        const x = bx + u.x * dir * k, y = by + u.y * dir * k;
+        if (!inside(x, y)) return null;
+        const v = sampleBilinear(gray, sw, sh, x, y);
+        if (v >= t) return dir * (k - 1 + crossFraction(prev, v, t));
+        prev = v;
+      }
+      return null;
+    };
+    const a = edge(1), b = edge(-1);
+    return a === null || b === null ? null : lat + (a + b) / 2;
+  };
+
+  // 從 q 沿 dir·n 追蹤同一根條到條端。回傳 { d, lat }(沿 n 的距離與側向偏移)或 null。
+  const traceEnd = (q, dir) => {
+    let lat = 0, prev = sampleBilinear(gray, sw, sh, q.x, q.y), last = null;
+    for (let s = 1; s <= span; s++) {
+      let bx = q.x + n.x * dir * s + u.x * lat, by = q.y + n.y * dir * s + u.y * lat;
+      if (!inside(bx, by)) break; // 走出畫面:不得用畫面邊界當條端
+      let v = sampleBilinear(gray, sw, sh, bx, by);
+      if (v < t) {
+        const c = recenter(bx, by, lat);
+        if (c !== null && c !== lat) {
+          lat = c;
+          bx = q.x + n.x * dir * s + u.x * lat; by = q.y + n.y * dir * s + u.y * lat;
+          v = inside(bx, by) ? sampleBilinear(gray, sw, sh, bx, by) : v;
+        }
+      }
+      if (prev < t && v >= t) last = { d: s - 1 + crossFraction(prev, v, t), lat };
+      prev = v;
+    }
+    return last;
+  };
+
+  // 3. 上下端點取樣
+  const topPts = [], botPts = [];
+  for (let i = 0; i < sampleN; i++) {
+    const a = (len * (i + 0.5)) / sampleN;
+    const q = { x: p0.x + u.x * a, y: p0.y + u.y * a };
+    if (!inside(q.x, q.y)) continue;
+    if (sampleBilinear(gray, sw, sh, q.x, q.y) >= t) continue; // 落在空白/靜區 → 作廢,不補值
+    const up = traceEnd(q, -1), dn = traceEnd(q, 1);
+    if (!up || !dn) continue;
+    topPts.push({ x: q.x + u.x * up.lat - n.x * up.d, y: q.y + u.y * up.lat - n.y * up.d });
+    botPts.push({ x: q.x + u.x * dn.lat + n.x * dn.d, y: q.y + u.y * dn.lat + n.y * dn.d });
+  }
+  metrics.samples = topPts.length;
+
+  // 4. 上下兩條線**各自獨立**擬合(C1)
+  fit.top = fitLineTLS(topPts, { madK: L.madK });
+  fit.bottom = fitLineTLS(botPts, { madK: L.madK });
+  // 逐條線判信心,回傳「是哪一項不過」的中文原因(含實測值 + 門檻),過關回 null。
+  // raw 是餵進去之前的有效取樣點數 —— 擬合不出直線時 f 為 null,只報得出這個數字。
+  const lineBad = (key, name, raw) => {
+    const f = fit[key];
+    if (!f) return `${name}取樣點不足（有效邊界點 ${raw} 個 < ${L.minInliers},擬合不出直線）`;
+    if (f.inliers < L.minInliers) return `${name}內點數 ${f.inliers} < ${L.minInliers}`;
+    if (f.inliers / f.samples < L.minInlierRatio) {
+      return `${name}內點比例 ${(f.inliers / f.samples).toFixed(2)} < ${L.minInlierRatio}`;
+    }
+    if (f.rmsPx > L.maxRmsPx) return `${name}殘差 RMS ${f.rmsPx.toFixed(2)}px > ${L.maxRmsPx}px`;
+    return null;
+  };
+  const updateStats = () => {
+    const fs = ["top", "bottom", "left", "right"].map((k) => fit[k]).filter(Boolean);
+    if (!fs.length) return;
+    metrics.minInliers = Math.min(...fs.map((f) => f.inliers));
+    metrics.minInlierRatio = Math.min(...fs.map((f) => f.inliers / f.samples));
+    metrics.maxRmsPx = Math.max(...fs.map((f) => f.rmsPx));
+  };
+  updateStats();
+  const tbBad = [lineBad("top", "上邊", topPts.length), lineBad("bottom", "下邊", botPts.length)].filter(Boolean);
+  if (tbBad.length) return fail(tbBad.join("、"));
+
+  // 由定位線上的一點沿 n 射到某條線的位移;n 與該線平行(分母為 0)時回 null
+  const offsetAt = (f, base) => {
+    const den = f.nx * n.x + f.ny * n.y;
+    return den ? -(f.nx * base.x + f.ny * base.y + f.c) / den : null;
+  };
+  // 條高:上下兩線在定位線中點沿 n 的位置差
+  const mid = { x: p0.x + (u.x * len) / 2, y: p0.y + (u.y * len) / 2 };
+  const sTop = offsetAt(fit.top, mid), sBot = offsetAt(fit.bottom, mid);
+  if (sTop === null || sBot === null || !Number.isFinite(sTop) || !Number.isFinite(sBot)) {
+    return fail("上下邊界線與定位線法向平行,量不到條高");
+  }
+  metrics.barHeightPx = Math.abs(sBot - sTop);
+  if (metrics.barHeightPx < L.minBarHeightPx) {
+    return fail(`條高 ${metrics.barHeightPx.toFixed(1)}px < ${L.minBarHeightPx}px`);
+  }
+
+  // 5. 左右兩條線**各自獨立**擬合。
+  // **掃描線不能真的「平行於定位線」**:透視下上下兩線是會聚的,一條水平掃描線會在
+  // 一端落在條高帶內、另一端已經跑到帶外,量到的「第一個暗 run 起點」就變成上邊界與
+  // 掃描線的交點而不是符號左緣(2026-08-04 實測:繞 Y 軸 25° 時左邊殘差 RMS 4.5px)。
+  // 改為沿上下兩線做**線性內插**取掃描線:第 k 條線的兩個端點各自是「該處上下兩線之間
+  // 走 f 比例」的點,整條線因此恆落在帶內。f 取 (k+1)/(crossSamples+1),兩端自然內縮。
+  const over = L.crossOverscanRatio * len;
+  const railAt = (a, f) => {
+    const base = { x: p0.x + u.x * a, y: p0.y + u.y * a };
+    const st = offsetAt(fit.top, base), sb = offsetAt(fit.bottom, base);
+    if (st === null || sb === null || !Number.isFinite(st) || !Number.isFinite(sb)) return null;
+    const s = st + (sb - st) * f;
+    return { x: base.x + n.x * s, y: base.y + n.y * s };
+  };
+  const maxRow = Math.max(2, Math.ceil(len + 2 * over) + 2);
+  const row = new Uint8ClampedArray(maxRow);
+  const leftPts = [], rightPts = [];
+  for (let k = 0; k < crossN; k++) {
+    const f = (k + 1) / (crossN + 1);
+    const A = railAt(-over, f), B = railAt(len + over, f);
+    if (!A || !B) continue;
+    const dx = B.x - A.x, dy = B.y - A.y;
+    const count = Math.min(maxRow, Math.max(2, Math.round(Math.hypot(dx, dy)) + 1));
+    let outside = false;
+    for (let j = 0; j < count; j++) {
+      const r = j / (count - 1);
+      const x = A.x + dx * r, y = A.y + dy * r;
+      if (!inside(x, y)) { outside = true; break; }
+      row[j] = sampleBilinear(gray, sw, sh, x, y);
+    }
+    if (outside) continue;
+    let idx = 0, firstDark = -1, lastDarkEnd = -1;
+    for (const r of scanlineRuns(row.subarray(0, count), t)) {
+      if (r.dark) { if (firstDark < 0) firstDark = idx; lastDarkEnd = idx + r.len - 1; }
+      idx += r.len;
+    }
+    // 整條都亮(落在 bearer bar 與條之間的空白)或暗 run 貼到掃描邊界(被切掉)→ 作廢
+    if (firstDark <= 0 || lastDarkEnd >= count - 1) continue;
+    const lp = firstDark - 1 + crossFraction(row[firstDark - 1], row[firstDark], t);
+    const rp = lastDarkEnd + crossFraction(row[lastDarkEnd], row[lastDarkEnd + 1], t);
+    leftPts.push({ x: A.x + (dx * lp) / (count - 1), y: A.y + (dy * lp) / (count - 1) });
+    rightPts.push({ x: A.x + (dx * rp) / (count - 1), y: A.y + (dy * rp) / (count - 1) });
+  }
+  fit.left = fitLineTLS(leftPts, { madK: L.madK });
+  fit.right = fitLineTLS(rightPts, { madK: L.madK });
+  updateStats();
+  const lrBad = [lineBad("left", "左邊", leftPts.length), lineBad("right", "右邊", rightPts.length)].filter(Boolean);
+  if (lrBad.length) return fail(lrBad.join("、"));
+
+  // 6. 求交點(只檢查相鄰線對)
+  const corners = [];
+  let minAngle = 180;
+  for (const [a, b] of [["top", "left"], ["top", "right"], ["bottom", "right"], ["bottom", "left"]]) {
+    const r = intersectLines(fit[a], fit[b]);
+    if (!r) { minAngle = 0; break; }
+    if (r.angleDeg < minAngle) minAngle = r.angleDeg;
+    corners.push(r.p);
+  }
+  metrics.minCornerAngleDeg = minAngle;
+  if (corners.length < 4 || minAngle < L.minCornerAngleDeg) {
+    return fail(`四線近乎平行,交點在無窮遠（相鄰線夾角 ${minAngle.toFixed(1)}° < ${L.minCornerAngleDeg}°）`);
+  }
+  return { ok: true, corners, source: "1d-edges", fit, metrics, reason: "" };
+}
+
 // 把 quadConfidence 的實測值翻成「是哪一項不過」的中文原因(規格 §3.3:
 // 退回時要講得出原因,不能只回一個 null 讓呼叫端無話可說)。
 function confidenceReason(conf) {
@@ -989,8 +1425,21 @@ export function rectifyQuad(gray, w, h, points, opts = {}) {
     ok: false, reason, corners: corners || null, conf: conf || null, H: H || null,
     derivedCorner: !!derived, quadSource: (q && q.source) || null, dimension: (q && q.dimension) || null,
   });
-  const quad = quadFromZxingPoints(points, sym, moduleSizePx);
-  if (!quad) return fail("四角不足（1D 掃描線僅兩端點,四角偵測屬階段 ⑤）");
+  let quad = quadFromZxingPoints(points, sym, moduleSizePx);
+  if (!quad) {
+    // 定位點少於 3 個 = 1D 的掃描線兩端點。**只有已知的 1D 符號別才啟動條端擬合**:
+    // 比照「符號別不明時一律保守」,寧可退回代理值,不可拿一組意義不明的點去擬合。
+    if (ONE_D_SYMBOLOGIES.includes(sym)) {
+      const e = quadFrom1DEdges(gray, w, h, points, { sym });
+      if (!e.ok) return fail(e.reason);
+      // derived 必為 false —— 四角是實測擬合出來的,不是推算的,rectifyPlan 依既有第 3 條
+      // 規則放行,那支的判斷邏輯一行都不必改。
+      quad = { corners: e.corners, derived: false, dimension: null, source: e.source };
+    } else {
+      const known = typeof sym === "string" && sym.length > 0;
+      return fail(`四角不足（定位點少於 3 個,符號別${known ? ` ${sym} 不走 1D 條端擬合` : "不明"}）`);
+    }
+  }
   const derived = quad.derived;
   const corners = orderCornersRaw(quad.corners);
   if (!corners) return fail("四角排序失敗（座標非有限）", null, null, null, derived, quad);
@@ -1028,7 +1477,7 @@ export function rectifyQuad(gray, w, h, points, opts = {}) {
  *    矩陣為仿射:傾角必為 0.00°(恆綠,見 quadFromZxingPoints 的實測表),而矯正
  *    本身也只還原得了旋轉與剪切、還原不了透視 —— 對 2D 的光度/FPD 量測是白付一次
  *    雙線性內插的模糊代價,故一併不採用。傾角改走臂長差代理值(2026-08-03 裁示)。
- * 3. 四角皆為實測(DataMatrix 四點,或階段 ⑤ 之後的 1D)→ 兩者皆 true。
+ * 3. 四角皆為實測(DataMatrix 四點、QR 由 alignment 還原、1D 由條端擬合)→ 兩者皆 true。
  */
 export function rectifyPlan(rect) {
   if (!rect || !rect.ok) return { useRectified: false, useHomography: false, note: (rect && rect.reason) || "未矯正" };
@@ -1039,7 +1488,8 @@ export function rectifyPlan(rect) {
     return { useRectified: false, useHomography: false, note: `未矯正（${why}）` };
   }
   const how = rect.quadSource === "qr-alignment"
-    ? `,QR 四角由 alignment pattern 還原（N=${rect.dimension}）` : "";
+    ? `,QR 四角由 alignment pattern 還原（N=${rect.dimension}）`
+    : rect.quadSource === "1d-edges" ? ",1D 四角由條端擬合" : "";
   return { useRectified: true, useHomography: true,
     note: `已矯正 ${rect.w}×${rect.h}` + (rect.scale < 1 ? `（密度 ${(rect.scale * 100).toFixed(0)}%）` : "") + how };
 }
