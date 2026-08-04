@@ -71,8 +71,13 @@
 
 ## Key Context
 
-- **git** — 分支 `main`。2026-08-03 兩個 commit(`b217a34`、`8296fda`)+ 本輪 commit
-  **皆未 push**;push 依全域 §0 需 Eric 明確同意。
+- **git** — 分支 `main`。**2026-08-04 13:2x 已 push 到 `origin/main`(`0049109..c62db34`,
+  7 個 commit,含 08-03 積壓的三個),本機與遠端同步、無待推。**
+  往後 push 仍依全域 §0 需 Eric 明確同意。
+- **⚠️ 已 push ≠ 已上線。** 線上 docroot 是 `~/m-code-site`,**本輪沒有 rsync**,
+  故 `https://m-code.ericchh.work` 仍是舊版。上線要跑
+  `npm run build` → `rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/`
+  (2026-07-21 曾因只 pull 不 rsync 卡了 26 個 commit 沒上線)。
 - **實跑基線(2026-08-04)** — `npm test` **14 檔 415 測試**全綠(`tests/imgproc.test.ts`
   158);`npm run typecheck`、`npm run build` 通過。測試數的 SSOT 是
   `docs/spec20260731-1.md` §5.1 表,**每階段收工當場加一列,數字抄實跑輸出**。
