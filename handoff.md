@@ -62,9 +62,10 @@
 
 ## Key Context
 
-- **git** — 分支 `main`。**本輪的改動尚未 commit**(`demo/imgproc.js`、`demo/mobile.html`、
-  `tests/imgproc.test.ts`、`docs/spec20260731-1.md`、`docs/report20260805-1.md`、`handoff.md`)。
-  push 依全域 §0 需 Eric 明確同意。
+- **git** — 分支 `main`。**2026-08-05 20:38 已 push 到 `origin/main`(`4b107aa..80325ec`,
+  三個 commit:`feat(imgproc)` 純函式 + 測試 / `feat(demo)` D1–D5 實作 / `docs` 規格與報告)。**
+  唯一可能未推的是本行所在的這次 handoff 更正(收工前補的),`git log origin/main..HEAD`
+  一查便知。往後 push 仍依全域 §0 需 Eric 明確同意。
 - **已上線** — 本輪已 `npm run build` → `rsync -a --delete` 到 `~/m-code-site`,
   `https://m-code.ericchh.work` 是最新內容。
   **驗法不是看 HTTP 200,是比 hash**;`demo/mobile.html` 的 hash **會對不上,那是正常的** ——
