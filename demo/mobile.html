@@ -79,6 +79,20 @@
   .verdict { font-size:15px; font-weight:700; margin:10px 0 4px; padding:7px 16px; border-radius:999px; }
   .verdict.pass { background:#dcfce7; color:#166534; } .verdict.fail { background:#fee2e2; color:#991b1b; }
   .margin { font-size:12px; color:#64748b; }
+  /* 不可量測(D4):量到的不是符號本體時**取代**等級圈與判定,不並存 —— 並存等於
+     還是給了一個等級,使用者仍會照著它下結論。 */
+  .unmeas { width:100%; margin:10px 0 4px; padding:14px 16px; border-radius:12px; text-align:left;
+            background:#fef3c7; border:1px solid #fcd34d; }
+  .unmeas .t { font-size:15px; font-weight:800; color:#92400e; margin-bottom:5px; }
+  .unmeas .r { font-size:13px; color:#78350f; line-height:1.6; }
+  .unmeas .h { font-size:13px; font-weight:700; color:#7c2d12; margin-top:8px;
+               background:#fff7ed; border-radius:8px; padding:7px 10px; }
+  /* 示範模式標記(D5②):等級照出但必須看得出不是實拍 */
+  .simTag { width:100%; margin:8px 0 2px; padding:8px 12px; border-radius:10px; text-align:left;
+            background:#e0f2fe; border:1px solid #7dd3fc; color:#075985; font-size:12px; font-weight:700; }
+  /* 取樣條件註記(D2):中性敘述,只講取樣差異,不得寫成準確度或合規聲明 */
+  .sampNote { width:100%; margin:6px 0 0; padding:8px 11px; border-radius:10px; text-align:left;
+              background:#f1f5f9; border:1px solid #e2e8f0; color:#475569; font-size:11.5px; line-height:1.6; }
   /* 判定下方的辨識文字(解碼字串)顯示框 */
   .decodedBox { width:100%; margin-top:10px; text-align:left; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:9px 11px; }
   .decodedBox .lbl { font-size:11px; color:#64748b; display:block; margin-bottom:2px; }
@@ -228,10 +242,13 @@
       <button class="back" id="back">‹ 重新拍攝</button>
       <div class="symBadge" id="symBadge"></div>
       <div class="decode" id="decode"></div>
+      <div class="simTag" id="simTag" hidden></div>
+      <div class="unmeas" id="unmeasBox" hidden></div>
       <div class="circle" id="circle"><div class="l" id="letter">–</div><div class="s">參考等級</div></div>
       <div class="legal">相對值・非 ISO 合規證書<br>本工具不出具 ISO 證書，合規驗證請用合規 verifier。</div>
       <div class="verdict" id="verdict"></div>
       <div class="margin" id="margin"></div>
+      <div class="sampNote" id="sampNote" hidden></div>
       <div class="decodedBox"><span class="lbl">辨識文字（解碼結果）</span><div class="val" id="decodedText">–</div></div>
       <div class="params" id="params"></div>
       <div class="resultTextWrap">
@@ -304,6 +321,7 @@ import {
   pickBestResolution, scaleRoi, fitRoiToBudget,
   rectifyQuad, rectifyPlan, resolveTiltDeg, focalPxFromSettings, TILT_SOURCE_LABEL,
   ONE_D_SYMBOLOGIES, edgeFitRoi,
+  assessMeasurability, SIMULATED_LABEL,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -314,9 +332,18 @@ const safeFileName = (s) => String(s).replace(/[\\/:*?"<>|]/g, "_");
 const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
 // 品質燈號標籤。比例尺卡(scaleRef)僅用於絕對毫米尺寸量測、相對品質篩檢不需要,
 // 故不列入面板(引擎仍計算 scaleRef,但它本就不鎖快門,隱藏不影響閘門邏輯)。
-const SIX = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", whiteBalance:"白平衡", picket:"印向直立" };
-// 完整檢查標籤(含面板未顯示的比例尺卡/透視/解析度),供「快門鎖死」時具名列出未過項
-const CHECK_LABEL = { ...SIX, scaleRef:"比例尺卡", perspective:"透視", resolution:"解析度" };
+//
+// 白平衡(whiteBalance)自 2026-08-05(稽核裁示 D1)起同樣移出面板,理由與 scaleRef 同型:
+//   ① 它結構上**不可能鎖快門** —— classifyWhiteBalance 程式路徑只回 OK/WARN,沒有任何
+//      一支回 FAIL(src/engines/gate.ts,並有 tests/gate.test.ts 與 gate-spec-sync.test.ts
+//      兩道守門釘著)。2026-07-20 就已解掉,面板留著只是讓黃燈變成常態。
+//   ② 它的讀數在系統內沒有消費者:整條下游(含 ZXing)都把 RGBA 塌縮成灰階,
+//      wb 算出來只畫一顆圓點,連數字都不顯示、也不進 scans。
+// **引擎一行不動**(classifyWhiteBalance 與兩份守門測試維持原樣,擋著硬閘門復辟);
+// 改為在快門時把讀數存進 lastShotInfo → scans → PDF,第一次讓它變成可稽核的資料。
+const PANEL_LIGHTS = { focus:"對焦", glare:"眩光", washboard:"楞痕透印", picket:"印向直立" };
+// 完整檢查標籤(含面板未顯示的白平衡/比例尺卡/透視/解析度),供「快門鎖死」時具名列出未過項
+const CHECK_LABEL = { ...PANEL_LIGHTS, whiteBalance:"白平衡", scaleRef:"比例尺卡", perspective:"透視", resolution:"解析度" };
 const STAGES = [["INLINE","產線"],["OUTBOUND","出貨"],["COMPLAINT","客訴"]];
 
 const SYMS = [["AUTO","自動"],["ITF14","ITF-14"],["GS1_128","GS1-128"],["QR","QR"],["DATAMATRIX","DM"]];
@@ -417,8 +444,8 @@ let inspecting = false;
 function recompute() {
   const gate = evalGate();
   $("stateTag").textContent = gate.state; $("stateTag").className = "stateTag " + gate.state;
-  $("lights").innerHTML = gate.report.checks.filter(c => SIX[c.key]).map(c =>
-    `<div class="light"><span class="dot bg-${c.status}"></span>${SIX[c.key]}<br><small style="color:#94a3b8">${c.status}</small></div>`).join("");
+  $("lights").innerHTML = gate.report.checks.filter(c => PANEL_LIGHTS[c.key]).map(c =>
+    `<div class="light"><span class="dot bg-${c.status}"></span>${PANEL_LIGHTS[c.key]}<br><small style="color:#94a3b8">${c.status}</small></div>`).join("");
   const armed = gate.state === "ARMED", sh = $("shutter");
   $("beam").style.display = armed ? "none" : "block"; // 鎖定後停止掃描光束（已對準）
   sh.className = "shutter " + (armed?"ready":""); sh.disabled = !armed;
@@ -427,6 +454,11 @@ function recompute() {
   $("shutterLbl").textContent = armed ? "可拍 — 點按檢驗"
     : gate.state==="LOCKED" ? "快門鎖死：" + failing.map(c => CHECK_LABEL[c.key] || c.key).join("、") + " 未過"
     : "校準中…";
+  // 相機串流故障(稽核 COMPAT-01)蓋過閘門結果:畫面凍結時燈號量的是最後一幀,
+  // 全綠也沒有意義。**不改任何閘門門檻**,只是不讓快門按下去產出與現場無關的報告。
+  if (camFault) { sh.className = "shutter"; sh.disabled = true; $("shutterLbl").textContent = "相機中斷 — 無法檢驗"; }
+  // 無相機的示範模式:快門可按,但必須讓使用者知道拿到的是模擬值而非實拍量測。
+  else if (!camVideo) { $("shutterLbl").textContent = "示範模式 — 產生模擬結果"; }
   // 檢驗中(升壓等待 + 降回 + 最多 4M 像素同步分析,可能超過 1 秒)覆寫成忙碌樣式。
   // 必須寫在這裡而非只在 inspect() 內設一次:即時量測迴圈每 500ms 也會呼叫 recompute(),
   // 否則檢驗途中快門會被重新點亮成「可拍」,使用者以為沒反應而連點。
@@ -460,6 +492,10 @@ async function inspect() {
       }
       return;
     }
+    // 取幀前最後一道複驗(稽核 COMPAT-01):事件可能還沒送到,或該平台根本不送。
+    // 凍結幀走完整條檢驗會產出一份看起來完全正常、卻與現場無關的報告 —— 寧可擋下。
+    const fault = cameraFaultNow();
+    if (fault) { camFault = camFault || fault; setCamStatus("⚠ " + fault, "warn"); return; }
     let photo = null;
     try {
       photo = await capturePhoto();
@@ -596,7 +632,21 @@ function inspectReal(photo) {
   const gw = plan.useRectified ? rect.w : rg.w;
   const gh = plan.useRectified ? rect.h : rg.h;
   const roi = { x0: 0, y0: 0, x1: gw, y1: gh };
-  const pm = roiPhotometric(gray, gw, roi);
+  // ── 光度量測基底(稽核裁示 D3 · QUAD-04 / IMG-07)────────────────────────
+  // 幾何吃正射影像,**光度留在未矯正的 ROI**,只對 1D 生效。
+  // 理由:1D 一旦走矯正,光度取樣區域從「定位點 bbox 外擴 25%(含靜區)」整塊換成
+  //   「符號四角內的正射重採樣影像」,兩者量到的根本不是同一塊像素 —— 正射範圍會把
+  //   bearer bar 含進來,而 roi1DGeometry 的 slice(1,-1) 又剔掉最外側真條。
+  //   合成 ITF-14 實測 minEdgeContrast 0.654 → 0.000(見 tests/imgproc.test.ts
+  //   「光度量測基底對照」那一組),而 policies.ts 的允收門檻依規格 §6.1 是凍結的 ——
+  //   門檻與量測條件被拆開了。本輪的最小止血是把兩件事分開,**門檻一行不動**。
+  // 2D 維持原樣(吃矯正影像):它的 GNU/FPD 本來就依賴正射幾何,且無 bearer bar 問題。
+  const oneD = !is2D(sym);
+  const pmGray = (oneD && plan.useRectified) ? rg.gray : gray;
+  const pmW = (oneD && plan.useRectified) ? rg.w : gw;
+  const pmRoi = (oneD && plan.useRectified) ? { x0: 0, y0: 0, x1: rg.w, y1: rg.h } : roi;
+  const pm = roiPhotometric(pmGray, pmW, pmRoi);
+  if (lastShotInfo) lastShotInfo.photometricBase = (oneD && plan.useRectified) ? "未矯正 ROI" : "同幾何";
   // 透視傾角(規格 §3.3 · 2026-08-03 裁示):先試 getSettings().focalLength 走單應矩陣
   // 實算,不可得則退回 quadGeometry 的臂長差代理值並在結果頁標註為代理。
   // 焦距與主點都要換算到「H 所在的座標系」尺度 —— 那是 geo 不是 rg:1D 走的是另一塊
@@ -618,6 +668,7 @@ function inspectReal(photo) {
   };
   const photometric = { rLight: pm.rLight, rDark: pm.rDark, rDarkMin: pm.rDarkMin, edgeContrasts: pm.edgeContrasts };
   let grade;
+  let scanlineCount = null; // 1D 實際取得的可用掃描線數(2D 維持 null,可量測性判定不看它)
   if (is2D(sym)) {
     // 2D:GNU 由 finder 幾何、FPD 由暗模組反射發散 proxy;UEC 無 RS 解碼資訊,誠實省略
     const q = zx ? quadGeometry(zx.points) : { gridDeviation: 0.5, picketAngleDeg: 0, tiltDeg: 0 };
@@ -634,9 +685,14 @@ function inspectReal(photo) {
     // MAX_ROI_PIXELS 時是量在縮過的密度上,見上方 roiScale)—— 故它是真實量測值,
     // 但解讀時必須帶著 roiScale 一起看,不可當成全解析度下的 px/module。
     const g1 = roi1DGeometry(gray, gw, roi);
-    grade = buildGradeResult(sym, g1.scanlines.length
-      ? g1.scanlines.map((geo) => ({ photometric, geometric: geo }))
-      : [{ photometric, geometric: { maxWidthDeviation: 0.5, tolerance: 0.5, maxElementReflectanceNonUniformity: 0.5 } }]);
+    scanlineCount = g1.scanlines.length;
+    // 掃描線全滅時**不再**用硬寫的 {0.5,0.5,0.5} 兜出一個等級(稽核 IMG-04):
+    // 那組值不是量到的,它只是「最差」,會讓橫躺的完好條碼被判 F 且不說原因。
+    // 改由下方的可量測性判定接手 —— 沒有掃描線就不出等級。此處先給空陣列避免
+    // buildGradeResult 拿到假值;實際不會被呈現(measurable=false 會提前分流)。
+    grade = scanlineCount
+      ? buildGradeResult(sym, g1.scanlines.map((geo) => ({ photometric, geometric: geo })))
+      : null;
     // 量到的真實 px/module 必須留下來:state.gate.pxm 只活到下一個 500ms 即時 tick
     // 就會被 measureFrame 覆寫回放行假值,系統裡不會有任何一處保存它。
     // 寫進 lastShotInfo → 跟著 shot 進 scans 與 PDF 明細,規格 §5.2 的實機驗收才拿得到。
@@ -653,11 +709,47 @@ function inspectReal(photo) {
   }
   const decoder = { decode: () => (zx ? { symbology: sym, data: zx.text } : null) };
   const decode = runDecode(decoder, { declaredSymbology: sym, handle: {} }, { expectedGtin: zx ? zx.text : state.expected });
-  const acceptance = evaluateAcceptance(grade, policyOf());
+  // ── 快門後閘門讀數(稽核裁示 D5③ · IMG-01)──────────────────────────────
+  // 八項閘門過去從未對「實際被分級的那張影像」跑過一次:inspectReal 把真實的
+  // picket / tilt / px-per-module 寫進 state.gate 之後,inspect() 的 finally 立刻用
+  // resetPreviewGeometry() 蓋回放行假值(0/0/9)才 recompute,中間沒有任何一次評估。
+  // 現在補上這一次 —— 但**刻意不鎖快門、不改分級、不碰任何門檻**:
+  //   ① 拍攝頁燈號的語意是「即時預覽量測」,事後鎖死會閃出一則活不過半秒的判定
+  //      (原 finally 註解的顧慮成立,保留)。
+  //   ② 分級與允收由 grade/acceptance 決定,與閘門是兩套語意,不得互相覆寫。
+  // 它純粹是「把已經量到的東西記下來」,讓報告第一次講得出這張照片的實際拍攝品質,
+  // 並解掉規格 §1.5 表格那一列已被 finally 還原推翻的敘述。
+  const shotGate = evaluateGate({
+    symbolDetected: !!zx, varLap: state.gate.varLap, glareRatio: state.gate.glare / 100,
+    washboardAmpRatio: state.gate.wash, wbGainDeviation: state.gate.wb / 100,
+    scaleRefDetected: state.gate.scaleRef,
+    picketAngleDeg: state.gate.picket, perspectiveTiltDeg: state.gate.tilt,
+    gsdMmPerPx: null, pxPerModule: state.gate.pxm,
+    fluteType: (profileOf() || {}).fluteType });
+  if (lastShotInfo) {
+    // 只留「非 OK」的項:全 OK 時報告不必多一行雜訊,有問題時才具名列出
+    const bad = shotGate.report.checks.filter((c) => c.status !== "OK" && c.key !== "scaleRef");
+    lastShotInfo.shotGate = bad.length
+      ? bad.map((c) => `${CHECK_LABEL[c.key] || c.key} ${c.status}`).join("、")
+      : "全部 OK";
+  }
+  // ── 可量測性分流(稽核裁示 D4 · IMG-09 / IMG-04)────────────────────────
+  // 判斷由 imgproc.js 的純函式做(demo/*.html 無自動化測試可覆蓋,寫進 HTML 就驗不了)。
+  const meas = assessMeasurability({
+    simulated: false, decoded: !!zx, isOneD: !is2D(sym), scanlineCount,
+    lineAngleDeg: zx ? lineAngleDeg(zx.points) : null });
   // 清單縮圖/報告原圖:由降取樣版再縮成 320px 寬 jpeg(不從全解析度直縮,省一次大圖重採樣)
   const tc = drawToCanvas(small, small.width, small.height, 320);
-  presentResult(decode, grade, acceptance, { type: "img", data: tc.toDataURL("image/jpeg", 0.7) },
-    { rectify: plan.note, tilt });
+  const img = { type: "img", data: tc.toDataURL("image/jpeg", 0.7) };
+  const geom = { rectify: plan.note, tilt };
+  if (!meas.measurable || !grade) {
+    // 量到的不是符號本體 → 不出等級、不出通過/未通過。過去這條路會拿畫面中央 70% 的
+    // 任意像素(解碼失敗)或硬寫最差值(掃描線全滅)產出一個看起來正常的判定。
+    presentUnmeasurable(decode, meas, img, geom);
+    return;
+  }
+  const acceptance = evaluateAcceptance(grade, policyOf());
+  presentResult(decode, grade, acceptance, img, geom, meas);
 }
 
 // 模擬檢驗(無相機):沿用示範情境設定的 gate/grade 模擬值
@@ -672,17 +764,86 @@ function inspectSim() {
   const grade = is2D(sym)
     ? buildGradeResult(sym, { photometric, geometric:{ finderTimingDamageRatio:g.fpd, gridDeviation:g.gnu, usedEC:g.uecUsed, totalEC:g.uecTotal } })
     : buildGradeResult(sym, Array.from({length:10}, () => ({ photometric, geometric:{ maxWidthDeviation:g.dec, tolerance:1, maxElementReflectanceNonUniformity:g.def } })));
+  // 示範模式標記(稽核裁示 D5② · IMG-03):等級照出(抽掉的話示範模式就沒有意義),
+  // 但結果頁、掃描清單、PDF、XLS 每一處都必須看得出這筆不是實拍,且不計入通過率。
+  // 「不可讀」情境同樣走不可量測分流 —— 示範要忠實反映真實路徑,否則教錯心智模型。
+  const meas = assessMeasurability({ simulated: true, decoded: state.canDecode, isOneD: !is2D(sym) });
+  if (!meas.measurable) { presentUnmeasurable(decode, meas, null, null); return; }
   const acceptance = evaluateAcceptance(grade, policyOf());
-  presentResult(decode, grade, acceptance, null, null);
+  presentResult(decode, grade, acceptance, null, null, meas);
 }
 
 // 共用結果呈現:更新結果頁 DOM、存入清單(img 為 null 時退回 SVG 快照)、切頁
 // geom:階段 ④ 的幾何量測摘要 { rectify, tilt },**只有真實檢驗才有**;
 //   模擬檢驗傳 null —— 沿用上一張的摘要等於在沒有像素的情況下編造幾何量測結果。
-function presentResult(decode, grade, acceptance, img, geom) {
+// 取樣條件註記(稽核裁示 D2 · COMPAT-02)。輸入:shot 取幀資訊;輸出:中性說明字串或 ""。
+// 由來:第一層取幀建立在 ImageCapture 上,而 WebKit 從未實作 —— iOS 只走得到 L2/L3,
+//   Android Chrome 拿得到照片解析度,兩邊的分析影像密度結構性不對等,卻套同一組允收門檻。
+// **只說明取樣條件差異,不改任何門檻、不做準確度或合規宣稱**(規格 §6.1 門檻凍結 + A3 定位護欄)。
+function samplingNote(shot) {
+  if (!shot) return "";
+  const reasons = [];
+  if (shot.path && shot.path.indexOf("L1") !== 0) reasons.push("本張未走照片解析度取幀（" + shot.path + "）");
+  if (shot.roiScale < 1) reasons.push(`量測影像已降取樣至 ${(shot.roiScale * 100).toFixed(0)}%`);
+  if (!reasons.length) return "";
+  return reasons.join("；") + "。取樣密度會影響 DEC / EC 這類代理值的絕對數字，"
+    + "與不同取樣密度下的紀錄**不宜直接互比**；同一台裝置、同一取幀層別的前後比較才有意義。";
+}
+
+// 不可量測(稽核裁示 D4)。輸入:解碼結果、可量測性判定、縮圖、幾何摘要;輸出:無。
+// **不輸出等級與通過/未通過** —— 量到的不是符號本體時,一個字母對客戶就是誤導。
+// 該筆仍進掃描清單(現場要看得到自己拍過什麼),但標為不可量測、排除於通過率統計之外。
+function presentUnmeasurable(decode, meas, img, geom) {
+  const symLabelR = (SYMS.find(([sv])=>sv===state.symbology)||[,state.symbology])[1];
+  $("symBadge").textContent = "偵測類型：" + symLabelR;
+  $("decode").innerHTML = decode.decoded
+    ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${esc(decode.data)}`
+    : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
+  $("decodedText").textContent = decode.decoded ? decode.data : "（不可讀，無辨識文字）";
+  // 示範模式下同樣可能不可量測(例如「不可讀」情境)—— 兩個標記並存,不互相取代
+  $("simTag").hidden = !meas.simulated;
+  if (meas.simulated) $("simTag").textContent = "⚠ " + SIMULATED_LABEL;
+  const box = $("unmeasBox");
+  box.hidden = false;
+  box.innerHTML = `<div class="t">${esc(meas.label)}</div>`
+    + `<div class="r">本張未產出參考等級與判定 —— 影像中量到的不是符號本體，`
+    + `硬給一個等級會讓人照著它下結論。請依提示重拍。</div>`
+    + (meas.hint ? `<div class="h">↻ ${esc(meas.hint)}</div>` : "");
+  // 等級圈、判定、margin、參數、升級提示全部隱藏:並存等於還是給了一個等級
+  for (const id of ["circle", "verdict", "margin", "params", "upsellBox"]) {
+    const el = $(id); if (el) el.style.display = "none";
+  }
+  const note = samplingNote(lastShotInfo);
+  $("sampNote").hidden = !note; $("sampNote").innerHTML = note ? esc(note).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") : "";
+  $("resultText").value = [
+    `製程環節：${stageLabelOf(state.processStage)}`,
+    `符號別：${symLabelR}`,
+    `解碼：${decode.decoded ? "成功 · " + decode.data : "不可讀（綜合崩壞）"}`,
+    `判定：${meas.label}`,
+    ...(meas.hint ? [`建議：${meas.hint}`] : []),
+    ...(geom ? [`幾何量測：${geom.rectify}；透視傾角 ${geom.tilt.deg === null ? "—" : geom.tilt.deg.toFixed(1) + "°"}（${TILT_SOURCE_LABEL[geom.tilt.source]}）`] : []),
+    `※ 本張未產出參考等級,不列入通過率統計。`,
+  ].join("\n");
+  saveScan(decode, null, null, img, { measurable: false, reason: meas.label, hint: meas.hint, simulated: !!meas.simulated });
+  $("lastResultBtn").disabled = false;
+  show("result");
+}
+
+function presentResult(decode, grade, acceptance, img, geom, meas) {
   // 此時 state.symbology 已收斂為具體類型(相機路徑由 ZXing 覆寫,其餘由 resolveSym)
   const symLabelR = (SYMS.find(([sv])=>sv===state.symbology)||[,state.symbology])[1];
   $("symBadge").textContent = "偵測類型：" + symLabelR;
+  // 還原「不可量測」路徑可能隱藏過的區塊(同一個結果頁兩種用途,不還原會殘留)
+  $("unmeasBox").hidden = true;
+  for (const id of ["circle", "verdict", "margin", "params", "upsellBox"]) {
+    const el = $(id); if (el) el.style.display = "";
+  }
+  // 示範模式標記(稽核裁示 D5② · IMG-03):等級照出,但每一處都要看得出不是實拍。
+  const simulated = !!(meas && meas.simulated);
+  $("simTag").hidden = !simulated;
+  if (simulated) $("simTag").textContent = "⚠ " + SIMULATED_LABEL + "（不列入通過率統計，匯出報告會標記）";
+  const note = samplingNote(lastShotInfo);
+  $("sampNote").hidden = !note; $("sampNote").innerHTML = note ? esc(note).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") : "";
   $("decode").innerHTML = decode.decoded
     ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${esc(decode.data)}${decode.dimension?" · "+esc(decode.dimension):""}`
     : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
@@ -708,6 +869,7 @@ function presentResult(decode, grade, acceptance, img, geom) {
   $("resultText").value = [
     `製程環節：${stageLabelOf(state.processStage)}`,
     `符號別：${symLabelR}`,
+    ...(simulated ? [`※ ${SIMULATED_LABEL}`] : []),
     `解碼：${decode.decoded ? "成功 · "+decode.data : "不可讀（綜合崩壞）"}`,
     `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
     ...(geom ? [`幾何量測：${geom.rectify}；透視傾角 ${geom.tilt.deg === null ? "—" : geom.tilt.deg.toFixed(1) + "°"}（${TILT_SOURCE_LABEL[geom.tilt.source]}）`] : []),
@@ -719,7 +881,7 @@ function presentResult(decode, grade, acceptance, img, geom) {
       `完整參數報告（幾何 ${grade.parameters.filter(p=>p.kind!=="PHOTOMETRIC").map(p=>p.code).join("/") || "DEC/DEF/FPD/GNU"} 等）：付費版解鎖`,
     ]),
   ].join("\n");
-  saveScan(decode, grade, acceptance, img);
+  saveScan(decode, grade, acceptance, img, { measurable: true, reason: "", hint: "", simulated });
   $("lastResultBtn").disabled = false; // 已有檢驗結果,拍攝頁「檢測結果」可用
   show("result");
 }
@@ -761,6 +923,13 @@ let camImageCapture = null; // ImageCapture 實例;不支援(iOS Safari)時維�
 let shotResolution = null;  // pickBestResolution 的結果 { width, height, source, tier };偵測失敗為 null
 let trackResolution = null; // 同上但只看 track 能力表(第二層升壓專用,見 captureViaConstraints)
 let lastShotInfo = null;    // 最近一次快門的請求值 / getSettings 實拿值 / 分析影像寬(誠實回報用)
+// 相機串流故障訊息(null = 正常)。稽核 COMPAT-01:iOS Safari 切到其他 App / 接來電 /
+// 鎖屏,或 Android 其他 App 搶相機時,track 會 mute 或 ended,但畫面停在**最後一幀**。
+// 過去完全沒有偵測 —— 使用者切回來看到燈全綠 + ARMED,按下去拿到的是幾分鐘前那張凍結
+// 畫面的解碼、分級與允收判定,並存進 scans、印進 PDF。不是拒絕服務,是靜默產出一份
+// 看起來完全正常、卻與現場無關的報告。
+// **這是可用性守衛,不是品質閘門**:它不碰 evaluateGate 的任何門檻,只擋快門並說明原因。
+let camFault = null;
 // 預覽解析度:規格 §3.1「預覽與拍攝分離」。預覽固定 720p —— 串流拉到 4K 會掉幀、
 // 發燙、耗電,而即時迴圈本來就降到 320px,拉高零收益;高解析度只在快門瞬間取。
 const PREVIEW_W = 1280, PREVIEW_H = 720;
@@ -806,6 +975,8 @@ async function initCamera(userGesture) {
     const v = $("cam"); v.srcObject = stream; await v.play().catch(()=>{});
     $("frame").classList.add("live"); camVideo = v;
     camTrack = stream.getVideoTracks()[0] || null;
+    camFault = null;
+    watchTrackHealth(camTrack);
     // 能力偵測不 await:偵測慢或失敗都不該卡住相機就緒與即時量測,
     // 快門時 shotResolution 仍為 null 就自動走第三層(現行 drawImage 行為)。
     detectShotCapability(camTrack).catch(() => {});
@@ -822,6 +993,58 @@ async function initCamera(userGesture) {
     setCamStatus((map[e.name] || ("相機開啟失敗："+e.name)) + (userGesture?"":" ·點畫面重試"), "warn");
   }
 }
+// 串流健康監看(稽核 COMPAT-01)。輸入:video track;輸出:無(改 camFault 並更新畫面)。
+// 掛三個 track 事件 + 分頁可見度:
+//   ended  —— 串流被系統或其他 App 收走,不可能自癒,必須重開相機
+//   mute   —— 暫時被搶走(來電、其他 App 取得相機),畫面凍結在最後一幀
+//   unmute —— 恢復供幀,清掉故障旗標
+// 監聽器綁在 track 上,track 被 stopCamera 丟棄時一併回收,不必手動 remove。
+// 每次狀態變動都呼叫 recompute(),讓快門即時反映(recompute 內會讀 camFault)。
+function watchTrackHealth(track) {
+  if (!track || !track.addEventListener) return;
+  const mark = (msg) => {
+    // 只處理「當下這條」track 的事件:換相機或登出後舊 track 的遲到事件不得覆寫新狀態
+    if (track !== camTrack) return;
+    camFault = msg;
+    if (msg) setCamStatus("⚠ " + msg, "warn");
+    recompute();
+  };
+  track.addEventListener("ended", () => mark("相機串流已中斷（被其他 App 取用或系統關閉）— 請點畫面重新開啟"));
+  track.addEventListener("mute", () => mark("相機暫停供幀（可能被其他 App 佔用）— 畫面可能是凍結的最後一幀"));
+  track.addEventListener("unmute", () => {
+    if (track !== camTrack) return;
+    camFault = null;
+    setCamStatus("● 相機已恢復 · 對準條碼後按快門檢驗", "ok");
+    recompute();
+  });
+}
+// 分頁切回前景時主動複驗一次:iOS Safari 有時不送 mute/unmute,只是讓 track 進入
+// ended 或停止供幀。切回來當下重讀一次狀態,比等事件可靠。
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || !camTrack) return;
+  if (camTrack.readyState === "ended") {
+    camFault = "相機串流已中斷（切換 App 期間被系統收回）— 請點畫面重新開啟";
+    setCamStatus("⚠ " + camFault, "warn");
+  } else if (camTrack.muted) {
+    camFault = "相機暫停供幀 — 畫面可能是凍結的最後一幀";
+    setCamStatus("⚠ " + camFault, "warn");
+  } else {
+    camFault = null;
+  }
+  recompute();
+});
+// 取幀前的最後一道複驗(事件可能還沒送到,或根本不送)。輸入:無;
+// 輸出:故障訊息字串或 null。**只讀狀態不改狀態**,由呼叫端決定怎麼處理。
+function cameraFaultNow() {
+  if (camFault) return camFault;
+  if (camTrack && camTrack.readyState === "ended") return "相機串流已中斷 — 請點畫面重新開啟";
+  if (camTrack && camTrack.muted) return "相機暫停供幀 — 畫面可能是凍結的最後一幀";
+  const v = camVideo;
+  // readyState < HAVE_CURRENT_DATA(2)表示沒有可用的當前幀,drawImage 會畫出空白或舊幀
+  if (v && v.readyState < 2) return "畫面尚未就緒 — 請稍候再按快門";
+  return null;
+}
+
 // 擷取當下畫面作為「掃描原圖」:有相機取實拍 jpeg,否則用 SVG 快照
 function captureImage() {
   const v = camVideo;
@@ -894,6 +1117,7 @@ function stopCamera() {
   }
   // 一併清掉快門解析度相關狀態,避免下次開相機沿用上一台裝置/串流的能力表
   camTrack = null; camImageCapture = null; shotResolution = null; trackResolution = null; lastShotInfo = null;
+  camFault = null; // 故障旗標屬於那條串流,不可跨串流殘留(否則重開相機後快門永遠鎖死)
   const fr = $("frame"); if (fr) fr.classList.remove("live");
   setCamStatus("", "");
 }
@@ -1001,12 +1225,20 @@ function trackSizeText() {
 //   等於把沒發生過的請求記進紀錄,實機驗收會據此誤判。
 // 之後 inspectReal 還會補寫 roiSample / roiScale / pxPerModule(見該函式),
 // 全部隨 saveScan 進 scans 與 PDF 明細。
-function recordShot(path, canvas, settingsText, extra, res) {
-  const r = res || shotResolution;
+// 2026-08-05(稽核 COMPAT-04 / IMG-08)修正:req 不再退回全域 shotResolution。
+//   舊寫法 `res || shotResolution` 會讓 **L3(從不送任何請求)** 與 **L1 未指定尺寸時**
+//   印出一組從未發生過的請求值 —— 例如 iOS 走 L3 卻印「請求 4096×4096(fallback)」。
+//   規格 §5.2 的雙平台實機驗收要記的就是這一欄,不修就是拿自己騙自己的數字去驗收。
+//   現在各層傳自己**真正送出**的那組;沒送出就傳 null,誠實印「未請求」。
+function recordShot(path, canvas, settingsText, extra, req) {
   lastShotInfo = { path,
-    requested: r ? `${r.width}×${r.height}(${r.source})` : "未偵測",
+    requested: req ? `${req.width}×${req.height}(${req.source})` : "未請求",
     settings: settingsText || trackSizeText(),
     analysis: `${canvas.width}×${canvas.height}`,
+    // 白平衡讀數(稽核裁示 D1):移出燈號面板後改在這裡留存,讓它第一次成為可稽核的
+    // 資料。取的是快門當下的即時預覽讀數(灰界近似),與分析影像不是同一張 —— 故
+    // 標籤寫「預覽」,不要被解讀成對照片本身的量測。無相機的模擬路徑不會走到這裡。
+    wb: typeof state.gate.wb === "number" ? state.gate.wb : null,
     ...(extra || {}) };
   setCamStatus(`● 取幀 ${path} · 請求 ${lastShotInfo.requested} · 串流 ${lastShotInfo.settings} · 分析 ${lastShotInfo.analysis}`, "ok");
   return canvas;
@@ -1048,8 +1280,12 @@ async function captureViaImageCapture() {
   if (!camImageCapture || !camImageCapture.takePhoto) return null;
   try {
     const opts = {};
+    // 只有 source === "photo" 這一路才真的把尺寸送進 takePhoto();其餘情形是「不指定,
+    // 由裝置給預設照片尺寸」。req 必須跟著這個分支走(見 recordShot 的誠實化註解)。
+    let req = null;
     if (shotResolution && shotResolution.source === "photo") {
       opts.imageWidth = shotResolution.width; opts.imageHeight = shotResolution.height;
+      req = shotResolution;
     }
     const blob = await camImageCapture.takePhoto(opts);
     const bmp = await createImageBitmap(blob);
@@ -1057,7 +1293,7 @@ async function captureViaImageCapture() {
     const shot = drawCapped(bmp, pw, ph); // 面積上限護欄(見 drawCapped)
     if (bmp.close) bmp.close(); // 及早釋放解碼後的點陣圖(記憶體護欄)
     // 預覽串流沒被動過,settings 現場讀即為當下值;photo 記照片原尺寸與實際縮到多少
-    return { canvas: shot.canvas, settings: null, extra: { photo: shot.sizeText } };
+    return { canvas: shot.canvas, settings: null, extra: { photo: shot.sizeText }, req };
   } catch (e) { return null; }
 }
 // 第二層:applyConstraints 暫時升壓 → 等 1–2 幀重新協商 → drawImage → 降回 720p。
@@ -1091,7 +1327,8 @@ async function captureViaConstraints() {
     // settings 在 finally 降回 720p 之前先讀(return 的運算式先算完才跑 finally);
     // 升壓後的畫面同樣可能撞上 canvas 面積上限,故一律過 drawCapped
     const shot = drawCapped(v, v.videoWidth, v.videoHeight);
-    return { canvas: shot.canvas, settings: trackSizeText(), res,
+    // req 就是上面真的 applyConstraints 下去的那組(track 來源),這一層本來就誠實
+    return { canvas: shot.canvas, settings: trackSizeText(), req: res,
       extra: shot.capped ? { frame: shot.sizeText } : null };
   } catch (e) {
     return null;
@@ -1128,11 +1365,12 @@ async function capturePhoto() {
   const v = camVideo;
   if (!(v && v.videoWidth)) return null;
   const byPhoto = await captureViaImageCapture();
-  if (byPhoto) return recordShot("L1/ImageCapture", byPhoto.canvas, byPhoto.settings, byPhoto.extra);
+  if (byPhoto) return recordShot("L1/ImageCapture", byPhoto.canvas, byPhoto.settings, byPhoto.extra, byPhoto.req);
   const byConstraint = await captureViaConstraints();
-  if (byConstraint) return recordShot("L2/applyConstraints", byConstraint.canvas, byConstraint.settings, byConstraint.extra, byConstraint.res);
+  if (byConstraint) return recordShot("L2/applyConstraints", byConstraint.canvas, byConstraint.settings, byConstraint.extra, byConstraint.req);
   const byDraw = captureViaDrawImage();
-  return byDraw ? recordShot("L3/drawImage", byDraw.canvas, byDraw.settings, byDraw.extra) : null;
+  // L3 從不送任何解析度請求 —— req 恆為 null,誠實印「未請求」(見 recordShot)
+  return byDraw ? recordShot("L3/drawImage", byDraw.canvas, byDraw.settings, byDraw.extra, null) : null;
 }
 
 // 存入掃描清單。img:真實檢驗傳入快門照縮圖;null 時退回 captureImage()(SVG 快照)
@@ -1144,15 +1382,22 @@ async function capturePhoto() {
 //   rectify 梯形矯正採用與否及原因、tiltSource 透視傾角的來源(單應矩陣實算 /
 //   臂長差代理值 / 未量測)——階段 ④ 的誠實標註,規格 §3.3 要求退回時講得出原因。
 //   模擬檢驗(無相機)沒有取幀,lastShotInfo 為 null → 該欄留 null,不編造。
-function saveScan(decode, grade, acceptance, img) {
+// 2026-08-05(稽核裁示 D4 / D5②)新增 flags:{ measurable, reason, hint, simulated }。
+//   measurable=false 時 grade / acceptance 一律傳 null —— 該筆沒有等級,不是等級是 F。
+//   清單、PDF、XLS 都必須看得出這兩種筆與正常筆的差別,且不列入通過率統計。
+function saveScan(decode, grade, acceptance, img, flags) {
+  const f = flags || { measurable: true, reason: "", hint: "", simulated: false };
   scans.push({
     shot: lastShotInfo ? { ...lastShotInfo } : null,
+    measurable: f.measurable !== false, unmeasReason: f.reason || "", unmeasHint: f.hint || "",
+    simulated: !!f.simulated,
     n: scans.length+1, ts: new Date(), symbology: state.symbology,
     symLabel: (SYMS.find(([v])=>v===state.symbology)||[,state.symbology])[1],
     data: decode.decoded ? decode.data : "(不可讀)", decoded: decode.decoded,
-    grade: grade.overall, pass: acceptance.pass, reqGrade: policyOf().requiredGrade,
-    margin: acceptance.marginScore, img: img || captureImage(),
-    params: grade.parameters.map(p=>({ letter:p.letter, code:p.code, label:p.label, score:p.score })),
+    grade: grade ? grade.overall : null, pass: acceptance ? acceptance.pass : null,
+    reqGrade: policyOf().requiredGrade,
+    margin: acceptance ? acceptance.marginScore : null, img: img || captureImage(),
+    params: grade ? grade.parameters.map(p=>({ letter:p.letter, code:p.code, label:p.label, score:p.score })) : [],
     profileName: (profileOf()||{}).name || "",
     stage: state.processStage, stageLabel: stageLabelOf(state.processStage),
   });
@@ -1163,9 +1408,12 @@ function renderList() {
   $("f-total").value = String(scans.length);
   $("listItems").innerHTML = scans.length
     ? scans.map((s,i)=>`<div class="scanItem"><div class="th" data-zoom="${i}">${imgMarkup(s.img)}</div>
-        <div class="meta">#${s.n} · ${fmtTime(s.ts)} · <b>${s.stageLabel}</b> · ${s.symLabel}<div class="d">${esc(s.data)}</div></div>
-        <div style="text-align:center"><div class="g" style="color:${GC[s.grade]}">${s.grade}</div>
-          <div class="v" style="color:${s.pass?'#166534':'#991b1b'}">${s.pass?'通過':'未通過'}</div></div></div>`).join("")
+        <div class="meta">#${s.n} · ${fmtTime(s.ts)} · <b>${s.stageLabel}</b> · ${s.symLabel}${s.simulated?' · <span style="color:#075985">示範</span>':''}<div class="d">${esc(s.data)}</div></div>
+        <div style="text-align:center">${s.measurable
+          ? `<div class="g" style="color:${GC[s.grade]}">${s.grade}</div>
+             <div class="v" style="color:${s.pass?'#166534':'#991b1b'}">${s.pass?'通過':'未通過'}</div>`
+          : `<div class="g" style="color:#92400e;font-size:20px">—</div>
+             <div class="v" style="color:#92400e">不可量測</div>`}</div></div>`).join("")
     : `<p style="font-size:12px;color:#94a3b8">尚無掃描紀錄，回拍攝按檢驗即累積。</p>`;
   const has = scans.length>0;
   $("exportPdfBtn").disabled=!has; $("exportXlsBtn").disabled=!has;
@@ -1185,22 +1433,47 @@ function shotSummary(shot) {
   if (shot.pxPerModule) parts.push("px/module " + esc(shot.pxPerModule));
   if (shot.rectify) parts.push("矯正 " + esc(shot.rectify));
   if (shot.tiltSource) parts.push("傾角 " + esc(shot.tiltSource));
+  // 2026-08-05 稽核裁示新增的三欄:
+  //   photometricBase 光度量測吃的是哪塊影像(D3 把幾何與光度拆開後,這欄才講得清楚)
+  //   shotGate 這張照片的實測閘門讀數(D5③;純記錄,不鎖快門、不改分級)
+  //   wb 白平衡讀數(D1 移出面板後改在此留存,標「預覽」因為它量的是即時預覽幀)
+  if (shot.photometricBase) parts.push("光度基底 " + esc(shot.photometricBase));
+  if (shot.shotGate) parts.push("本張閘門 " + esc(shot.shotGate));
+  if (typeof shot.wb === "number") parts.push("白平衡Δ(預覽) " + esc(shot.wb) + "%");
   return parts.join(" · ");
 }
 function exportPdf() {
   if (!scans.length) return;
-  const m = metaFields(), dateStr = new Date().toLocaleString("zh-TW"), passN = scans.filter(s=>s.pass).length;
-  const summary = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${esc(s.data)}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td></tr>`).join("");
+  const m = metaFields(), dateStr = new Date().toLocaleString("zh-TW");
+  // 通過率統計只算「實拍且量得到」的筆(稽核裁示 D4 / D5②):
+  //   不可量測的筆沒有等級,示範模式的筆不是實拍量測 —— 兩者都不該進分母,
+  //   否則報告首頁那個 n/N 會把編造或缺漏的樣本混進良率。
+  const counted = scans.filter(s => s.measurable && !s.simulated);
+  const passN = counted.filter(s => s.pass).length;
+  const excluded = scans.length - counted.length;
+  const gradeCell = (s) => s.measurable ? s.grade : "—";
+  // unmeasReason 本身已是完整句(「不可量測 — …」),不要再串一次前綴
+  const verdictCell = (s) => !s.measurable ? esc(s.unmeasReason || "不可量測")
+    : (s.pass ? "通過" : "未通過") + (s.simulated ? "（示範）" : "");
+  const summary = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${esc(s.data)}</td><td>${gradeCell(s)}</td><td>${verdictCell(s)}</td></tr>`).join("");
   const page1 = `<div class="rptHead"><h1>條碼品質快篩報告</h1><div style="text-align:right;font-size:12px;color:#475569">相對品質篩檢<br>${dateStr}</div></div>
     <div class="rptMeta"><div><b>客戶名稱</b>${m.customer}</div><div><b>品名</b>${m.product}</div>
       <div><b>工單號</b>${m.wo}</div><div><b>掃描總數</b>${scans.length} 筆</div>
-      <div><b>判定通過</b>${passN} / ${scans.length}</div><div><b>報告時間</b>${dateStr}</div></div>
+      <div><b>判定通過</b>${passN} / ${counted.length}${excluded ? `（另 ${excluded} 筆未計入）` : ""}</div><div><b>報告時間</b>${dateStr}</div></div>
     <table class="rpt"><tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th></tr>${summary}</table>
-    <p class="rptLegal">※ 本報告為相對品質篩檢參考值，非 ISO 合規證書；合規驗證請使用具固定照明幾何之合規 verifier。</p>`;
+    <p class="rptLegal">※ 本報告為相對品質篩檢參考值，非 ISO 合規證書；合規驗證請使用具固定照明幾何之合規 verifier。${
+      excluded ? `<br>※ 通過率分母已排除 ${excluded} 筆：不可量測（影像中量到的不是符號本體，未產出等級）與示範模式（情境模擬值，非實拍量測）。` : ""
+    }</p>`;
   const details = scans.map(s=>`<div class="scanPage"><h2 style="font-size:15px;margin:0 0 12px">掃描 #${s.n} · ${fmtTime(s.ts)} · ${s.stageLabel} · ${s.symLabel}</h2>
     <div class="sp-grid"><div><div style="width:100%;height:170px;background:#d8c19a;border:1px solid #94a3b8;border-radius:6px;overflow:hidden">${imgMarkup(s.img,"contain")}</div><p style="text-align:center;color:#64748b;font-size:12px;margin-top:4px">掃描原圖</p></div>
-    <div><p style="margin:0 0 8px"><b>參考等級：</b><span style="color:${GC[s.grade]};font-weight:800;font-size:20px">${s.grade}</span>
-      　<b>判定：</b>${s.pass?"通過":"未通過"}（門檻 ≥ ${s.reqGrade}，margin ${s.margin.toFixed(2)}）</p>
+    <div>${s.simulated ? `<p style="margin:0 0 8px;padding:6px 10px;background:#e0f2fe;border:1px solid #7dd3fc;border-radius:6px;font-size:12px;color:#075985"><b>⚠ ${esc(SIMULATED_LABEL)}</b> — 本筆不列入通過率統計。</p>` : ""}
+      ${s.measurable
+        ? `<p style="margin:0 0 8px"><b>參考等級：</b><span style="color:${GC[s.grade]};font-weight:800;font-size:20px">${s.grade}</span>
+      　<b>判定：</b>${s.pass?"通過":"未通過"}（門檻 ≥ ${s.reqGrade}，margin ${s.margin.toFixed(2)}）</p>`
+        : `<p style="margin:0 0 8px;padding:8px 11px;background:#fef3c7;border:1px solid #fcd34d;border-radius:6px">
+             <b style="color:#92400e">${esc(s.unmeasReason || "不可量測")}（未產出參考等級）</b><br>
+             ${s.unmeasHint ? `<span style="font-size:12px;color:#78350f">建議：${esc(s.unmeasHint)}</span><br>` : ""}
+             <span style="font-size:12px;color:#78350f">本筆不列入通過率統計。</span></p>`}
       <p style="margin:0 0 8px"><b>解碼：</b>${s.decoded?"成功":"不可讀"} · ${esc(s.data)}</p>
       ${s.shot ? `<p style="margin:0 0 8px;font-size:12px;color:#475569"><b>取幀：</b>${shotSummary(s.shot)}</p>` : ""}
       <table class="rpt"><tr><th>級</th><th>參數</th><th>分數</th></tr>
@@ -1214,10 +1487,15 @@ function exportXls() {
   const head = `<tr><td>客戶名稱</td><td>${m.customer}</td><td>品名</td><td>${m.product}</td></tr>
     <tr><td>工單號</td><td>${m.wo}</td><td>掃描總數</td><td>${scans.length}</td></tr>
     <tr><td>報告時間</td><td>${dateStr}</td><td></td><td></td></tr><tr><td></td></tr>`;
-  const cols = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>門檻</th><th>margin</th><th>工法/楞型</th></tr>`;
-  const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${esc(s.data)}</td><td>${s.grade}</td><td>${s.pass?"通過":"未通過"}</td><td>${s.reqGrade}</td><td>${s.margin.toFixed(2)}</td><td>${esc(s.profileName)}</td></tr>`).join("");
+  // 「資料狀態」欄(稽核裁示 D4 / D5②):讓每一列自己講清楚是實拍量測、示範模擬,
+  // 還是量不到 —— XLS 常被下游再加工統計,少了這欄就會把三種筆混在一起算良率。
+  const cols = `<tr><th>#</th><th>時間</th><th>製程環節</th><th>符號別</th><th>解碼字串</th><th>參考等級</th><th>判定</th><th>門檻</th><th>margin</th><th>工法/楞型</th><th>資料狀態</th></tr>`;
+  const statusOf = (s) => !s.measurable ? (s.unmeasReason || "不可量測") + "（未產出等級）"
+    : s.simulated ? "示範模式（模擬值，非實拍）" : "實拍量測";
+  const body = scans.map(s=>`<tr><td>${s.n}</td><td>${fmtTime(s.ts)}</td><td>${s.stageLabel}</td><td>${s.symLabel}</td><td>${esc(s.data)}</td><td>${s.measurable?s.grade:"—"}</td><td>${s.measurable?(s.pass?"通過":"未通過"):"—"}</td><td>${s.reqGrade}</td><td>${s.measurable?s.margin.toFixed(2):"—"}</td><td>${esc(s.profileName)}</td><td>${esc(statusOf(s))}</td></tr>`).join("");
   // 法律護欄聲明(規格 A3 紅線):Excel 報告表尾必附,與結果頁 / PDF 聲明一致
-  const legal = `<tr><td></td></tr><tr><td colspan="10">※ 本報告所有等級皆為相對代理值（proxy），非 ISO 15416/15415 合規驗證，不出具證書；合規驗證請使用具固定照明幾何之合規 verifier。</td></tr>`;
+  const legal = `<tr><td></td></tr><tr><td colspan="11">※ 本報告所有等級皆為相對代理值（proxy），非 ISO 15416/15415 合規驗證，不出具證書；合規驗證請使用具固定照明幾何之合規 verifier。</td></tr>`
+    + `<tr><td colspan="11">※ 統計良率時請排除「資料狀態」非「實拍量測」的列：不可量測的列沒有等級，示範模式的列不是實拍量測。</td></tr>`;
   const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1">${head}${cols}${body}${legal}</table></body></html>`;
   const blob = new Blob(["﻿"+html], { type:"application/vnd.ms-excel" });
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
@@ -1231,7 +1509,9 @@ function openLightbox(i) {
   const s = scans[i]; if (!s) return;
   $("lightbox").innerHTML = `<div class="lbInner">
       <div class="lbImg">${imgMarkup(s.img, "contain")}</div>
-      <div class="lbCap">#${s.n} · ${fmtTime(s.ts)} · ${s.stageLabel} · ${s.symLabel} · <b style="color:${GC[s.grade]}">${s.grade}</b> ${s.pass?"通過":"未通過"}<br>${esc(s.data)}</div>
+      <div class="lbCap">#${s.n} · ${fmtTime(s.ts)} · ${s.stageLabel} · ${s.symLabel} · ${s.measurable
+        ? `<b style="color:${GC[s.grade]}">${s.grade}</b> ${s.pass?"通過":"未通過"}${s.simulated?"（示範）":""}`
+        : `<b style="color:#f59e0b">不可量測</b>`}<br>${esc(s.data)}</div>
     </div><div class="lbHint" style="position:absolute;bottom:16px;left:0;right:0">點任意處關閉</div>`;
   $("lightbox").classList.add("open");
 }
