@@ -41,6 +41,11 @@ import {
   quadFrom1DEdges,
   edgeFitRoi,
   EDGE_FIT_ROI_PAD,
+  assessMeasurability,
+  UNMEASURABLE,
+  UNMEASURABLE_LABEL,
+  SIMULATED_LABEL,
+  ROTATED_HINT_MIN_DEG,
 } from "../demo/imgproc.js";
 
 // 產生單色 RGBA 影像
@@ -2143,5 +2148,148 @@ describe("1D 條端擬合的取像範圍(規格 §3.3「取像範圍」段)", ()
     expect(edgeFitRoi([{ x: 10, y: 10 }, { x: 12, y: 10 }], 900, 600)).toBeNull(); // 定位線過短
     expect(edgeFitRoi([{ x: 0, y: 0 }, { x: NaN, y: 5 }], 900, 600)).toBeNull();
     expect(edgeFitRoi([{ x: 0, y: 0 }, { x: 500, y: 0 }], 0, 0)).toBeNull();
+  });
+});
+
+// ── D4 可量測性判定(2026-08-05 稽核裁示)──────────────────────────────────
+// 由來:對抗性稽核 IMG-09 / IMG-03 / IMG-04。判斷邏輯刻意放純函式,
+// 因為 demo/mobile.html 無自動化測試可覆蓋 —— 寫進 HTML 就再也驗不了。
+describe("assessMeasurability — 量不到就不出等級", () => {
+  const ok = { simulated: false, decoded: true, isOneD: true, scanlineCount: 10, lineAngleDeg: 2 };
+
+  it("正常 1D:可量測,無標記無指引", () => {
+    const r = assessMeasurability(ok);
+    expect(r.measurable).toBe(true);
+    expect(r.simulated).toBe(false);
+    expect(r.code).toBe("");
+    expect(r.hint).toBe("");
+  });
+
+  it("正常 2D(不看掃描線):可量測", () => {
+    const r = assessMeasurability({ simulated: false, decoded: true, isOneD: false, scanlineCount: 0 });
+    expect(r.measurable).toBe(true);
+  });
+
+  it("**解碼失敗 → 不可量測**(IMG-09:原本會拿畫面中央 70% 的任意像素出等級)", () => {
+    const r = assessMeasurability({ ...ok, decoded: false });
+    expect(r.measurable).toBe(false);
+    expect(r.code).toBe(UNMEASURABLE.NO_DECODE);
+    expect(r.label).toBe(UNMEASURABLE_LABEL[UNMEASURABLE.NO_DECODE]);
+  });
+
+  it("**1D 掃描線全滅 → 不可量測**(IMG-04:原本落到硬寫 {0.5,0.5,0.5} 判 F)", () => {
+    const r = assessMeasurability({ ...ok, scanlineCount: 0, lineAngleDeg: 3 });
+    expect(r.measurable).toBe(false);
+    expect(r.code).toBe(UNMEASURABLE.NO_SCANLINE);
+    expect(r.hint).toBe(""); // 角度正常 → 不猜成橫躺
+  });
+
+  it("**橫躺(角度超過門檻)才給轉正指引**", () => {
+    for (const a of [ROTATED_HINT_MIN_DEG, 60, 90, -90, -75]) {
+      const r = assessMeasurability({ ...ok, scanlineCount: 0, lineAngleDeg: a });
+      expect(r.measurable).toBe(false);
+      expect(r.hint).toBe("條碼橫躺,請轉正後重拍");
+    }
+  });
+
+  it("角度未達門檻或拿不到 → 不給指引(猜錯會害使用者做無效重拍)", () => {
+    for (const a of [0, 10, 44.9, -44.9, null, undefined, NaN]) {
+      const r = assessMeasurability({ ...ok, scanlineCount: 0, lineAngleDeg: a });
+      expect(r.hint).toBe("");
+    }
+  });
+
+  it("**示範模式:等級照出但必須標記**(IMG-03 指的是沒有標記,不是不該有等級)", () => {
+    const r = assessMeasurability({ ...ok, simulated: true });
+    expect(r.measurable).toBe(true);   // 抽掉等級示範模式就沒有意義
+    expect(r.simulated).toBe(true);    // 但呼叫端必須全程標記且排除通過率統計
+    expect(r.label).toBe(SIMULATED_LABEL);
+  });
+
+  it("**示範模式的解碼失敗照樣不出等級**(示範要忠實反映真實路徑,否則教錯心智模型)", () => {
+    const r = assessMeasurability({ ...ok, simulated: true, decoded: false });
+    expect(r.measurable).toBe(false);           // 不因為是示範就放行
+    expect(r.simulated).toBe(true);             // 但仍標記為模擬
+    expect(r.code).toBe(UNMEASURABLE.NO_DECODE);
+  });
+
+  it("示範模式不看掃描線(沒有真實像素,掃描線數無意義)", () => {
+    const r = assessMeasurability({ ...ok, simulated: true, scanlineCount: 0 });
+    expect(r.measurable).toBe(true);
+    expect(r.simulated).toBe(true);
+  });
+
+  it("退化輸入不 throw", () => {
+    expect(() => assessMeasurability(null as never)).not.toThrow();
+    expect(assessMeasurability(null as never).measurable).toBe(false); // 什麼都沒有 = 沒解碼
+    expect(assessMeasurability({} as never).code).toBe(UNMEASURABLE.NO_DECODE);
+  });
+
+  it("原因碼與說明表一一對應,沒有孤兒", () => {
+    const codes = Object.values(UNMEASURABLE) as string[];
+    expect(Object.keys(UNMEASURABLE_LABEL).sort()).toEqual([...codes].sort());
+    for (const c of codes) expect(String(UNMEASURABLE_LABEL[c]).length).toBeGreaterThan(0);
+  });
+
+  it("說明文字不得暗示合規或斷言符號品質(規格 A3 定位護欄)", () => {
+    const all = [...Object.values(UNMEASURABLE_LABEL), SIMULATED_LABEL].join(" ");
+    for (const banned of ["ISO", "合規", "驗證通過", "認證", "不合格", "印壞"]) {
+      expect(all).not.toContain(banned);
+    }
+  });
+});
+
+// ── D3 光度量測基底:矯正影像 vs 原始 ROI(同圖對照)──────────────────────
+// 由來:對抗性稽核 QUAD-04 / IMG-07 —— 1D 一旦走矯正,光度量測的取樣區域從
+// 「定位點 bbox 外擴(含靜區)」整塊換成「符號四角內的正射重採樣影像」,
+// 而 policies.ts 的允收門檻依規格 §6.1 是凍結的。門檻與量測條件被拆開了。
+// 本組是**特性化測試**:記錄現況差值,不主張哪個對。門檻一律不動。
+describe("光度量測基底對照(矯正 vs 未矯正,同一張合成圖)", () => {
+  // 未矯正側刻意重演 inspectReal 的裁法:定位點 bbox 外擴 25%(最少 24px)
+  function bboxRoi(pts: Pt[], w: number, h: number) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    const mx = Math.max(24, (x1 - x0) * 0.25), my = Math.max(24, (y1 - y0) * 0.25);
+    return { x0: Math.max(0, Math.floor(x0 - mx)), y0: Math.max(0, Math.floor(y0 - my)),
+             x1: Math.min(w, Math.ceil(x1 + mx)), y1: Math.min(h, Math.ceil(y1 + my)) };
+  }
+  const minOf = (a: number[]) => a.reduce((m, v) => (v < m ? v : m), Infinity);
+
+  function pair(deg: number) {
+    const s = shootAndRectify(ITF, deg, "y");
+    expect(s.rect.ok).toBe(true); // 對照前提:這個角度確實走得到矯正
+    const raw = bboxRoi(s.pts as Pt[], s.img.w, s.img.h);
+    const pmRaw = roiPhotometric(s.img.data, s.img.w, raw);
+    const pmRect = roiPhotometric(s.rect.gray, s.rect.w, { x0: 0, y0: 0, x1: s.rect.w, y1: s.rect.h });
+    return { pmRaw, pmRect };
+  }
+
+  it("**矯正後 minEdgeContrast 崩到 0,未矯正側不會**(稽核 QUAD-04 的核心證據)", () => {
+    const { pmRaw, pmRect } = pair(25);
+    const rawMin = minOf(pmRaw.edgeContrasts as number[]);
+    const rectMin = minOf(pmRect.edgeContrasts as number[]);
+    expect(rawMin).toBeGreaterThan(0.3);   // 未矯正:條與空的邊界對比健在
+    expect(rectMin).toBe(0);               // 矯正後:至少一條掃描線量到 0
+    expect(rectMin).toBeLessThan(rawMin);
+  });
+
+  it("成因是正射範圍把 bearer bar 含了進來,不是矯正把影像弄糊", () => {
+    // rLight/rDark(整區平均反射率)兩側仍接近 —— 若是模糊,兩者會一起往中間收
+    const { pmRaw, pmRect } = pair(25);
+    expect(Math.abs(pmRaw.rLight - pmRect.rLight)).toBeLessThan(0.25);
+    expect(Math.abs(pmRaw.rDark - pmRect.rDark)).toBeLessThan(0.25);
+  });
+
+  it("0° 拍攝(無透視)同樣成立 —— 與傾角無關,是取樣範圍的差異", () => {
+    const { pmRaw, pmRect } = pair(0);
+    expect(minOf(pmRect.edgeContrasts as number[]))
+      .toBeLessThan(minOf(pmRaw.edgeContrasts as number[]));
+  });
+
+  it("守門:光度基底一旦改回吃矯正影像,這組會紅", () => {
+    // 這條把「幾何吃正射、光度留原 ROI」從註解變成機制。
+    // mobile.html 的 inspectReal 若把 1D 光度改回 rect.gray,上面三條會同時失敗。
+    const { pmRaw } = pair(25);
+    expect(minOf(pmRaw.edgeContrasts as number[])).toBeGreaterThan(0);
   });
 });

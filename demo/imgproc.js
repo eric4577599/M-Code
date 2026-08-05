@@ -1585,3 +1585,75 @@ export function finderDamageProxy(gray, w, roi, photometric) {
   const sc = Math.max(0.05, photometric.rLight - photometric.rDark);
   return Math.max(0, Math.min(1, (sd / sc) * 0.8));
 }
+
+// ── 可量測性判定(規格 §3.4 · 2026-08-05 裁示 D4)──────────────────────────
+// 由來:對抗性稽核 IMG-09 / IMG-03 / IMG-04 —— 解碼失敗時仍以「畫面中央 70%」的任意
+// 像素產出等級與「通過/未通過」;1D 橫躺時掃描線全滅、落到硬寫的 {0.5,0.5,0.5} 最差值
+// 判 F;無相機時情境模擬值走完整條結果頁 / 清單 / PDF 且無任何文字標記。
+// 三者的共通點是「量到的不是符號本體,卻照樣輸出一個看起來正常的等級」。
+//
+// 判斷邏輯放這裡而非 mobile.html:demo/*.html 無自動化測試可覆蓋,一寫進 HTML 就再也
+// 驗不了(handoff.md 的既有紀律)。本檔只做判定,呈現與匯出由呼叫端負責。
+
+/** 不可量測的原因碼。 */
+export const UNMEASURABLE = Object.freeze({
+  NO_DECODE: "no-decode",
+  NO_SCANLINE: "no-scanline",
+});
+
+/**
+ * 原因碼 → 使用者可見說明。結果頁 / 清單 / PDF 一律照這張表顯示,不另外造詞。
+ * 措辭刻意只描述「量不到」這件事實,不暗示符號本身的品質好壞 ——
+ * 量不到不等於印壞了(規格 A3 定位護欄:本工具只出相對代理值)。
+ */
+export const UNMEASURABLE_LABEL = Object.freeze({
+  "no-decode": "不可量測 — 影像中找不到可解碼的符號",
+  "no-scanline": "不可量測 — 掃描線全數不可用,量到的不是符號本體",
+});
+
+/** 示範模式(無相機)的標記文字。等級照出,但全程標記且不計入通過率統計。 */
+export const SIMULATED_LABEL = "示範模式 — 情境模擬值,非實拍量測";
+
+/**
+ * 判定「條碼橫躺」的定位線角度門檻(度)。1D 的量測沿影像水平列掃描,符號一旦轉到
+ * 接近垂直就一條掃描線都取不到。45° 是兩個方位的分界,不是品質門檻 ——
+ * 它只決定「要不要提示使用者轉正」,不參與任何分級或允收判定。
+ */
+export const ROTATED_HINT_MIN_DEG = 45;
+
+/**
+ * 可量測性判定(純函式)。輸入:
+ *   - simulated:本次是否為無相機的情境模擬
+ *   - decoded:是否解碼成功
+ *   - isOneD:是否為 1D 符號別
+ *   - scanlineCount:roi1DGeometry 實際取得的可用掃描線數(1D 才有意義)
+ *   - lineAngleDeg:定位線相對水平的角度(lineAngleDeg 的輸出,可為 null)
+ * 輸出:{ measurable, simulated, code, label, hint }
+ *   - measurable 為 false 時呼叫端**不得輸出等級與通過/未通過**,改顯示 label。
+ *   - simulated 為 true 時等級照出,但必須全程標記且排除於通過率統計之外
+ *     (示範模式的用途就是展示結果頁,抽掉等級這個模式就沒有意義了;
+ *      稽核 IMG-03 指的是「沒有標記」,不是「不該有等級」)。
+ *   - hint 是可選的操作指引(目前只有橫躺轉正),沒有就是空字串。
+ */
+export function assessMeasurability(input) {
+  const o = input || {};
+  const simulated = !!o.simulated;
+  // 模擬是**獨立的一軸**,不short-circuit 解碼判定:示範模式若也照樣對解碼失敗出等級,
+  // 教給使用者的心智模型正是稽核 IMG-09 要拔掉的那一個。示範模式要忠實反映真實路徑。
+  if (!o.decoded) {
+    return { measurable: false, simulated, code: UNMEASURABLE.NO_DECODE,
+      label: UNMEASURABLE_LABEL[UNMEASURABLE.NO_DECODE], hint: "" };
+  }
+  if (simulated) return { measurable: true, simulated: true, code: "", label: SIMULATED_LABEL, hint: "" };
+  if (o.isOneD && !(o.scanlineCount > 0)) {
+    // 解碼成功卻一條掃描線都取不到,最常見的成因是符號橫躺(量測沿水平列掃描)。
+    // 角度拿得到且超過門檻才給指引,拿不到就不猜 —— 猜錯會把使用者推去做無效的重拍。
+    const a = typeof o.lineAngleDeg === "number" && Number.isFinite(o.lineAngleDeg)
+      ? Math.abs(o.lineAngleDeg) : null;
+    const rotated = a !== null && a >= ROTATED_HINT_MIN_DEG;
+    return { measurable: false, simulated: false, code: UNMEASURABLE.NO_SCANLINE,
+      label: UNMEASURABLE_LABEL[UNMEASURABLE.NO_SCANLINE],
+      hint: rotated ? "條碼橫躺,請轉正後重拍" : "" };
+  }
+  return { measurable: true, simulated: false, code: "", label: "", hint: "" };
+}
