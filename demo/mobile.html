@@ -530,6 +530,10 @@ async function inspect() {
       setCamStatus("影像分析失敗，請重試", "warn");
     }
   } finally {
+    // 先等 L2 的降壓收尾(見 captureViaConstraints 的 finally)才放掉 inspecting ——
+    // 保護區間與改動前一致,差別只在這段等待已與影像分析並行跑完,通常等於零。
+    // 任何路徑(取幀失敗、分析丟例外)都會走到這裡,不會漏等。
+    if (pendingDownscale) { try { await pendingDownscale; } catch (e) {} pendingDownscale = null; }
     inspecting = false;
     // 收尾 recompute 之前必須先還原幾何項:此刻 state.gate.picket / tilt / pxm 已被
     // inspectReal 寫成「那一張照片」的真實幾何值,而拍攝頁燈號的語意是**即時預覽量測**。
@@ -1003,6 +1007,10 @@ const stageLabelOf = (v) => (STAGES.find(([k])=>k===v)||[,v])[1];
 let camVideo = null;
 let camTrack = null;        // 目前預覽串流的 video track(能力偵測 / 升壓 / 回讀 settings 用)
 let camImageCapture = null; // ImageCapture 實例;不支援(iOS Safari)時維持 null
+// L2 取幀後「把預覽降回 720p 並等它真的降回」的未完成 promise(見 captureViaConstraints
+// 的 finally)。它不在取幀的關鍵路徑上,但必須在清除 inspecting 之前等完 ——
+// 由 inspect() 的 finally 負責,好讓影像分析與降壓並行、使用者早 300ms 看到結果。
+let pendingDownscale = null;
 let shotResolution = null;  // pickBestResolution 的結果 { width, height, source, tier };偵測失敗為 null
 let trackResolution = null; // 同上但只看 track 能力表(第二層升壓專用,見 captureViaConstraints)
 let lastShotInfo = null;    // 最近一次快門的請求值 / getSettings 實拿值 / 分析影像寬(誠實回報用)
@@ -1216,6 +1224,7 @@ function stopCamera() {
   }
   // 一併清掉快門解析度相關狀態,避免下次開相機沿用上一台裝置/串流的能力表
   camTrack = null; camImageCapture = null; shotResolution = null; trackResolution = null; lastShotInfo = null;
+  pendingDownscale = null; // 那條 track 已 stop,未完成的降壓對新串流沒有意義,不可跨串流殘留
   camFault = null; // 故障旗標屬於那條串流,不可跨串流殘留(否則重開相機後快門永遠鎖死)
   const fr = $("frame"); if (fr) fr.classList.remove("live");
   setCamStatus("", "");
@@ -1301,11 +1310,17 @@ function waitForVideoWidth(minW, baseW, timeoutMs) {
 }
 // 升壓協商完成後的沉澱幀數。applyConstraints 換解析度等於換相機模式,自動曝光與自動
 // 對焦會重新收斂,**第一幀通常偏暗且未合焦** —— waitForVideoWidth 一到目標寬就放行,
-// 抓到的正是那一幀。這是「延遲導致拍照有問題」的第二個成因(第一個是判定與分析不同幀)。
-// 3 幀是折衷:等太久會拉長使用者必須維持不動的時間(反而增加位移),等太短擋不掉過渡幀。
-// **暫定值,要靠規格 §5.2 的實機資料校準**;就算等不夠,F1 的「閘門量在被分析影像上」
-// 也會把糊掉的那張抓出來告警,不會靜默出等級。
-const SETTLE_FRAMES = 3;
+// 抓到的正是那一幀。
+//
+// 2026-08-06 由 3 幀下修為 1 幀(Eric 現場判斷,直接推翻本函式原本的折衷):
+//   **等待本身就是手震窗口** —— 手持拍攝下,多等的每一幀都在累積位移,而位移造成的
+//   動態模糊是連續且必然的,AE/AF 未收斂只是一次性的過渡。拿「一定會發生的手震」去換
+//   「可能發生的過渡幀」是賠本的,方向錯了。
+//   1 幀(≈33ms @30fps)保留「不抓模式切換當下那一幀」這個最低限度的保護,成本可忽略。
+//   逾時 60ms:約兩個視訊幀,逾時就放行,不讓它變成新的延遲來源。
+//   底氣來自 F1 —— 閘門已改量在被分析的影像上,真的抓到爛幀會被具名告警,不會靜默出等級。
+const SETTLE_FRAMES = 1;
+const SETTLE_TIMEOUT_MS = 60;
 // 等 n 個視訊幀過去。輸入:幀數、逾時毫秒;輸出:Promise。
 // 優先用 requestVideoFrameCallback(數的是真正的視訊幀;rAF 數的是繪製幀,60Hz 下
 // 兩個 rAF 才約等於一個 30fps 的視訊幀,拿 rAF 當幀數會少等一半)。
@@ -1453,9 +1468,9 @@ async function captureViaConstraints() {
     // 等待目標取協商後的實拿寬(getSettings),不是請求值 —— ideal 常給不到請求值,
     // 拿請求值當目標會每次都白等滿 500ms 才逾時放行
     await waitForVideoWidth(trackWidth(), baseW, 500);
-    // 再讓 AE/AF 沉澱幾幀才取(見 SETTLE_FRAMES):上一行放行的那一刻是新解析度的
-    // **第一幀**,也正是曝光與對焦重新收斂中的那一幀。逾時給 200ms,不讓它變成新的延遲來源。
-    await waitVideoFrames(SETTLE_FRAMES, 200);
+    // 跳過模式切換當下那一幀再取(見 SETTLE_FRAMES):上一行放行的那一刻是新解析度的
+    // **第一幀**,也正是曝光與對焦重新收斂中的那一幀。
+    await waitVideoFrames(SETTLE_FRAMES, SETTLE_TIMEOUT_MS);
     const v = camVideo;
     if (!(v && v.videoWidth)) return null;
     // settings 在 finally 降回 720p 之前先讀(return 的運算式先算完才跑 finally);
@@ -1470,18 +1485,25 @@ async function captureViaConstraints() {
     // 降壓側要跟升壓側對稱地等:applyConstraints 的 resolve **不等於** video 真的協商回
     // 720p(升壓那一半正是因為這件事才需要 waitForVideoWidth)。少了這段,inspecting 會在
     // 串流還在過渡時就被清掉,下一個 measureFrame tick 有機會量到過渡幀。
-    // 這裡的 await 寫在 async 函式的 finally 內,故 capturePhoto → inspect 都會等它完成,
-    // inspecting 的清除自然落在降壓之後。
     // minW 傳 0 是刻意的:降壓是「變小」,不能用 videoWidth >= minW 判定,改走
     // waitForVideoWidth 的「相對 baseW 有變化就放行」分支,baseW 取降壓前的實拿寬。
-    // 逾時取 300ms(比升壓的 500ms 短):降回預設預覽模式通常比協商到高解析度快,
-    // 而且就算逾時放行,最壞也只是回到沒有這段等待時的行為。
+    // 逾時取 300ms(比升壓的 500ms 短):降回預設預覽模式通常比協商到高解析度快。
+    //
+    // 2026-08-06 移出關鍵路徑(Eric 反映快門整體過慢):
+    //   **這段等待發生在照片已經取到之後,對「拍到哪一幀」毫無影響** —— 它唯一的作用是
+    //   讓 inspecting 涵蓋整段串流過渡。原本寫成 `await`,於是它連帶把 capturePhoto →
+    //   inspectReal → 結果頁整條路都往後推 300ms,純粹是使用者多等、沒有換到任何品質。
+    //   改成把 promise 存起來不在此 await,交給 inspect() 的 finally 在**清除 inspecting
+    //   之前**等它 —— 保護區間一模一樣,但影像分析(ZXing + ROI + 計量)與降壓變成並行,
+    //   使用者看到結果的時間提前約 300ms。
     const wBefore = camVideo ? camVideo.videoWidth : 0;
-    try {
-      await t.applyConstraints({ width:{ ideal:PREVIEW_W }, height:{ ideal:PREVIEW_H } });
-      // 本來就沒升上去(升壓失敗或裝置只給得到 720p)就不必等,否則每次都白等滿逾時
-      if (wBefore > PREVIEW_W) await waitForVideoWidth(0, wBefore, 300);
-    } catch (e) {}
+    pendingDownscale = (async () => {
+      try {
+        await t.applyConstraints({ width:{ ideal:PREVIEW_W }, height:{ ideal:PREVIEW_H } });
+        // 本來就沒升上去(升壓失敗或裝置只給得到 720p)就不必等,否則每次都白等滿逾時
+        if (wBefore > PREVIEW_W) await waitForVideoWidth(0, wBefore, 300);
+      } catch (e) {}
+    })();
   }
 }
 // 第三層(保底,等同改版前行為除了不再砍到 1024):直接對預覽 video drawImage。
