@@ -1162,6 +1162,10 @@ let camFault = null;
 // 預覽解析度:規格 §3.1「預覽與拍攝分離」。預覽固定 720p —— 串流拉到 4K 會掉幀、
 // 發燙、耗電,而即時迴圈本來就降到 320px,拉高零收益;高解析度只在快門瞬間取。
 const PREVIEW_W = 1280, PREVIEW_H = 720;
+// 開相機的逾時(毫秒)。getUserMedia 在「相機被其他分頁佔用」時可能永遠不回應
+// (iOS Safari 同時只給一個分頁用相機),而它自己沒有 timeout 選項 —— 只能賽跑。
+// 8 秒是折衷:比正常授權流程(含使用者按下「允許」)寬鬆,又不至於讓人乾等。
+const CAMERA_OPEN_TIMEOUT_MS = 8000;
 function setCamStatus(txt, cls) { const el=$("camStatus"); if(el){ el.textContent=txt; el.className="camStatus "+(cls||""); } }
 
 // 快門解析度能力偵測(規格 §3.1 第 2 段):串流開啟後才讀得到完整能力表。
@@ -1224,8 +1228,17 @@ async function initCamera(userGesture) {
   try {
     setCamStatus("開啟相機中…", "");
     // ideal(非 exact)避免 OverconstrainedError:裝置給不到 720p 時仍照常開串流
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video:{ facingMode:{ ideal:"environment" }, width:{ ideal:PREVIEW_W }, height:{ ideal:PREVIEW_H } }, audio:false });
+    // 2026-08-06 實機回報「第二次拍照相機無影像」,畫面永遠停在「開啟相機中…」。
+    //   成因:**iOS Safari 同時只給一個分頁用相機**。先前的分頁還持有串流時,
+    //   新分頁的 getUserMedia **既不 resolve 也不 reject** —— 沒有錯誤、沒有超時,
+    //   使用者看到的就是一句「開啟相機中…」掛在那裡,而且無從得知該怎麼辦。
+    //   getUserMedia 本身沒有 timeout 選項,只能自己賽跑。
+    const stream = await Promise.race([
+      navigator.mediaDevices.getUserMedia({
+        video:{ facingMode:{ ideal:"environment" }, width:{ ideal:PREVIEW_W }, height:{ ideal:PREVIEW_H } }, audio:false }),
+      new Promise((_, rej) => setTimeout(
+        () => rej(new Error("getUserMedia-timeout")), CAMERA_OPEN_TIMEOUT_MS)),
+    ]);
     const v = $("cam"); v.srcObject = stream; await v.play().catch(()=>{});
     $("frame").classList.add("live"); camVideo = v;
     camTrack = stream.getVideoTracks()[0] || null;
@@ -1244,7 +1257,12 @@ async function initCamera(userGesture) {
     const map = { NotAllowedError:"相機權限被拒 — 請到 iPhone 設定→Safari→相機 允許，或點網址列 AA→網站設定；Android Chrome：網址列鎖頭→權限→相機",
       NotFoundError:"找不到相機", NotReadableError:"相機被其他 App 佔用（關掉相機/其他相機頁）",
       SecurityError:"安全性限制（需 HTTPS）", OverconstrainedError:"無符合的後鏡頭", AbortError:"開啟中斷" };
-    setCamStatus((map[e.name] || ("相機開啟失敗："+e.name)) + (userGesture?"":" ·點畫面重試"), "warn");
+    // 逾時是自己丟的 Error(見上方 Promise.race),沒有 e.name 可對照,且它的成因很具體 ——
+    // 訊息要直接講出**該做什麼**,不能只說「失敗」。這是實機卡住整晚的那一種。
+    const msg = e && e.message === "getUserMedia-timeout"
+      ? "相機沒有回應（8 秒）— 多半是被其他分頁佔用：iOS 同時只給一個分頁用相機。請關掉其他分頁後點畫面重試"
+      : (map[e.name] || ("相機開啟失敗："+e.name));
+    setCamStatus(msg + (userGesture?"":" ·點畫面重試"), "warn");
   }
 }
 // 串流健康監看(稽核 COMPAT-01)。輸入:video track;輸出:無(改 camFault 並更新畫面)。
@@ -2004,6 +2022,18 @@ initSelectors(); renderHud(); recompute(); updateBadge(); renderList();
 })();
 // 已登入且尚無相機時,點畫面補試開相機(iOS 手勢限制);未登入不啟動相機
 document.addEventListener("click", () => { if (currentTier && !camVideo) initCamera(true); });
+
+// ── 離開頁面就把相機還回去(2026-08-06)──────────────────────────────────
+// 由來:實機「第二次拍照相機無影像」。**iOS Safari 同時只給一個分頁用相機**,
+// 而本頁在被切走 / 關閉時從不釋放串流 —— 於是使用者一開新分頁(或從清單頁再開一次),
+// 舊分頁還握著鏡頭,新分頁的 getUserMedia 就永遠不回應。
+// pagehide 涵蓋關閉、換頁與進 bfcache 三種情形;pageshow 回來時再開。
+// 只在真的離開時放,切到結果頁不會觸發(那是同一頁內的 view 切換)。
+window.addEventListener("pagehide", () => { stopCamera(); });
+window.addEventListener("pageshow", (e) => {
+  // persisted = 從 bfcache 還原(iOS 上「上一頁」很常見)。已登入才重開,未登入不啟動相機。
+  if (currentTier && !camVideo) initCamera(false);
+});
 </script>
 <!-- ── 離線外殼註冊 + 更新提示(2026-08-06)───────────────────────────────
      為什麼要有更新橫幅:這個專案踩過「線上沒更新」的坑(2026-07-21 曾有 26 個 commit
