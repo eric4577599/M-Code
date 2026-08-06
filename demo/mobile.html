@@ -395,6 +395,7 @@ import {
   assessShotFreshness,
   explainGrade,
   chooseCaptureFrame, FRAME_CHOICE,
+  barBandExtent,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -677,6 +678,17 @@ function rectifyRoi(zx, kx, ky, rg, photo) {
 // 真實檢驗:輸入快門照片 canvas;ZXing 單次解碼 + 影像量測算分級參數(C7 proxy 實算)
 // 記憶體護欄(規格 §3.1):解碼與 ROI 定位跑「降取樣版(≤1024px 寬)」,
 // 定出的 ROI 座標再依比例放大回全解析度,只對放大後的 ROI 取像素做光度與幾何量測。
+// 取降取樣版(small)的整張灰階。輸入:無(用閉包外的 small);輸出:灰階陣列或 null。
+// 只有 1D 的條帶偵測需要它,故做成延遲取用 —— small 最大 1024 寬,整張 getImageData
+// 的成本遠低於全解析度,且本來就會為了解碼而讀過一次。
+function grayOfCanvas(c) {
+  try {
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    const img = ctx.getImageData(0, 0, c.width, c.height);
+    return toGray(img.data, c.width, c.height);
+  } catch (e) { return null; }
+}
+
 function inspectReal(photo) {
   // 降取樣版:照片本來就 ≤1024 寬時直接沿用,不多做一張 canvas
   const small = photo.width > 1024 ? drawToCanvas(photo, photo.width, photo.height, 1024) : photo;
@@ -692,6 +704,8 @@ function inspectReal(photo) {
   // 來源取 small 不取 photo:measureQuality 反正要縮到 320,從 4032 直縮多做一次大圖
   // 重採樣沒有意義;small 已是 ≤1024 的等比縮圖,兩者縮到 320 的結果實務上等價。
   const shotQ = measureQuality(small, small.width, small.height);
+  let _smallGray;
+  const smallGray = () => (_smallGray !== undefined ? _smallGray : (_smallGray = grayOfCanvas(small)));
   // 降取樣版 → 全解析度的座標放大倍率。x/y 分開推導:small 的高度經過 Math.round,
   // 垂直倍率不必然等於水平倍率,只用寬度推導最壞會把 ROI 底部切掉約 2 px。
   const kx = photo.width / w, ky = photo.height / h;
@@ -707,6 +721,21 @@ function inspectReal(photo) {
     const mx = Math.max(24, (x1 - x0) * 0.25), my = Math.max(24, (y1 - y0) * 0.25);
     roiSmall = { x0: Math.max(0, Math.floor(x0 - mx)), y0: Math.max(0, Math.floor(y0 - my)),
             x1: Math.min(w, Math.ceil(x1 + mx)), y1: Math.min(h, Math.ceil(y1 + my)) };
+    // ── 1D 的縱向範圍改成量出來的(規格 §3.10 · 2026-08-06)──────────────────
+    // 1D 的兩個定位點 y 幾乎相同 ⇒ 上面那個 my 恆為常數 24,算出約 48px 的細帶,
+    // 它**與條的實際高度無關**,而且 ZXing 每次掃到不同影像列 ⇒ 每拍一次就換位置,
+    // 飄到條的下緣就掃到人眼可讀字,十條掃描線全滅 → 量測失敗(實機回報的那一種)。
+    // 改由 barBandExtent 沿水平轉換次數量出條的真實上下緣;量不到就維持原本的細帶
+    // (退化路徑不變,不會比改動前差)。
+    if (!is2D(zx.sym)) {
+      const gsmall = smallGray();
+      const band = gsmall ? barBandExtent(gsmall, w, h, (y0 + y1) / 2, x0, x1) : null;
+      if (band) { roiSmall.y0 = band.y0; roiSmall.y1 = band.y1; }
+      if (lastShotInfo) {
+        lastShotInfo.barBand = band
+          ? `${band.y1 - band.y0} 列（實測條高）` : "不可得（沿用固定帶寬）";
+      }
+    }
   } else {
     roiSmall = { x0: Math.floor(w * 0.15), y0: Math.floor(h * 0.15), x1: Math.ceil(w * 0.85), y1: Math.ceil(h * 0.85) };
   }
@@ -1878,6 +1907,7 @@ function shotSummary(shot) {
   // 過去完全沒有量過);後者只在「預覽是好的、照片卻不是」時才出現,是那張照片不可
   // 採信的具名理由 —— 它必須跟著紀錄進 PDF,否則事後翻報告看不出為何當時要重拍。
   if (shot.shotTiming) parts.push("取幀時序 " + esc(shot.shotTiming));
+  if (shot.barBand) parts.push("條帶 " + esc(shot.barBand));
   if (shot.frameFallback) parts.push("⚠ " + esc(shot.frameFallback));
   if (shot.staleShot) parts.push("⚠ " + esc(shot.staleShot));
   return parts.join(" · ");

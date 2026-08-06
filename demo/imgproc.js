@@ -2215,3 +2215,79 @@ export function chooseCaptureFrame(input) {
   }
   return keep;
 }
+
+// ── 1D 條帶縱向範圍偵測(規格 §3.10 · 2026-08-06)──────────────────────────
+// 由來:實機回報「取樣框為什麼會一直變?導致量測失敗」。
+//
+// 病灶:1D 解碼時 ZXing 只回傳**兩個點** —— 它成功解碼的那一條掃描線的左右兩端,
+// 兩點的 y 幾乎相同。於是「定位點 bbox 外擴 25%」算出來的高度趨近於零,
+// 程式只好用 `Math.max(24, ~0)` 硬撐成一條約 48px 的細帶。
+// 那條帶:
+//   ① **與條的實際高度完全無關** —— 它只是一個常數;
+//   ② **每拍一次就換位置** —— ZXing 每次掃到的是不同的影像列;
+//   ③ 飄到條的下緣就會掃到人眼可讀字,十條掃描線全數作廢 → 量測失敗。
+//
+// 解法:不猜也不靠定位點,**直接從影像量出條有多高**。
+// 條碼所在的那些列有一個共同特徵:沿水平方向的明暗轉換次數很多且彼此接近;
+// 一旦離開條的上下緣(進入靜區、人眼可讀字或背景),轉換次數會明顯掉下來。
+// 以定位線那一列為基準往上下走,掉到基準的一定比例以下就停 —— 那就是條的邊界。
+//
+// 為什麼容許範圍寬一點也沒關係:roi1DMetrology 會逐條掃描線驗證元素數,
+// 對不上的那條直接作廢。**多含幾列雜訊只是少幾條可用掃描線,少含則是全滅。**
+// 所以這個偵測寧可略為保守地多含一點,也不要切太緊。
+
+/** 條帶偵測的參數。ratio 是「相對基準列轉換次數」的保留比例,不是品質門檻。 */
+export const BAR_BAND = Object.freeze({
+  keepRatio: 0.5,   // 轉換次數掉到基準的一半以下就視為離開條區
+  minRows: 8,       // 少於這麼多列就當偵測失敗(取樣不足以支撐十條掃描線)
+  padRows: 2,       // 上下各留幾列餘裕,避免正好切在邊界上
+});
+
+/**
+ * 數某一列的明暗轉換次數。輸入:灰階、寬、列索引、水平範圍、門檻;輸出:轉換次數。
+ * 用「狀態轉換」而非乘積變號 —— 取樣值正好等於門檻時後者會漏數(同 subpixelEdges 的教訓)。
+ */
+function rowTransitions(gray, w, y, x0, x1, t) {
+  let n = 0, prev = null;
+  for (let x = x0; x < x1; x++) {
+    const dark = gray[y * w + x] < t;
+    if (prev !== null && dark !== prev) n++;
+    prev = dark;
+  }
+  return n;
+}
+
+/**
+ * 量出 1D 條帶的縱向範圍(純函式)。輸入:
+ *   - gray / w / h:灰階影像
+ *   - y:基準列(ZXing 定位線所在的影像列)
+ *   - x0 / x1:水平掃描範圍(通常是定位點的左右端)
+ * 輸出:{ y0, y1, rows, refTransitions } 或 null(基準列本身就不像條碼、或列數不足)。
+ * y1 為**開區間**(與 ROI 的慣例一致)。
+ */
+export function barBandExtent(gray, w, h, y, x0, x1) {
+  if (!gray || !(w > 0) || !(h > 0)) return null;
+  const ax0 = Math.max(0, Math.min(w - 1, Math.floor(x0)));
+  const ax1 = Math.max(ax0 + 1, Math.min(w, Math.ceil(x1)));
+  const ay = Math.max(0, Math.min(h - 1, Math.round(y)));
+  if (ax1 - ax0 < 8) return null;
+
+  // 門檻取整張影像的 Otsu:逐列各自求門檻會讓近乎單色的列(靜區、背景)算出無意義的
+  // 門檻並數出一堆假轉換,反而把邊界往外推。
+  const t = otsu(gray);
+  const ref = rowTransitions(gray, w, ay, ax0, ax1, t);
+  // 基準列本身轉換次數太少 → 那條線根本不在條碼上,不要硬給範圍
+  if (ref < 4) return null;
+  const floor = ref * BAR_BAND.keepRatio;
+
+  let up = ay;
+  while (up - 1 >= 0 && rowTransitions(gray, w, up - 1, ax0, ax1, t) >= floor) up--;
+  let dn = ay;
+  while (dn + 1 < h && rowTransitions(gray, w, dn + 1, ax0, ax1, t) >= floor) dn++;
+
+  const y0 = Math.max(0, up - BAR_BAND.padRows);
+  const y1 = Math.min(h, dn + 1 + BAR_BAND.padRows);
+  const rows = y1 - y0;
+  if (rows < BAR_BAND.minRows) return null;
+  return { y0, y1, rows, refTransitions: ref };
+}

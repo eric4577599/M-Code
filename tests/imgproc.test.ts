@@ -59,6 +59,8 @@ import {
   assessShotFreshness,
   explainGrade,
   chooseCaptureFrame,
+  barBandExtent,
+  BAR_BAND,
   FRAME_CHOICE,
   FRAME_FALLBACK_REASON,
   PARAM_CAUSE,
@@ -2843,5 +2845,65 @@ describe("chooseCaptureFrame — 取幀候選挑選", () => {
       expect(v).toContain("預覽");
       for (const bad of ["ISO", "合規", "不合格", "印壞"]) expect(v).not.toContain(bad);
     }
+  });
+});
+
+// ── 1D 條帶縱向範圍(規格 §3.10)──────────────────────────────────────────
+// 由來:實機「取樣框為什麼會一直變?導致量測失敗」。1D 的 ZXing 只給兩個 y 幾乎相同的
+// 點,舊做法用常數 48px 硬撐出一條細帶 —— 與條的實際高度無關,且每拍一次就換位置。
+describe("barBandExtent — 量出 1D 條帶的縱向範圍", () => {
+  // 造一張:上方 20 列白、中間 60 列條碼、下方 20 列白(模擬靜區與人眼可讀字區)
+  const W = 200, H = 100, BAR_TOP = 20, BAR_BOT = 80;
+  const img = grayFrom(W, H, (x, y) => {
+    if (y < BAR_TOP || y >= BAR_BOT) return 230;          // 非條區:近乎單色
+    return Math.floor(x / 4) % 2 === 0 ? 30 : 230;        // 條區:4px 條空交錯
+  });
+
+  it("從條區中央出發,量到的範圍涵蓋整條而不外溢", () => {
+    const r = barBandExtent(img, W, H, 50, 10, W - 10)!;
+    expect(r).not.toBe(null);
+    // 允許 padRows 的餘裕,但不可離真實邊界太遠
+    expect(r.y0).toBeGreaterThanOrEqual(BAR_TOP - BAR_BAND.padRows - 1);
+    expect(r.y0).toBeLessThanOrEqual(BAR_TOP);
+    expect(r.y1).toBeGreaterThanOrEqual(BAR_BOT);
+    expect(r.y1).toBeLessThanOrEqual(BAR_BOT + BAR_BAND.padRows + 1);
+  });
+
+  it("**從條區的哪一列出發都得到同一個範圍**（這就是要修的『框會一直變』）", () => {
+    const a = barBandExtent(img, W, H, 25, 10, W - 10)!;
+    const b = barBandExtent(img, W, H, 50, 10, W - 10)!;
+    const c = barBandExtent(img, W, H, 75, 10, W - 10)!;
+    expect(a.y0).toBe(b.y0); expect(a.y1).toBe(b.y1);
+    expect(c.y0).toBe(b.y0); expect(c.y1).toBe(b.y1);
+  });
+
+  it("量到的高度遠大於舊做法硬撐的 48px 常數(以本圖為例)", () => {
+    const r = barBandExtent(img, W, H, 50, 10, W - 10)!;
+    expect(r.rows).toBeGreaterThan(BAR_BOT - BAR_TOP - 1);
+  });
+
+  it("基準列不在條碼上(靜區)→ 回 null,不硬給範圍", () => {
+    expect(barBandExtent(img, W, H, 5, 10, W - 10)).toBe(null);
+    expect(barBandExtent(img, W, H, 95, 10, W - 10)).toBe(null);
+  });
+
+  it("條帶貼著影像上下緣時夾在畫布內,不外溢", () => {
+    const full = grayFrom(W, H, (x) => (Math.floor(x / 4) % 2 === 0 ? 30 : 230));
+    const r = barBandExtent(full, W, H, 50, 10, W - 10)!;
+    expect(r.y0).toBe(0);
+    expect(r.y1).toBe(H);
+  });
+
+  it("水平範圍太窄 / 退化輸入 → 回 null,不丟例外", () => {
+    expect(barBandExtent(img, W, H, 50, 10, 12)).toBe(null);
+    expect(barBandExtent(null as never, W, H, 50, 0, W)).toBe(null);
+    expect(barBandExtent(img, 0, 0, 50, 0, 10)).toBe(null);
+  });
+
+  it("列數不足門檻時回 null(取樣撐不起十條掃描線就別給)", () => {
+    const thin = grayFrom(W, H, (x, y) =>
+      (y >= 48 && y < 52 ? (Math.floor(x / 4) % 2 === 0 ? 30 : 230) : 230));
+    const r = barBandExtent(thin, W, H, 50, 10, W - 10);
+    if (r) expect(r.rows).toBeGreaterThanOrEqual(BAR_BAND.minRows);
   });
 });
