@@ -90,6 +90,11 @@
   /* 示範模式標記(D5②):等級照出但必須看得出不是實拍 */
   .simTag { width:100%; margin:8px 0 2px; padding:8px 12px; border-radius:10px; text-align:left;
             background:#e0f2fe; border:1px solid #7dd3fc; color:#075985; font-size:12px; font-weight:700; }
+  /* 取幀不新鮮告警(2026-08-06):預覽是好的、照片卻不是 —— 劣化發生在快門延遲窗口內。
+     刻意用比 simTag 更強的橘紅色:等級照樣顯示,但使用者必須先看到「這張不可採信」。 */
+  .staleTag { width:100%; margin:8px 0 2px; padding:9px 12px; border-radius:10px; text-align:left;
+              background:#fff7ed; border:1px solid #fdba74; color:#7c2d12; font-size:12.5px;
+              font-weight:700; line-height:1.55; }
   /* 取樣條件註記(D2):中性敘述,只講取樣差異,不得寫成準確度或合規聲明 */
   .sampNote { width:100%; margin:6px 0 0; padding:8px 11px; border-radius:10px; text-align:left;
               background:#f1f5f9; border:1px solid #e2e8f0; color:#475569; font-size:11.5px; line-height:1.6; }
@@ -243,6 +248,7 @@
       <div class="symBadge" id="symBadge"></div>
       <div class="decode" id="decode"></div>
       <div class="simTag" id="simTag" hidden></div>
+      <div class="staleTag" id="staleTag" hidden></div>
       <div class="unmeas" id="unmeasBox" hidden></div>
       <div class="circle" id="circle"><div class="l" id="letter">–</div><div class="s">參考等級</div></div>
       <div class="legal">相對值・非 ISO 合規證書<br>本工具不出具 ISO 證書，合規驗證請用合規 verifier。</div>
@@ -323,6 +329,7 @@ import {
   ONE_D_SYMBOLOGIES, edgeFitRoi,
   assessMeasurability, SIMULATED_LABEL,
   roi1DMetrology,
+  assessShotFreshness,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -463,7 +470,10 @@ function recompute() {
   // 檢驗中(升壓等待 + 降回 + 最多 4M 像素同步分析,可能超過 1 秒)覆寫成忙碌樣式。
   // 必須寫在這裡而非只在 inspect() 內設一次:即時量測迴圈每 500ms 也會呼叫 recompute(),
   // 否則檢驗途中快門會被重新點亮成「可拍」,使用者以為沒反應而連點。
-  if (inspecting) { sh.className = "shutter"; sh.disabled = true; $("shutterLbl").textContent = "檢驗中…"; }
+  // 「請維持不動」不是客套話:取幀發生在按下之後(L1 takePhoto 的手機快門延遲典型
+  // 200–800ms、L2 重新協商最多 500ms),使用者一按完就移開手機,被分級的就是位移中的
+  // 那一幀。過去只寫「檢驗中…」,沒有任何一處告訴使用者這段時間還在拍。
+  if (inspecting) { sh.className = "shutter"; sh.disabled = true; $("shutterLbl").textContent = "拍攝中 — 請維持不動"; }
   $("gateNote").textContent = armed ? "WARN（黃）仍可拍，數值會標註受楞痕影響。" : "有 FAIL 燈時快門鎖死，確保每次拍攝一致。";
 }
 
@@ -498,6 +508,12 @@ async function inspect() {
     const fault = cameraFaultNow();
     if (fault) { camFault = camFault || fault; setCamStatus("⚠ " + fault, "warn"); return; }
     let photo = null;
+    // 快門延遲實測(2026-08-06):按下到取幀完成之間到底過了多久,過去沒有任何一處量過,
+    // 「似乎有延遲」始終停在猜測。t0 取在取幀之前、複驗之後,量到的就是三層降級本身的成本。
+    // performance.now 不可得的環境退回 Date.now;兩者都不可得就記 null(誠實印「不可得」)。
+    const clock = typeof performance === "object" && performance && performance.now
+      ? () => performance.now() : () => Date.now();
+    const t0 = clock();
     try {
       photo = await capturePhoto();
     } catch (e) {
@@ -505,6 +521,8 @@ async function inspect() {
       photo = null;
     }
     if (!photo) { console.warn("取幀失敗：三層降級都沒取到畫面"); setCamStatus("取幀失敗，請重試", "warn"); return; }
+    // 寫在 recordShot 之後 —— lastShotInfo 由該函式建立,提前寫會被整個蓋掉
+    if (lastShotInfo) lastShotInfo.latencyMs = Math.round(clock() - t0);
     try {
       inspectReal(photo);
     } catch (e) {
@@ -593,6 +611,17 @@ function inspectReal(photo) {
   // 降取樣版:照片本來就 ≤1024 寬時直接沿用,不多做一張 canvas
   const small = photo.width > 1024 ? drawToCanvas(photo, photo.width, photo.height, 1024) : photo;
   const w = small.width, h = small.height;
+  // 快門前最後一次的**預覽**讀數。必須在這裡先抄下來 —— 它是「按快門那一刻使用者看到
+  // 的燈號依據」,是後面判斷「劣化是不是發生在延遲窗口內」的對照組。
+  // measureFrame 在 inspecting 期間停量,故此刻 state.gate 這四項仍是快門前的值。
+  const previewQ = { varLap: state.gate.varLap, glare: state.gate.glare,
+    wb: state.gate.wb, wash: state.gate.wash };
+  // **被分析的這張影像自己的品質讀數**(2026-08-06)。過去八項閘門的光度側從未量過它,
+  // 於是快門延遲期間的任何位移 / 重新對焦都不會被任何一處發現。改量在這裡之後,
+  // 延遲多久都不影響結論正確性 —— 判的就是被分級的那張。
+  // 來源取 small 不取 photo:measureQuality 反正要縮到 320,從 4032 直縮多做一次大圖
+  // 重採樣沒有意義;small 已是 ≤1024 的等比縮圖,兩者縮到 320 的結果實務上等價。
+  const shotQ = measureQuality(small, small.width, small.height);
   // 降取樣版 → 全解析度的座標放大倍率。x/y 分開推導:small 的高度經過 Math.round,
   // 垂直倍率不必然等於水平倍率,只用寬度推導最壞會把 ROI 底部切掉約 2 px。
   const kx = photo.width / w, ky = photo.height / h;
@@ -735,19 +764,41 @@ function inspectReal(photo) {
   //   ② 分級與允收由 grade/acceptance 決定,與閘門是兩套語意,不得互相覆寫。
   // 它純粹是「把已經量到的東西記下來」,讓報告第一次講得出這張照片的實際拍攝品質,
   // 並解掉規格 §1.5 表格那一列已被 finally 還原推翻的敘述。
-  const shotGate = evaluateGate({
-    symbolDetected: !!zx, varLap: state.gate.varLap, glareRatio: state.gate.glare / 100,
-    washboardAmpRatio: state.gate.wash, wbGainDeviation: state.gate.wb / 100,
+  // 2026-08-06 修正:光度四項(對焦 / 眩光 / 楞痕 / 白平衡)過去讀的是 state.gate,
+  //   而那是**快門前 ≤500ms 的預覽殘值** —— 這一段的原意是「講得出這張照片的拍攝品質」,
+  //   卻從未量過這張照片。快門延遲(L1 takePhoto 200–800ms、L2 重新協商最多 500ms)
+  //   期間的位移與重新對焦因此完全隱形。改吃 shotQ(量在被分析的影像上)。
+  //   幾何三項(印向 / 透視 / 解析度)本來就已是這張照片的實測值,維持不動。
+  // gateOn 讓兩組閘門只在光度四項上有差別,其餘輸入完全相同 —— 對照才乾淨。
+  const gateOn = (q) => evaluateGate({
+    symbolDetected: !!zx, varLap: q.varLap, glareRatio: q.glare / 100,
+    washboardAmpRatio: q.wash, wbGainDeviation: q.wb / 100,
     scaleRefDetected: state.gate.scaleRef,
     picketAngleDeg: state.gate.picket, perspectiveTiltDeg: state.gate.tilt,
     gsdMmPerPx: null, pxPerModule: state.gate.pxm,
     fluteType: (profileOf() || {}).fluteType });
+  const shotGate = gateOn(shotQ);
+  const previewGate = gateOn(previewQ);
+  const okOf = (g, key) => {
+    const c = g.report.checks.find((x) => x.key === key);
+    return c ? c.status === "OK" : null;
+  };
+  // 取幀新鮮度:判斷邏輯在 imgproc.js(demo/*.html 無自動化測試可覆蓋)。
+  // **不改分級、不動門檻**(沿裁示 D5 的先例):它只是把「預覽是好的、照片卻不是」
+  // 這個組合講出來,讓使用者知道該重拍,而不是拿一張延遲期間糊掉的照片去讀等級。
+  const fresh = assessShotFreshness({
+    previewFocusOk: okOf(previewGate, "focus"), shotFocusOk: okOf(shotGate, "focus"),
+    previewGlareOk: okOf(previewGate, "glare"), shotGlareOk: okOf(shotGate, "glare"),
+    previewVarLap: previewQ.varLap, shotVarLap: shotQ.varLap,
+    latencyMs: lastShotInfo ? lastShotInfo.latencyMs : null });
   if (lastShotInfo) {
     // 只留「非 OK」的項:全 OK 時報告不必多一行雜訊,有問題時才具名列出
     const bad = shotGate.report.checks.filter((c) => c.status !== "OK" && c.key !== "scaleRef");
     lastShotInfo.shotGate = bad.length
       ? bad.map((c) => `${CHECK_LABEL[c.key] || c.key} ${c.status}`).join("、")
       : "全部 OK";
+    if (fresh.note) lastShotInfo.shotTiming = fresh.note;
+    if (fresh.stale) lastShotInfo.staleShot = fresh.label;
   }
   // ── 可量測性分流(稽核裁示 D4 · IMG-09 / IMG-04)────────────────────────
   // 判斷由 imgproc.js 的純函式做(demo/*.html 無自動化測試可覆蓋,寫進 HTML 就驗不了)。
@@ -806,6 +857,17 @@ function samplingNote(shot) {
     + "與不同取樣密度下的紀錄**不宜直接互比**；同一台裝置、同一取幀層別的前後比較才有意義。";
 }
 
+// 取幀不新鮮告警(2026-08-06)。輸入:shot 取幀資訊;輸出:無(直接改 DOM)。
+// 結果頁與不可量測頁共用 —— 兩條路徑都可能拿到快門延遲期間劣化的影像。
+// **不隱藏等級**(沿裁示 D5 的先例:閘門與分級是兩套語意,不得互相覆寫),
+// 但把「這張不可採信」放在等級上方,讓使用者先看到它再看到那個字母。
+function renderStaleTag(shot) {
+  const el = $("staleTag"); if (!el) return;
+  const msg = shot && shot.staleShot;
+  el.hidden = !msg;
+  el.textContent = msg ? "⚠ " + msg + " — 請重新拍攝，並在按下快門後維持不動直到結果出現。" : "";
+}
+
 // 不可量測(稽核裁示 D4)。輸入:解碼結果、可量測性判定、縮圖、幾何摘要;輸出:無。
 // **不輸出等級與通過/未通過** —— 量到的不是符號本體時,一個字母對客戶就是誤導。
 // 該筆仍進掃描清單(現場要看得到自己拍過什麼),但標為不可量測、排除於通過率統計之外。
@@ -829,6 +891,7 @@ function presentUnmeasurable(decode, meas, img, geom) {
   for (const id of ["circle", "verdict", "margin", "params", "upsellBox"]) {
     const el = $(id); if (el) el.style.display = "none";
   }
+  renderStaleTag(lastShotInfo);
   const note = samplingNote(lastShotInfo);
   $("sampNote").hidden = !note; $("sampNote").innerHTML = note ? esc(note).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") : "";
   $("resultText").value = [
@@ -837,6 +900,7 @@ function presentUnmeasurable(decode, meas, img, geom) {
     `解碼：${decode.decoded ? "成功 · " + decode.data : "不可讀（綜合崩壞）"}`,
     `判定：${meas.label}`,
     ...(meas.hint ? [`建議：${meas.hint}`] : []),
+    ...(lastShotInfo && lastShotInfo.staleShot ? [`取幀告警：${lastShotInfo.staleShot}`] : []),
     ...(geom ? [`幾何量測：${geom.rectify}；透視傾角 ${geom.tilt.deg === null ? "—" : geom.tilt.deg.toFixed(1) + "°"}（${TILT_SOURCE_LABEL[geom.tilt.source]}）`] : []),
     `※ 本張未產出參考等級,不列入通過率統計。`,
   ].join("\n");
@@ -858,6 +922,7 @@ function presentResult(decode, grade, acceptance, img, geom, meas) {
   const simulated = !!(meas && meas.simulated);
   $("simTag").hidden = !simulated;
   if (simulated) $("simTag").textContent = "⚠ " + SIMULATED_LABEL + "（不列入通過率統計，匯出報告會標記）";
+  renderStaleTag(lastShotInfo);
   const note = samplingNote(lastShotInfo);
   $("sampNote").hidden = !note; $("sampNote").innerHTML = note ? esc(note).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") : "";
   $("decode").innerHTML = decode.decoded
@@ -886,6 +951,8 @@ function presentResult(decode, grade, acceptance, img, geom, meas) {
     `製程環節：${stageLabelOf(state.processStage)}`,
     `符號別：${symLabelR}`,
     ...(simulated ? [`※ ${SIMULATED_LABEL}`] : []),
+    // 取幀告警排在等級之前:這一行成立時,下面那個字母量的是延遲期間糊掉的影像
+    ...(lastShotInfo && lastShotInfo.staleShot ? [`※ 取幀告警：${lastShotInfo.staleShot}`] : []),
     `解碼：${decode.decoded ? "成功 · "+decode.data : "不可讀（綜合崩壞）"}`,
     `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
     ...(geom ? [`幾何量測：${geom.rectify}；透視傾角 ${geom.tilt.deg === null ? "—" : geom.tilt.deg.toFixed(1) + "°"}（${TILT_SOURCE_LABEL[geom.tilt.source]}）`] : []),
@@ -1086,6 +1153,31 @@ const workCanvas = document.createElement("canvas");
 // 由 measureFrame 每 500ms 呼叫,以及 inspect() 的 finally 在收尾 recompute 之前呼叫 ——
 // 兩處共用同一份,避免預設值在兩地各寫一份而漂移。這三個值的「不是安全值」警語見 measureFrame。
 function resetPreviewGeometry() { state.gate.picket = 0; state.gate.tilt = 0; state.gate.pxm = 9; }
+// 對來源(video 或 canvas)量出四項影像品質讀數。輸入:來源、來源寬高;
+// 輸出:{ varLap, glare, wb, wash }(單位與 state.gate 一致:眩光與白平衡為百分比)。
+//
+// **取樣寬固定 320 是量測前提,不是效能取捨。** varianceOfLaplacian 是高頻能量的變異數,
+// 會隨取樣密度系統性變動,而閘門的對焦門檻(policies.ts,依規格 §6.1 凍結)是校在這個
+// 尺度上的。預覽與快門照必須走同一個尺度,兩邊的數字才適用同一組門檻、才可互相對照。
+// 這也是為什麼本函式被抽出來共用 —— 兩處各寫一份就會在日後靜默漂開。
+//
+// ⚠ 同尺度不等於完全等價:預覽由 1280 縮到 320,快門照可能由 4032 縮下來,後者的
+//   抗鋸齒平均更重、高頻能量被多吃掉一些,故同一個景的快門照 varLap 會系統性略低於
+//   預覽。判定一律走絕對門檻;兩者的比值只作診斷記錄(見 imgproc.js 的 assessShotFreshness)。
+function measureQuality(src, srcW, srcH) {
+  const w = 320, h = Math.max(1, Math.round((320 * srcH) / srcW));
+  workCanvas.width = w; workCanvas.height = h;
+  const ctx = workCanvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0, w, h);
+  const img = ctx.getImageData(0, 0, w, h);
+  const gray = toGray(img.data, w, h);
+  return {
+    varLap: Math.round(varianceOfLaplacian(gray, w, h)),
+    glare: +(glareRatio(gray) * 100).toFixed(2),         // state 存百分比
+    wb: +(grayWorldWbDeviation(img.data) * 100).toFixed(1), // 灰界近似,百分比
+    wash: +washboardAmpRatio(gray, w, h).toFixed(3),
+  };
+}
 function measureFrame() {
   // 檢驗期間整段停量:切換模式中的畫面不是穩定的量測對象。第二層取幀會 applyConstraints
   // 升壓 → 最多等 500ms 重新協商 → 再降回 720p 並等它真的降回(兩側的等待都是 await,
@@ -1096,16 +1188,7 @@ function measureFrame() {
   // 才自癒)。⚠ 降壓側的等待逾時放行後仍可能殘留過渡幀,只是窗口比沒等時小得多。
   if (inspecting) return;
   const v = camVideo; if (!v || !v.videoWidth) return;
-  const w = 320, h = Math.round((320 * v.videoHeight) / v.videoWidth);
-  workCanvas.width = w; workCanvas.height = h;
-  const ctx = workCanvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(v, 0, 0, w, h);
-  const img = ctx.getImageData(0, 0, w, h);
-  const gray = toGray(img.data, w, h);
-  state.gate.varLap = Math.round(varianceOfLaplacian(gray, w, h));
-  state.gate.glare = +(glareRatio(gray) * 100).toFixed(2);        // state 存百分比
-  state.gate.wb = +(grayWorldWbDeviation(img.data) * 100).toFixed(1); // 灰界近似,百分比
-  state.gate.wash = +washboardAmpRatio(gray, w, h).toFixed(3);
+  Object.assign(state.gate, measureQuality(v, v.videoWidth, v.videoHeight));
   // 幾何檢查(印向/透視/解析度)需解碼定位點才算得出,即時預覽不解碼 →
   // 還原為安全放行值,避免「上一張拍攝殘留的幾何值」把下一張預覽快門鎖死。
   // 真正的幾何值會在按快門後由 inspectReal 對該張照片重算並存入結果。
@@ -1214,6 +1297,38 @@ function waitForVideoWidth(minW, baseW, timeoutMs) {
       try { requestAnimationFrame(poll); } catch (e) { finish(); }
     };
     try { requestAnimationFrame(poll); } catch (e) { finish(); }
+  });
+}
+// 升壓協商完成後的沉澱幀數。applyConstraints 換解析度等於換相機模式,自動曝光與自動
+// 對焦會重新收斂,**第一幀通常偏暗且未合焦** —— waitForVideoWidth 一到目標寬就放行,
+// 抓到的正是那一幀。這是「延遲導致拍照有問題」的第二個成因(第一個是判定與分析不同幀)。
+// 3 幀是折衷:等太久會拉長使用者必須維持不動的時間(反而增加位移),等太短擋不掉過渡幀。
+// **暫定值,要靠規格 §5.2 的實機資料校準**;就算等不夠,F1 的「閘門量在被分析影像上」
+// 也會把糊掉的那張抓出來告警,不會靜默出等級。
+const SETTLE_FRAMES = 3;
+// 等 n 個視訊幀過去。輸入:幀數、逾時毫秒;輸出:Promise。
+// 優先用 requestVideoFrameCallback(數的是真正的視訊幀;rAF 數的是繪製幀,60Hz 下
+// 兩個 rAF 才約等於一個 30fps 的視訊幀,拿 rAF 當幀數會少等一半)。
+// 逾時一定放行,絕不卡住快門 —— 分頁被切到背景時兩種 callback 都可能完全不觸發。
+function waitVideoFrames(n, timeoutMs) {
+  return new Promise((resolve) => {
+    const v = camVideo;
+    if (!v || n <= 0) { resolve(); return; }
+    let done = false, left = n;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    setTimeout(finish, timeoutMs);
+    const tick = () => {
+      if (done) return;
+      if (--left <= 0) { finish(); return; }
+      step();
+    };
+    const step = () => {
+      try {
+        if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick);
+        else requestAnimationFrame(tick);
+      } catch (e) { finish(); }
+    };
+    step();
   });
 }
 // 讀取 track 目前協商到的實際串流寬度。輸入:無;輸出:寬度數字,不可得時 0
@@ -1338,6 +1453,9 @@ async function captureViaConstraints() {
     // 等待目標取協商後的實拿寬(getSettings),不是請求值 —— ideal 常給不到請求值,
     // 拿請求值當目標會每次都白等滿 500ms 才逾時放行
     await waitForVideoWidth(trackWidth(), baseW, 500);
+    // 再讓 AE/AF 沉澱幾幀才取(見 SETTLE_FRAMES):上一行放行的那一刻是新解析度的
+    // **第一幀**,也正是曝光與對焦重新收斂中的那一幀。逾時給 200ms,不讓它變成新的延遲來源。
+    await waitVideoFrames(SETTLE_FRAMES, 200);
     const v = camVideo;
     if (!(v && v.videoWidth)) return null;
     // settings 在 finally 降回 720p 之前先讀(return 的運算式先算完才跑 finally);
@@ -1459,6 +1577,11 @@ function shotSummary(shot) {
   if (typeof shot.bwrModules === "number") parts.push("BWR " + esc(shot.bwrModules) + " 模組");
   if (shot.shotGate) parts.push("本張閘門 " + esc(shot.shotGate));
   if (typeof shot.wb === "number") parts.push("白平衡Δ(預覽) " + esc(shot.wb) + "%");
+  // 2026-08-06 新增:快門延遲與取幀新鮮度。前者是實測毫秒數(規格 §5.2 實機驗收要記,
+  // 過去完全沒有量過);後者只在「預覽是好的、照片卻不是」時才出現,是那張照片不可
+  // 採信的具名理由 —— 它必須跟著紀錄進 PDF,否則事後翻報告看不出為何當時要重拍。
+  if (shot.shotTiming) parts.push("取幀時序 " + esc(shot.shotTiming));
+  if (shot.staleShot) parts.push("⚠ " + esc(shot.staleShot));
   return parts.join(" · ");
 }
 function exportPdf() {

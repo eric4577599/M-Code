@@ -1984,3 +1984,86 @@ export function assessMeasurability(input) {
   }
   return { measurable: true, simulated: false, code: "", label: "", hint: "" };
 }
+
+// ── 快門延遲下的取幀誠實性(規格 §3.7 · 2026-08-06)──────────────────────────
+// 由來:實機回報「拍照與取像有延遲,導致拍照有問題、無法判斷品質」。追下去是兩件事:
+//   ① 燈號量的是快門**前** ≤500ms 的預覽幀(measureFrame 每 500ms 一跳,且按下快門後
+//      整段停量),被分級的卻是快門**後**取到的照片(L1 takePhoto 的手機快門延遲典型
+//      200–800ms、L2 applyConstraints 最多等 500ms 重新協商)。最壞情況兩張影像相隔
+//      約 1.3 秒,手持位移與相機重新對焦都發生在這個窗口裡。
+//   ② 「本張閘門」(裁示 D5③)本意是記錄這張照片的實際拍攝品質,但它讀的是
+//      state.gate 的預覽殘值 —— 對焦 / 眩光 / 楞痕三項**從未量過被分析的那張影像**。
+//      報告印「本張閘門 全部 OK」時,那三欄講的是另一張影像。
+//
+// 修法的核心不是「把延遲消掉」(消不掉:takePhoto 的延遲在瀏覽器與韌體裡),而是
+// **把判定改成量在被分析的那張影像上** —— 延遲多久都不影響結論的正確性。本函式只負責
+// 「預覽過了、照片沒過」這個組合的判讀,判定本身仍走既有的已校準門檻。
+//
+// ⚠ 刻意不做的事:不拿「照片 varLap ÷ 預覽 varLap」的比值當判準。兩者雖都取樣到
+//   320px 寬,來源尺度不同(預覽 1280 縮下來、照片可能 4032 縮下來),後者抗鋸齒平均
+//   更重、高頻能量被多吃掉一些,比值本身帶著系統性偏差。未經實拍校準就拿它當門檻會
+//   造成偽陽性。比值仍算出來並記錄,但**只作診斷數字**,不參與任何判定。
+
+/** 取幀不新鮮的原因碼。 */
+export const SHOT_FRESHNESS = Object.freeze({
+  FOCUS_DROP: "focus-drop",
+  GLARE_JUMP: "glare-jump",
+});
+
+/**
+ * 原因碼 → 使用者可見說明。措辭指向「這張照片」而非符號品質 ——
+ * 延遲期間畫面變動不代表印刷有問題(規格 A3 定位護欄)。
+ */
+export const SHOT_FRESHNESS_LABEL = Object.freeze({
+  "focus-drop": "拍攝當下畫面已變動 — 這張照片的對焦不足,量測值不可採信",
+  "glare-jump": "拍攝當下角度已變動 — 這張照片的眩光超標,量測值不可採信",
+});
+
+/**
+ * 標示「快門偏慢」的毫秒門檻。**純顯示用,不參與任何判定** ——
+ * 它只決定報告要不要在延遲數字旁邊加一句提示,好讓實機驗收看得出哪台機器慢。
+ * 400 是暫定值(手機 takePhoto 的常見範圍上緣),要靠規格 §5.2 的實機資料校準。
+ */
+export const SLOW_SHUTTER_MS = 400;
+
+/**
+ * 取幀新鮮度判定(純函式)。輸入:
+ *   - previewFocusOk / shotFocusOk:對焦項在**預覽**與**被分析照片**上的閘門結果(布林)
+ *   - previewGlareOk / shotGlareOk:眩光項的同上兩組結果
+ *   - previewVarLap / shotVarLap:兩者的對焦讀數(僅供算診斷比值,不參與判定)
+ *   - latencyMs:按下快門到取幀完成的實測毫秒數(拿不到傳 null)
+ * 輸出:{ stale, code, label, focusRatio, latencyMs, slow, note }
+ *   - stale 為 true 表示**預覽當下是好的、照片卻不是**,即劣化發生在延遲窗口內。
+ *     呼叫端應顯示 label 並建議重拍;它不改分級、不動門檻(沿裁示 D5 的先例)。
+ *   - 預覽本來就沒過的情形不算 stale:那是使用者沒對準,與延遲無關,
+ *     而且閘門本來就會鎖住快門,走不到這裡。
+ *   - note 是要印進報告的一行診斷文字,拿不到數字時為空字串。
+ */
+export function assessShotFreshness(input) {
+  const o = input || {};
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const pv = num(o.previewVarLap), sv = num(o.shotVarLap);
+  const latencyMs = num(o.latencyMs);
+  // 比值在預覽讀數為 0 時無意義(除以零),此時不給比值而非給 Infinity
+  const focusRatio = pv !== null && sv !== null && pv > 0 ? sv / pv : null;
+  const slow = latencyMs !== null && latencyMs >= SLOW_SHUTTER_MS;
+
+  let code = "";
+  // 對焦優先於眩光:兩者同時劣化時,對焦是使用者更該先處理的那一個
+  if (o.previewFocusOk === true && o.shotFocusOk === false) code = SHOT_FRESHNESS.FOCUS_DROP;
+  else if (o.previewGlareOk === true && o.shotGlareOk === false) code = SHOT_FRESHNESS.GLARE_JUMP;
+
+  const parts = [];
+  if (latencyMs !== null) parts.push(`快門延遲 ${latencyMs}ms` + (slow ? "(偏慢)" : ""));
+  if (focusRatio !== null) parts.push(`對焦相對預覽 ${Math.round(focusRatio * 100)}%`);
+
+  return {
+    stale: !!code,
+    code,
+    label: code ? SHOT_FRESHNESS_LABEL[code] : "",
+    focusRatio,
+    latencyMs,
+    slow,
+    note: parts.join(" · "),
+  };
+}

@@ -56,6 +56,10 @@ import {
   fitTwoWidth,
   roi1DMetrology,
   GEOMETRY_APERTURE_X,
+  assessShotFreshness,
+  SHOT_FRESHNESS,
+  SHOT_FRESHNESS_LABEL,
+  SLOW_SHUTTER_MS,
 } from "../demo/imgproc.js";
 
 // 產生單色 RGBA 影像
@@ -2567,5 +2571,117 @@ describe("1D 元素計量", () => {
 
   it("孔徑常數以模組數指定(不隨拍攝距離漂移),且與規格一致", () => {
     expect(GEOMETRY_APERTURE_X).toBe(0.5);
+  });
+});
+
+// ── 快門延遲下的取幀誠實性(規格 §3.7)────────────────────────────────────
+// 病灶:燈號量的是快門前 ≤500ms 的預覽幀,被分級的是快門後 ≤800ms 取到的照片,
+// 兩者最壞相隔約 1.3 秒;而「本張閘門」讀的又是預覽殘值,從未量過被分析的那張影像。
+// 本組測試鎖住的是判定的**方向性** —— 只有「預覽過了、照片沒過」才算延遲窗口內的劣化。
+describe("assessShotFreshness — 快門延遲下的取幀誠實性", () => {
+  const good = {
+    previewFocusOk: true, shotFocusOk: true,
+    previewGlareOk: true, shotGlareOk: true,
+    previewVarLap: 300, shotVarLap: 280, latencyMs: 120,
+  };
+
+  it("預覽與照片都過 → 新鮮,無告警", () => {
+    const r = assessShotFreshness(good);
+    expect(r.stale).toBe(false);
+    expect(r.code).toBe("");
+    expect(r.label).toBe("");
+  });
+
+  it("**預覽過、照片對焦不過 → stale**(這就是延遲期間位移/重新對焦的指紋)", () => {
+    const r = assessShotFreshness({ ...good, shotFocusOk: false, shotVarLap: 90 });
+    expect(r.stale).toBe(true);
+    expect(r.code).toBe(SHOT_FRESHNESS.FOCUS_DROP);
+    expect(r.label).toBe(SHOT_FRESHNESS_LABEL[SHOT_FRESHNESS.FOCUS_DROP]);
+  });
+
+  it("預覽過、照片眩光不過 → stale(角度在延遲期間變了)", () => {
+    const r = assessShotFreshness({ ...good, shotGlareOk: false });
+    expect(r.stale).toBe(true);
+    expect(r.code).toBe(SHOT_FRESHNESS.GLARE_JUMP);
+  });
+
+  it("對焦與眩光同時劣化 → 只報對焦(使用者該先處理的那一個)", () => {
+    const r = assessShotFreshness({ ...good, shotFocusOk: false, shotGlareOk: false });
+    expect(r.code).toBe(SHOT_FRESHNESS.FOCUS_DROP);
+  });
+
+  it("**預覽本來就沒過 → 不算 stale**:那是沒對準,與延遲無關,不可混為一談", () => {
+    const r = assessShotFreshness({ ...good, previewFocusOk: false, shotFocusOk: false });
+    expect(r.stale).toBe(false);
+    expect(r.code).toBe("");
+  });
+
+  it("照片比預覽好轉(預覽沒過、照片過了)也不算 stale", () => {
+    const r = assessShotFreshness({ ...good, previewFocusOk: false, shotFocusOk: true });
+    expect(r.stale).toBe(false);
+  });
+
+  it("閘門結果不可得(null)時不判 stale —— 拿不到就不猜", () => {
+    const r = assessShotFreshness({ ...good, previewFocusOk: null, shotFocusOk: null,
+      previewGlareOk: null, shotGlareOk: null });
+    expect(r.stale).toBe(false);
+  });
+
+  it("對焦比值是**診斷數字**:算出來、進 note,但不參與判定", () => {
+    // 比值掉到 30% 卻兩邊閘門都過 → 仍然不是 stale。
+    // 理由見 imgproc.js:預覽由 1280 縮到 320、照片可能由 4032 縮下來,
+    // 後者抗鋸齒平均更重,比值本身帶系統性偏差,未經實拍校準不可當門檻。
+    const r = assessShotFreshness({ ...good, previewVarLap: 300, shotVarLap: 90 });
+    expect(r.stale).toBe(false);
+    expect(r.focusRatio).toBeCloseTo(0.3, 6);
+    expect(r.note).toContain("對焦相對預覽 30%");
+  });
+
+  it("預覽讀數為 0 時不給比值(不吐 Infinity)", () => {
+    const r = assessShotFreshness({ ...good, previewVarLap: 0, shotVarLap: 50 });
+    expect(r.focusRatio).toBe(null);
+    expect(r.note).not.toContain("對焦相對預覽");
+  });
+
+  it("延遲毫秒數進 note;超過門檻加註「偏慢」", () => {
+    const fast = assessShotFreshness({ ...good, latencyMs: SLOW_SHUTTER_MS - 1 });
+    expect(fast.slow).toBe(false);
+    expect(fast.note).toContain("快門延遲 " + (SLOW_SHUTTER_MS - 1) + "ms");
+    expect(fast.note).not.toContain("偏慢");
+    const slow = assessShotFreshness({ ...good, latencyMs: SLOW_SHUTTER_MS });
+    expect(slow.slow).toBe(true);
+    expect(slow.note).toContain("偏慢");
+  });
+
+  it("**快門偏慢本身不是 stale**:慢不等於拍壞,它只是要被記下來的診斷數字", () => {
+    const r = assessShotFreshness({ ...good, latencyMs: 5000 });
+    expect(r.slow).toBe(true);
+    expect(r.stale).toBe(false);
+  });
+
+  it("延遲不可得(null)時 note 不編數字", () => {
+    const r = assessShotFreshness({ ...good, latencyMs: null });
+    expect(r.latencyMs).toBe(null);
+    expect(r.slow).toBe(false);
+    expect(r.note).not.toContain("快門延遲");
+  });
+
+  it("退化輸入(undefined / 空物件)不丟例外", () => {
+    for (const input of [undefined, null, {}]) {
+      const r = assessShotFreshness(input as never);
+      expect(r.stale).toBe(false);
+      expect(r.note).toBe("");
+      expect(r.focusRatio).toBe(null);
+    }
+  });
+
+  it("每個原因碼都有對應的使用者可見說明,且不暗示印刷品質", () => {
+    for (const code of Object.values(SHOT_FRESHNESS) as string[]) {
+      const label = SHOT_FRESHNESS_LABEL[code];
+      expect(typeof label).toBe("string");
+      expect(label.length).toBeGreaterThan(0);
+      // 定位護欄(規格 A3):講的是「這張照片」,不得寫成符號本身印壞了
+      expect(label).toContain("這張照片");
+    }
   });
 });
