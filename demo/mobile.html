@@ -28,6 +28,11 @@
 <link rel="modulepreload" href="../dist/engines/measurement.js" />
 <link rel="modulepreload" href="../dist/erp/client.js" />
 <link rel="modulepreload" href="../dist/export/csv.js" />
+<link rel="manifest" href="./manifest.webmanifest" />
+<meta name="theme-color" content="#0b1220" />
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <style>
   :root { --ok:#1f9d55; --warn:#d97706; --fail:#dc2626; --ink:#0f172a; --mut:#94a3b8; --beam:#22d3ee; --hud:#0b1220; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -1789,6 +1794,74 @@ initSelectors(); renderHud(); recompute(); updateBadge(); renderList();
 })();
 // 已登入且尚無相機時,點畫面補試開相機(iOS 手勢限制);未登入不啟動相機
 document.addEventListener("click", () => { if (currentTier && !camVideo) initCamera(true); });
+</script>
+<!-- ── 離線外殼註冊 + 更新提示(2026-08-06)───────────────────────────────
+     為什麼要有更新橫幅:這個專案踩過「線上沒更新」的坑(2026-07-21 曾有 26 個 commit
+     沒上線),多一層快取就多一種同樣的失敗模式。所以刻意**不用**預設的靜默背景更新 ——
+     新版安裝完只待命,由這裡跳出橫幅,使用者按了才切換並重載。
+     檢驗流程本身不需要網路(所有量測與分級都在裝置上),只有同步紀錄需要。 -->
+<script>
+(function () {
+  if (!("serviceWorker" in navigator)) return;   // 舊瀏覽器照常走網路,不影響功能
+  // 進頁當下就有 controller,代表這不是第一次安裝 —— 用來區分「更新」與「首次安裝」,
+  // 也用來擋掉首次 claim 觸發的那次 controllerchange(那次重載沒有意義)
+  var hadController = !!navigator.serviceWorker.controller;
+  var reloading = false;
+
+  function showUpdateBar(worker) {
+    if (document.getElementById("swUpdateBar")) return;
+    var bar = document.createElement("div");
+    bar.id = "swUpdateBar";
+    bar.setAttribute("role", "status");
+    bar.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:9999;"
+      + "background:#0b1220;color:#e2e8f0;border-top:2px solid #22d3ee;"
+      + "padding:12px 14px;display:flex;gap:12px;align-items:center;justify-content:center;"
+      + "font:600 13px/1.5 'PingFang TC','Noto Sans TC',system-ui,sans-serif;flex-wrap:wrap";
+    var txt = document.createElement("span");
+    txt.textContent = "有新版本可用 — 更新後再繼續檢驗，避免用到舊的量測邏輯。";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "立即更新";
+    btn.style.cssText = "background:#22d3ee;color:#0b1220;border:0;border-radius:8px;"
+      + "padding:8px 16px;font-weight:700;font-size:13px;cursor:pointer";
+    btn.onclick = function () {
+      btn.disabled = true; btn.textContent = "更新中…";
+      worker.postMessage({ type: "SKIP_WAITING" });   // 只有按下去才切換
+    };
+    var later = document.createElement("button");
+    later.type = "button";
+    later.textContent = "稍後";
+    later.style.cssText = "background:transparent;color:#94a3b8;border:1px solid #334155;"
+      + "border-radius:8px;padding:8px 12px;font-size:13px;cursor:pointer";
+    later.onclick = function () { bar.remove(); };
+    bar.appendChild(txt); bar.appendChild(btn); bar.appendChild(later);
+    document.body.appendChild(bar);
+  }
+
+  navigator.serviceWorker.addEventListener("controllerchange", function () {
+    // 只有「本來就有 controller」才是真的換版;首次安裝的 claim 不重載
+    if (!hadController || reloading) return;
+    reloading = true;
+    location.reload();
+  });
+
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("./sw.js").then(function (reg) {
+      reg.update().catch(function () {});          // 每次開頁主動查一次新版
+      if (reg.waiting && hadController) showUpdateBar(reg.waiting);
+      reg.addEventListener("updatefound", function () {
+        var nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener("statechange", function () {
+          if (nw.state === "installed" && hadController) showUpdateBar(nw);
+        });
+      });
+    }).catch(function (e) {
+      // 註冊失敗只是沒有離線能力,頁面照常運作 —— 不打斷使用者
+      console.warn("離線外殼註冊失敗", e);
+    });
+  });
+})();
 </script>
 </body>
 </html>
