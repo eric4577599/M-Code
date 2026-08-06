@@ -85,6 +85,12 @@
   .gateNote { font-size:11px; color:#64748b; padding:8px 16px 0; }
 
   /* shutter */
+  /* 取幀模式切換(2026-08-06)。放在快門正上方 —— 它會改變量測條件,
+     不能藏在設定裡讓人不知不覺換掉。 */
+  .capMode { display:flex; gap:6px; align-items:center; font-size:11px; color:#64748b; }
+  .capMode button { border:1px solid #cbd5e1; background:#fff; color:#475569; border-radius:16px;
+                    padding:5px 11px; font-size:11.5px; font-weight:600; cursor:pointer; }
+  .capMode button.on { background:#0f172a; color:#fff; border-color:#0f172a; }
   .shutterWrap { margin-top:auto; padding:14px; display:flex; flex-direction:column; align-items:center; gap:8px; }
   .shutter { width:74px; height:74px; border-radius:50%; border:5px solid #cbd5e1; background:#94a3b8; cursor:not-allowed; }
   .shutter.ready { background:var(--ok); border-color:#bbf7d0; box-shadow:0 0 0 4px rgba(34,197,94,.25); cursor:pointer; }
@@ -275,6 +281,11 @@
     <p class="gateNote" id="gateNote"></p>
 
     <div class="shutterWrap">
+      <div class="capMode" id="capMode">
+        <span>取幀</span>
+        <button type="button" data-mode="auto" id="capAuto">高解析</button>
+        <button type="button" data-mode="instant" id="capInstant">即時</button>
+      </div>
       <button class="shutter" id="shutter" disabled></button>
       <span class="shutterLbl" id="shutterLbl">校準中…</span>
     </div>
@@ -420,6 +431,7 @@ const SAMPLE_DATA = {
 const state = {
   symbology:"AUTO", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
   decoded:SAMPLE_DATA.ITF14, expected:SAMPLE_DATA.ITF14, canDecode:true,
+  captureMode:"auto", // 取幀模式:auto = 三層降級(可能升壓);instant = 直接用當下預覽幀
   gate:{ varLap:210, glare:0.4, wash:0.06, wb:2, picket:3, tilt:2, pxm:9, scaleRef:true },
   grade:{ rLight:0.84, rDark:0.16, edge:0.62, dec:0.25, def:0.18, fpd:0.05, gnu:0.1, uecUsed:2, uecTotal:10 },
 };
@@ -1678,6 +1690,19 @@ function captureViaDrawImage() {
 async function capturePhoto() {
   const v = camVideo;
   if (!(v && v.videoWidth)) return null;
+  // ── 即時取幀(2026-08-06)────────────────────────────────────────────────
+  // 直接畫下**當下這一幀**,不呼叫 takePhoto、不下任何約束、不等任何協商 ——
+  // 按下即所得,快門延遲趨近於 0,螢幕上看到什麼就量什麼。
+  // 代價是解析度只有預覽等級(通常 720p)而非照片等級。
+  // 為什麼現在敢給這個選項:規格 §3.5 的計量重新設計之後,等級不再隨取樣密度擺盪
+  // (同一張合成圖 6→14 px/元素,舊路徑擺動 2.67 級、新路徑 0.00–0.03 級)。
+  // **但實拍的誤拒率仍未知**,所以這是使用者明選的模式而不是預設,
+  // 且每張都記下 path / 串流 / 分析 / px per module,兩種模式的紀錄可直接對照 ——
+  // 那正是規格 §6.1 要求的「提高解析度前 / 後實拍對照」。
+  if (state.captureMode === "instant") {
+    const now = captureViaDrawImage();
+    return now ? recordShot("L3/即時(使用者選)", now.canvas, now.settings, now.extra, null) : null;
+  }
   const byPhoto = await captureViaImageCapture();
   if (byPhoto) return recordShot("L1/ImageCapture", byPhoto.canvas, byPhoto.settings, byPhoto.extra, byPhoto.req);
   const byConstraint = await captureViaConstraints();
@@ -1888,6 +1913,23 @@ function show(v) {
 // 內層三段(inspectSim / capturePhoto / inspectReal)各自包了 try/catch,但 try 起頭與
 // finally 的 recompute() 沒有 —— 它碰 6 個 DOM 節點又呼叫 evaluateGate,任一處丟例外
 // 使用者只會看到快門閃一下、沒有任何提示。故呼叫端補上最後一道 catch。
+// 取幀模式切換。改的是**量測條件**,所以要讓使用者看得見自己選了什麼,
+// 並且每張照片都把模式記進取幀資訊(見 recordShot 的 path),事後對照才對得起來。
+function renderCapMode() {
+  $("capAuto").className = state.captureMode === "auto" ? "on" : "";
+  $("capInstant").className = state.captureMode === "instant" ? "on" : "";
+}
+$("capMode").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-mode]");
+  if (!b) return;
+  state.captureMode = b.dataset.mode;
+  renderCapMode();
+  setCamStatus(state.captureMode === "instant"
+    ? "即時取幀:按下即所得,不升壓、無等待;解析度為預覽等級"
+    : "高解析取幀:嘗試升壓到裝置上限,快門會有延遲", "");
+});
+renderCapMode();
+
 $("shutter").onclick = () => {
   inspect().catch((e) => { console.warn("inspect 失敗", e); setCamStatus("檢驗失敗，請重試", "warn"); });
 };
