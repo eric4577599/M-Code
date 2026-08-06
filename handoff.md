@@ -77,14 +77,26 @@
 
 ## Key Context
 
-- **git** — 分支 `main`。**2026-08-05 20:38 已 push 到 `origin/main`(`4b107aa..80325ec`,
-  三個 commit:`feat(imgproc)` 純函式 + 測試 / `feat(demo)` D1–D5 實作 / `docs` 規格與報告)。**
-  唯一可能未推的是本行所在的這次 handoff 更正(收工前補的),`git log origin/main..HEAD`
-  一查便知。往後 push 仍依全域 §0 需 Eric 明確同意。
-- **已上線** — 本輪已 `npm run build` → `rsync -a --delete` 到 `~/m-code-site`,
-  `https://m-code.ericchh.work` 是最新內容。
-  **驗法不是看 HTTP 200,是比 hash**;`demo/mobile.html` 的 hash **會對不上,那是正常的** ——
-  Cloudflare 在 `</body>` 前注入 bot-detection script,差異僅此一段。
+- **git** — 分支 `main`。**本檔不再記錄「推到哪個 commit」** ——
+  那種快照寫一次過期一次(2026-08-05 一天之內就過期三次:每次 push 完、
+  或收工前補寫 handoff 之後,上一行就變成假的,下一個 session 會照著假資訊判斷)。
+  **要知道有沒有未推的東西,一律現查:**
+  ```bash
+  git log origin/main..HEAD --oneline   # 空的 = 全部已推
+  git status --short                    # 空的 = 工作區乾淨
+  ```
+  push 依全域 §0 需 Eric 明確同意;`fetch` / `pull` / `commit` 不在此限。
+- **上線狀態同理,現查不要信快照** —— 線上 docroot 是 `~/m-code-site`,不是 repo 本身。
+  上線要跑 `npm run build` → `rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/`。
+  **驗法不是看 HTTP 200,是比 hash**:
+  ```bash
+  for f in demo/imgproc.js dist/index.js; do
+    a=$(curl -s https://m-code.ericchh.work/$f | shasum | awk '{print $1}')
+    b=$(shasum "$f" | awk '{print $1}'); [ "$a" = "$b" ] && echo "$f 一致" || echo "$f 不同"
+  done
+  ```
+  `demo/mobile.html` 的 hash **會對不上,那是正常的** —— Cloudflare 在 `</body>` 前
+  注入 bot-detection script,差異僅此一段,別誤判成沒同步。
 - **實跑基線(2026-08-05 23:3x)** — `npm test` **14 檔 457 測試**全綠
   (`tests/imgproc.test.ts` 200);`npm run typecheck`、`npm run build` 通過。
   測試數 SSOT 是規格 §5.1 表,**收工當場加一列**。
