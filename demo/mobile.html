@@ -33,6 +33,36 @@
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<script>
+/* ── 致命錯誤出口(2026-08-06 稽核 A)──────────────────────────────────────
+   由來:實機出現「上方選項空白、相機卡在開啟中」,而手機上**開不了 console** ——
+   模組只要在任何一行丟例外,後面的初始化(initSelectors / bootAuth / 事件綁定)
+   全部不會執行,畫面就停在一個看起來只是「還沒載完」的半殘狀態,沒有任何線索。
+   排查那次花掉約一小時,而錯誤訊息本身只有一行。
+   **刻意寫成傳統 script 並放在模組之前**:會壞的是模組,錯誤出口不能跟它同生共死。 */
+(function () {
+  var shown = false;
+  function showFatal(msg) {
+    if (shown) return; shown = true;
+    var d = document.createElement("div");
+    d.id = "fatalBar";
+    d.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:99999;background:#7f1d1d;"
+      + "color:#fee2e2;padding:10px 12px;font:600 12px/1.6 ui-monospace,monospace;"
+      + "white-space:pre-wrap;word-break:break-all;max-height:45vh;overflow:auto";
+    d.textContent = "⚠ 程式錯誤，畫面可能不完整。請把這段回報：\n" + msg;
+    (document.body || document.documentElement).appendChild(d);
+  }
+  window.__mcodeFatal = showFatal;
+  window.addEventListener("error", function (e) {
+    var where = e.filename ? (" @" + String(e.filename).split("/").pop() + ":" + e.lineno) : "";
+    showFatal((e.message || "未知錯誤") + where);
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e.reason;
+    showFatal("未處理的非同步錯誤：" + ((r && r.message) || String(r)));
+  });
+})();
+</script>
 <style>
   :root { --ok:#1f9d55; --warn:#d97706; --fail:#dc2626; --ink:#0f172a; --mut:#94a3b8; --beam:#22d3ee; --hud:#0b1220; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -95,6 +125,9 @@
   .shutter { width:74px; height:74px; border-radius:50%; border:5px solid #cbd5e1; background:#94a3b8; cursor:not-allowed; }
   .shutter.ready { background:var(--ok); border-color:#bbf7d0; box-shadow:0 0 0 4px rgba(34,197,94,.25); cursor:pointer; }
   .shutterLbl { font-size:12px; color:#64748b; }
+  /* 版本標示(稽核 D):實機支援時,雙方都要講得出「你在哪一版」——
+     今天為了確認這件事來回繞了好幾輪。同一組字串也會蓋進每一張的取幀紀錄。 */
+  .verLbl { font-size:10px; color:#cbd5e1; font-family:ui-monospace,monospace; letter-spacing:.03em; }
   /* 拍攝頁快速鍵:操作說明 / 檢測結果 */
   .quickRow { display:flex; gap:8px; padding:0 14px 4px; }
   .quickRow button { flex:1; border:1px solid #e2e8f0; background:#fff; color:var(--ink); border-radius:11px; padding:10px 0; font-size:13px; font-weight:600; cursor:pointer; }
@@ -288,6 +321,7 @@
       </div>
       <button class="shutter" id="shutter" disabled></button>
       <span class="shutterLbl" id="shutterLbl">校準中…</span>
+      <span class="verLbl" id="verLbl"></span>
     </div>
 
     <div class="quickRow">
@@ -1603,6 +1637,10 @@ function recordShot(path, canvas, settingsText, extra, req) {
     // 資料。取的是快門當下的即時預覽讀數(灰界近似),與分析影像不是同一張 —— 故
     // 標籤寫「預覽」,不要被解讀成對照片本身的量測。無相機的模擬路徑不會走到這裡。
     wb: typeof state.gate.wb === "number" ? state.gate.wb : null,
+    // 版本章(稽核 D):事後看報告要知道這筆是哪一版的程式產出的。
+    // 架構文件說「等級必須不可變且蓋版本章」,這是它的最小實作 —— 沒有這一欄,
+    // 引擎改版之後的歷史紀錄就無從分辨是舊值還是新值。
+    appVersion: window.__mcodeVersion || "",
     ...(extra || {}) };
   setCamStatus(`● 取幀 ${path} · 請求 ${lastShotInfo.requested} · 串流 ${lastShotInfo.settings} · 分析 ${lastShotInfo.analysis}`, "ok");
   return canvas;
@@ -1907,6 +1945,7 @@ function shotSummary(shot) {
   // 過去完全沒有量過);後者只在「預覽是好的、照片卻不是」時才出現,是那張照片不可
   // 採信的具名理由 —— 它必須跟著紀錄進 PDF,否則事後翻報告看不出為何當時要重拍。
   if (shot.shotTiming) parts.push("取幀時序 " + esc(shot.shotTiming));
+  if (shot.appVersion) parts.push("版本 " + esc(String(shot.appVersion).slice(0, 8)));
   if (shot.barBand) parts.push("條帶 " + esc(shot.barBand));
   if (shot.frameFallback) parts.push("⚠ " + esc(shot.frameFallback));
   if (shot.staleShot) parts.push("⚠ " + esc(shot.staleShot));
@@ -2085,7 +2124,14 @@ $("settingsBtn").onclick = () => show("settings");
 $("settingsBack").onclick = () => show("capture");
 
 // init
-initSelectors(); renderHud(); recompute(); updateBadge(); renderList();
+// 初始化包 try/catch(稽核 B):這一行任何一步丟例外,底下的 bootAuth 與所有事件綁定
+// 都不會執行 —— 畫面停在半殘狀態且毫無線索(實機真的發生過)。錯誤要看得見。
+try {
+  initSelectors(); renderHud(); recompute(); updateBadge(); renderList();
+} catch (e) {
+  if (window.__mcodeFatal) window.__mcodeFatal("初始化失敗：" + (e && e.message || e));
+  throw e; // 仍然往上拋,讓 window.onerror 也記錄到
+}
 // 開機授權:sessionStorage 有有效 session → 直接進 app(重整維持登入);否則顯示登入層
 (function bootAuth() {
   const s = loadSession();
@@ -2157,7 +2203,22 @@ window.addEventListener("pageshow", (e) => {
     location.reload();
   });
 
+  // 版本標示(稽核 D):快取名就是 mcode-shell-<內容雜湊>,直接讀,不必問 SW 也不必連網。
+  // 同一個字串會被 recordShot 蓋進每一張的取幀紀錄 —— 事後看報告才知道那筆是哪一版產出的
+  // (架構文件裡「等級必須蓋版本章」那條的最小實作)。
+  function showVersion() {
+    if (!window.caches || !caches.keys) return;
+    caches.keys().then(function (names) {
+      var n = names.filter(function (x) { return x.indexOf("mcode-shell-") === 0; })[0];
+      var v = n ? n.replace("mcode-shell-", "") : "";
+      window.__mcodeVersion = v || "未安裝離線外殼";
+      var el = document.getElementById("verLbl");
+      if (el) el.textContent = v ? ("版本 " + v.slice(0, 8)) : "未安裝離線外殼";
+    }).catch(function () {});
+  }
+
   window.addEventListener("load", function () {
+    showVersion();
     navigator.serviceWorker.register("./sw.js").then(function (reg) {
       reg.update().catch(function () {});          // 每次開頁主動查一次新版
       if (reg.waiting && hadController) showUpdateBar(reg.waiting);
