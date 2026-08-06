@@ -119,6 +119,26 @@
   /* 示範模式標記(D5②):等級照出但必須看得出不是實拍 */
   .simTag { width:100%; margin:8px 0 2px; padding:8px 12px; border-radius:10px; text-align:left;
             background:#e0f2fe; border:1px solid #7dd3fc; color:#075985; font-size:12px; font-weight:700; }
+  /* 結果頁的實拍照片 + 量測範圍框(2026-08-06)。
+     由來:實機回報「報告沒有照片,只能憑感覺」—— 結果頁過去只有字母與代號,
+     看的人無從判斷這個等級是量在畫面的哪一塊上。ROI 框讓「量到的是不是符號本體」
+     變成一眼可見,而不是要相信程式。 */
+  .shotBox { width:100%; margin-top:10px; position:relative; border-radius:10px; overflow:hidden;
+             background:#0b1220; border:1px solid #e2e8f0; }
+  .shotBox img { width:100%; display:block; }
+  .shotRoi { position:absolute; border:2px solid var(--beam); box-shadow:0 0 0 1px rgba(0,0,0,.45);
+             border-radius:2px; pointer-events:none; }
+  .shotCap { font-size:11px; color:#64748b; margin-top:5px; text-align:left; line-height:1.6; }
+  /* 等級成因。刻意放在等級圈**下方**、參數列上方:先看到字母,再看到為什麼。 */
+  .whyBox { width:100%; margin-top:12px; text-align:left; background:#f8fafc;
+            border:1px solid #e2e8f0; border-left:3px solid var(--beam); border-radius:10px; padding:11px 13px; }
+  .whyBox .t { font-size:12px; font-weight:700; color:#0f172a; margin-bottom:6px; }
+  .whyBox .item { font-size:12px; color:#334155; line-height:1.75; margin-bottom:5px; }
+  .whyBox .item b { color:#0f172a; }
+  .whyBox .rule { font-size:11px; color:#64748b; line-height:1.6; border-top:1px dashed #e2e8f0;
+                  padding-top:6px; margin-top:7px; }
+  .whyBox .hint { font-size:11.5px; font-weight:700; color:#7c2d12; background:#fff7ed;
+                  border-radius:7px; padding:6px 9px; margin-top:7px; }
   /* 取幀不新鮮告警(2026-08-06):預覽是好的、照片卻不是 —— 劣化發生在快門延遲窗口內。
      刻意用比 simTag 更強的橘紅色:等級照樣顯示,但使用者必須先看到「這張不可採信」。 */
   .staleTag { width:100%; margin:8px 0 2px; padding:9px 12px; border-radius:10px; text-align:left;
@@ -279,12 +299,15 @@
       <div class="simTag" id="simTag" hidden></div>
       <div class="staleTag" id="staleTag" hidden></div>
       <div class="unmeas" id="unmeasBox" hidden></div>
+      <div class="shotBox" id="shotBox" hidden><img id="shotImg" alt="本次檢驗的實拍影像"><div class="shotRoi" id="shotRoi" hidden></div></div>
+      <div class="shotCap" id="shotCap" hidden></div>
       <div class="circle" id="circle"><div class="l" id="letter">–</div><div class="s">參考等級</div></div>
       <div class="legal">相對值・非 ISO 合規證書<br>本工具不出具 ISO 證書，合規驗證請用合規 verifier。</div>
       <div class="verdict" id="verdict"></div>
       <div class="margin" id="margin"></div>
       <div class="sampNote" id="sampNote" hidden></div>
       <div class="decodedBox"><span class="lbl">辨識文字（解碼結果）</span><div class="val" id="decodedText">–</div></div>
+      <div class="whyBox" id="whyBox" hidden></div>
       <div class="params" id="params"></div>
       <div class="resultTextWrap">
         <label>判定後內容（可複製）</label>
@@ -359,6 +382,7 @@ import {
   assessMeasurability, SIMULATED_LABEL,
   roi1DMetrology,
   assessShotFreshness,
+  explainGrade,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -732,6 +756,7 @@ function inspectReal(photo) {
   const photometric = { rLight: pm.rLight, rDark: pm.rDark, rDarkMin: pm.rDarkMin, edgeContrasts: pm.edgeContrasts };
   let grade;
   let scanlineCount = null; // 1D 實際取得的可用掃描線數(2D 維持 null,可量測性判定不看它)
+  const scanlineScores = [], scanlineLimiters = []; // 逐條總分與限制項代號(1D 才填,供等級成因用)
   if (is2D(sym)) {
     // 2D:GNU 由 finder 幾何、FPD 由暗模組反射發散 proxy;UEC 無 RS 解碼資訊,誠實省略
     const q = zx ? quadGeometry(zx.points) : { gridDeviation: 0.5, picketAngleDeg: 0, tiltDeg: 0 };
@@ -757,6 +782,16 @@ function inspectReal(photo) {
     // 幾何吃正射影像(gray),光度仍走未矯正 ROI(裁示 D3),兩者互不影響。
     const g1 = roi1DMetrology(gray, gw, roi, { sym, text: zx ? zx.text : "" });
     scanlineCount = g1.scanlines.length;
+    // 等級成因需要**逐條**的資料(規格 §3.8):總分是「每條取最差,再平均」,
+    // 而 GradeResult.parameters 只回報第 1 條 —— 拿它當「等級原因」會講錯。
+    // 對每條各跑一次同一支純函式即可,便宜且不必動 src/。
+    for (const geo of g1.scanlines) {
+      const one = buildGradeResult(sym, [{ photometric, geometric: geo }]);
+      scanlineScores.push(one.overallScore);
+      let lo = Infinity, code = "";
+      for (const pp of one.parameters) if (pp.score < lo) { lo = pp.score; code = pp.code; }
+      scanlineLimiters.push(code);
+    }
     if (lastShotInfo) {
       lastShotInfo.metrology = g1.kind === "twoWidth" ? "雙寬(窄/寬判別)" : "模組型(E2SE)";
       if (g1.elementsExpected) lastShotInfo.elements = `${g1.elementsMatched}/10 條掃描線 · 標稱 ${g1.elementsExpected} 元素`;
@@ -840,7 +875,14 @@ function inspectReal(photo) {
     lineAngleDeg: zx ? lineAngleDeg(zx.points) : null });
   // 清單縮圖/報告原圖:由降取樣版再縮成 320px 寬 jpeg(不從全解析度直縮,省一次大圖重採樣)
   const tc = drawToCanvas(small, small.width, small.height, 320);
-  const img = { type: "img", data: tc.toDataURL("image/jpeg", 0.7) };
+  // ROI 換算成縮圖的分數座標。縮圖是 small 等比縮成 320,故分數座標與 small 相同,
+  // 直接用 roiSmall 即可。**存分數不存像素**:縮圖日後改尺寸也不會錯位,
+  // 而且原圖保持乾淨(框是呈現時疊上去的,不燒進影像 —— 證據不該被畫過)。
+  const roiFrac = {
+    x: roiSmall.x0 / w, y: roiSmall.y0 / h,
+    w: (roiSmall.x1 - roiSmall.x0) / w, h: (roiSmall.y1 - roiSmall.y0) / h,
+  };
+  const img = { type: "img", data: tc.toDataURL("image/jpeg", 0.7), roi: roiFrac };
   const geom = { rectify: plan.note, tilt };
   if (!meas.measurable || !grade) {
     // 量到的不是符號本體 → 不出等級、不出通過/未通過。過去這條路會拿畫面中央 70% 的
@@ -849,7 +891,10 @@ function inspectReal(photo) {
     return;
   }
   const acceptance = evaluateAcceptance(grade, policyOf());
-  presentResult(decode, grade, acceptance, img, geom, meas);
+  // 成因判斷交給 imgproc.js 的純函式(demo/*.html 無自動化測試可覆蓋)
+  const why = explainGrade({ is2D: is2D(sym), overallScore: grade.overallScore,
+    parameters: grade.parameters, scanlineScores, scanlineLimiters });
+  presentResult(decode, grade, acceptance, img, geom, meas, why);
 }
 
 // 模擬檢驗(無相機):沿用示範情境設定的 gate/grade 模擬值
@@ -870,7 +915,11 @@ function inspectSim() {
   const meas = assessMeasurability({ simulated: true, decoded: state.canDecode, isOneD: !is2D(sym) });
   if (!meas.measurable) { presentUnmeasurable(decode, meas, null, null); return; }
   const acceptance = evaluateAcceptance(grade, policyOf());
-  presentResult(decode, grade, acceptance, null, null, meas);
+  // 示範模式一樣顯示成因(抽掉就教錯心智模型 —— 示範要忠實反映真實路徑),
+  // 但沒有逐條掃描線資料,所以 explainGrade 會退化成「第 1 條的最差項」。
+  // 整頁已由 simTag 標明是模擬值,不會被誤讀成實拍量測。
+  presentResult(decode, grade, acceptance, null, null, meas,
+    explainGrade({ is2D: is2D(sym), overallScore: grade.overallScore, parameters: grade.parameters }));
 }
 
 // 共用結果呈現:更新結果頁 DOM、存入清單(img 為 null 時退回 SVG 快照)、切頁
@@ -888,6 +937,49 @@ function samplingNote(shot) {
   if (!reasons.length) return "";
   return reasons.join("；") + "。取樣密度會影響 DEC / EC 這類代理值的絕對數字，"
     + "與不同取樣密度下的紀錄**不宜直接互比**；同一台裝置、同一取幀層別的前後比較才有意義。";
+}
+
+// 結果頁的實拍照片 + 量測範圍框。輸入:掃描影像物件(含 roi 分數座標);輸出:無。
+// 由來:實機回報「報告沒有照片,只能憑感覺」。字母與代號講不出「量在畫面的哪一塊」——
+// ROI 框讓「量到的是不是符號本體」一眼可見,不必相信程式。
+// 框是**疊上去的不是燒進去的**:存進 scans 的影像保持乾淨,證據不該被畫過。
+function renderShotPhoto(img) {
+  const box = $("shotBox"), el = $("shotImg"), r = $("shotRoi"), cap = $("shotCap");
+  const has = img && img.type === "img" && img.data;
+  box.hidden = !has; cap.hidden = !has;
+  if (!has) { r.hidden = true; return; }
+  el.src = img.data;
+  if (img.roi) {
+    r.hidden = false;
+    r.style.left = (img.roi.x * 100).toFixed(2) + "%";
+    r.style.top = (img.roi.y * 100).toFixed(2) + "%";
+    r.style.width = (img.roi.w * 100).toFixed(2) + "%";
+    r.style.height = (img.roi.h * 100).toFixed(2) + "%";
+    cap.textContent = "本次檢驗的實拍影像。青框是實際量測範圍 —— 框沒有套在條碼上,這份數字就不能採信。";
+  } else {
+    r.hidden = true;
+    cap.textContent = "本次檢驗的實拍影像。";
+  }
+}
+
+// 等級成因(規格 §3.8)。輸入:explainGrade 的輸出;輸出:無。
+// **只負責顯示,不自行推導** —— 聚合規則 1D/2D 不同,推導錯就會講出「等級由 X 決定」
+// 這種對 1D 而言是錯的話(1D 總分是逐條取最差再平均,不等於任何單一參數)。
+function renderWhy(why) {
+  const box = $("whyBox");
+  if (!why || !why.limiting || !why.limiting.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const head = why.lines > 1 ? "最常拖低等級的項目" : "拖低等級的項目";
+  const items = why.limiting.slice(0, 3).map((x) => {
+    const times = why.lines > 1 && x.count ? `（${x.count}/${why.lines} 條掃描線）` : "";
+    const sc = typeof x.score === "number" ? `${x.letter} ${x.score.toFixed(2)}` : "—";
+    return `<div class="item">· <b>${esc(x.name)}（${esc(x.code)} ${esc(sc)}）</b>${esc(times)}<br>${esc(x.why)}</div>`;
+  }).join("");
+  const spread = why.spread !== null && why.spread !== undefined
+    ? `　逐條等級離散度 ${why.spread.toFixed(2)} 級。` : "";
+  box.innerHTML = `<div class="t">為什麼是這個等級</div>${items}`
+    + `<div class="rule">${esc(why.rule)}${esc(spread)}</div>`
+    + (why.spreadHint ? `<div class="hint">${esc(why.spreadHint)}</div>` : "");
 }
 
 // 取幀不新鮮告警(2026-08-06)。輸入:shot 取幀資訊;輸出:無(直接改 DOM)。
@@ -925,6 +1017,9 @@ function presentUnmeasurable(decode, meas, img, geom) {
     const el = $(id); if (el) el.style.display = "none";
   }
   renderStaleTag(lastShotInfo);
+  // 不可量測時更需要看到「到底拍到什麼」;沒有等級所以不顯示成因
+  renderShotPhoto(img);
+  renderWhy(null);
   const note = samplingNote(lastShotInfo);
   $("sampNote").hidden = !note; $("sampNote").innerHTML = note ? esc(note).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") : "";
   $("resultText").value = [
@@ -942,7 +1037,7 @@ function presentUnmeasurable(decode, meas, img, geom) {
   show("result");
 }
 
-function presentResult(decode, grade, acceptance, img, geom, meas) {
+function presentResult(decode, grade, acceptance, img, geom, meas, why) {
   // 此時 state.symbology 已收斂為具體類型(相機路徑由 ZXing 覆寫,其餘由 resolveSym)
   const symLabelR = (SYMS.find(([sv])=>sv===state.symbology)||[,state.symbology])[1];
   $("symBadge").textContent = "偵測類型：" + symLabelR;
@@ -956,6 +1051,8 @@ function presentResult(decode, grade, acceptance, img, geom, meas) {
   $("simTag").hidden = !simulated;
   if (simulated) $("simTag").textContent = "⚠ " + SIMULATED_LABEL + "（不列入通過率統計，匯出報告會標記）";
   renderStaleTag(lastShotInfo);
+  renderShotPhoto(img);
+  renderWhy(why);
   const note = samplingNote(lastShotInfo);
   $("sampNote").hidden = !note; $("sampNote").innerHTML = note ? esc(note).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") : "";
   $("decode").innerHTML = decode.decoded
@@ -997,7 +1094,7 @@ function presentResult(decode, grade, acceptance, img, geom, meas) {
       `完整參數報告（幾何 ${grade.parameters.filter(p=>p.kind!=="PHOTOMETRIC").map(p=>p.code).join("/") || "DEC/DEF/FPD/GNU"} 等）：付費版解鎖`,
     ]),
   ].join("\n");
-  saveScan(decode, grade, acceptance, img, { measurable: true, reason: "", hint: "", simulated });
+  saveScan(decode, grade, acceptance, img, { measurable: true, reason: "", hint: "", simulated }, why);
   $("lastResultBtn").disabled = false; // 已有檢驗結果,拍攝頁「檢測結果」可用
   show("result");
 }
@@ -1083,6 +1180,31 @@ async function detectShotCapability(track) {
   try { trackResolution = pickBestResolution(caps, null); } catch (e) { trackResolution = null; }
 }
 
+// 把預覽叫醒。輸入:無;輸出:無(必要時設 camFault)。
+//
+// 2026-08-06 實機回報:「要再拍一次時無法看到 live 畫面」。成因是 `.view { display:none }` ——
+// 切到結果頁時,含 <video> 的拍攝頁整塊被隱藏,而 **iOS Safari 一旦把 video 放進
+// display:none 的子樹就會暫停它,再顯示回來不會自動續播**。
+// 更糟的是 `visibilitychange` 不會觸發(分頁本身仍可見,只有元素被藏),所以既有的
+// camFault 路徑也不會亮 —— 使用者看到一片黑、沒有任何說明,而閘門還在拿暫停前那一幀的
+// 讀數判定,快門可能仍是綠的,按下去就取到一張與現場無關的凍結幀。
+// 故:回到拍攝頁時主動續播,叫不醒才報故障(不靜默留在黑畫面)。
+function resumePreview() {
+  const v = camVideo;
+  if (!v) return;
+  if (!v.paused && v.readyState >= 2) return; // 本來就在播,不必動它
+  let p = null;
+  try { p = v.play(); } catch (e) { p = null; }
+  if (p && p.catch) {
+    p.catch(() => {
+      // 叫不醒多半是串流真的被系統收回了 —— 交給既有的故障訊息路徑,不要留在黑畫面
+      camFault = camFault || "預覽已中斷 — 請點畫面重新開啟相機";
+      setCamStatus("⚠ " + camFault, "warn");
+      recompute();
+    });
+  }
+}
+
 async function initCamera(userGesture) {
   if (camVideo) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setCamStatus("此瀏覽器不支援相機，顯示示意條碼", "warn"); return; }
@@ -1162,6 +1284,9 @@ function cameraFaultNow() {
   const v = camVideo;
   // readyState < HAVE_CURRENT_DATA(2)表示沒有可用的當前幀,drawImage 會畫出空白或舊幀
   if (v && v.readyState < 2) return "畫面尚未就緒 — 請稍候再按快門";
+  // 暫停中的 video,drawImage 取到的是暫停前那一幀 —— 走完整條檢驗會產出一份看起來
+  // 完全正常、卻與現場無關的報告。與上面的凍結幀是同一類病(見 resumePreview)。
+  if (v && v.paused) return "預覽已暫停 — 請點畫面重新開啟相機";
   return null;
 }
 
@@ -1225,6 +1350,10 @@ function measureFrame() {
   // 才自癒)。⚠ 降壓側的等待逾時放行後仍可能殘留過渡幀,只是窗口比沒等時小得多。
   if (inspecting) return;
   const v = camVideo; if (!v || !v.videoWidth) return;
+  // 暫停中的 video 畫出來是**暫停前那一幀**,不是現場 —— 拿它更新燈號等於用舊畫面判定。
+  // 順手叫醒(這條路每 500ms 跑一次,所以就算 show() 那次沒叫醒也會自癒),
+  // 但這一輪不更新任何讀數:寧可讓燈號停在原地,也不要拿凍結幀刷新它。
+  if (v.paused || v.readyState < 2) { resumePreview(); return; }
   Object.assign(state.gate, measureQuality(v, v.videoWidth, v.videoHeight));
   // 幾何檢查(印向/透視/解析度)需解碼定位點才算得出,即時預覽不解碼 →
   // 還原為安全放行值,避免「上一張拍攝殘留的幾何值」把下一張預覽快門鎖死。
@@ -1570,7 +1699,7 @@ async function capturePhoto() {
 // 2026-08-05(稽核裁示 D4 / D5②)新增 flags:{ measurable, reason, hint, simulated }。
 //   measurable=false 時 grade / acceptance 一律傳 null —— 該筆沒有等級,不是等級是 F。
 //   清單、PDF、XLS 都必須看得出這兩種筆與正常筆的差別,且不列入通過率統計。
-function saveScan(decode, grade, acceptance, img, flags) {
+function saveScan(decode, grade, acceptance, img, flags, why) {
   const f = flags || { measurable: true, reason: "", hint: "", simulated: false };
   scans.push({
     shot: lastShotInfo ? { ...lastShotInfo } : null,
@@ -1583,6 +1712,10 @@ function saveScan(decode, grade, acceptance, img, flags) {
     reqGrade: policyOf().requiredGrade,
     margin: acceptance ? acceptance.marginScore : null, img: img || captureImage(),
     params: grade ? grade.parameters.map(p=>({ letter:p.letter, code:p.code, label:p.label, score:p.score })) : [],
+    // 等級成因(規格 §3.8):存進紀錄才進得了 PDF。**存結論不存重算所需的原料** ——
+    // 等級與其成因都是那一刻的量測結果,日後不該被重新推導(引擎改版會讓歷史紀錄
+    // 整批靜默改變,見架構文件)。
+    why: why || null,
     profileName: (profileOf()||{}).name || "",
     stage: state.processStage, stageLabel: stageLabelOf(state.processStage),
   });
@@ -1609,6 +1742,35 @@ function metaFields() { return { customer:esc($("f-customer").value.trim()||"—
 // 除了規格 §5.2 要的請求值 / 實拿值 / 分析寬高,另附 §6.1 的取樣密度標籤與實測
 // px/module —— 沒有這兩項就無法判斷該筆 DEC / EC 是量在什麼密度上,「提高解析度前 /
 // 後」的對照會拿不同尺度的數字互比。缺項就不印,不補假值。
+// 量測範圍框(PDF / 燈箱共用)。輸入:掃描影像物件;輸出:可放進 innerHTML 的疊層或空字串。
+// 用絕對定位疊在圖上,**不燒進影像** —— 存進 scans 的原圖要保持乾淨,證據不該被畫過。
+function roiOverlay(img) {
+  if (!img || !img.roi) return "";
+  const r = img.roi;
+  return `<div style="position:absolute;left:${(r.x*100).toFixed(2)}%;top:${(r.y*100).toFixed(2)}%;`
+    + `width:${(r.w*100).toFixed(2)}%;height:${(r.h*100).toFixed(2)}%;`
+    + `border:2px solid #0891b2;border-radius:2px;box-sizing:border-box"></div>`;
+}
+
+// 等級成因摘要(PDF 用)。輸入:存進紀錄的 why 物件;輸出:已跳脫的 HTML 或空字串。
+// 客戶拿到的報告過去只有一個字母 —— 講不出「該去改什麼」,現場也無從複驗。
+function whySummary(why) {
+  if (!why || !why.limiting || !why.limiting.length) return "";
+  const items = why.limiting.slice(0, 3).map((x) => {
+    const times = why.lines > 1 && x.count ? `（${x.count}/${why.lines} 條掃描線）` : "";
+    const sc = typeof x.score === "number" ? `${x.letter} ${x.score.toFixed(2)}` : "—";
+    return `<li><b>${esc(x.name)}（${esc(x.code)} ${esc(sc)}）</b>${esc(times)} — ${esc(x.why)}</li>`;
+  }).join("");
+  const spread = (why.spread !== null && why.spread !== undefined)
+    ? `　逐條等級離散度 ${why.spread.toFixed(2)} 級。` : "";
+  return `<div style="margin:0 0 8px;padding:8px 11px;background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #0891b2;border-radius:6px">
+      <b style="font-size:12px">為什麼是這個等級</b>
+      <ul style="margin:5px 0 0;padding-left:18px;font-size:12px;color:#334155;line-height:1.7">${items}</ul>
+      <p style="margin:6px 0 0;font-size:11px;color:#64748b">${esc(why.rule)}${esc(spread)}</p>
+      ${why.spreadHint ? `<p style="margin:5px 0 0;font-size:11px;font-weight:700;color:#7c2d12">${esc(why.spreadHint)}</p>` : ""}
+    </div>`;
+}
+
 function shotSummary(shot) {
   const parts = [esc(shot.path), "請求 " + esc(shot.requested), "串流 " + esc(shot.settings), "分析 " + esc(shot.analysis)];
   if (shot.photo) parts.push("照片 " + esc(shot.photo));
@@ -1658,7 +1820,7 @@ function exportPdf() {
       excluded ? `<br>※ 通過率分母已排除 ${excluded} 筆：不可量測（影像中量到的不是符號本體，未產出等級）與示範模式（情境模擬值，非實拍量測）。` : ""
     }</p>`;
   const details = scans.map(s=>`<div class="scanPage"><h2 style="font-size:15px;margin:0 0 12px">掃描 #${s.n} · ${fmtTime(s.ts)} · ${s.stageLabel} · ${s.symLabel}</h2>
-    <div class="sp-grid"><div><div style="width:100%;height:170px;background:#d8c19a;border:1px solid #94a3b8;border-radius:6px;overflow:hidden">${imgMarkup(s.img,"contain")}</div><p style="text-align:center;color:#64748b;font-size:12px;margin-top:4px">掃描原圖</p></div>
+    <div class="sp-grid"><div><div style="position:relative;width:100%;background:#d8c19a;border:1px solid #94a3b8;border-radius:6px;overflow:hidden">${imgMarkup(s.img,"contain")}${roiOverlay(s.img)}</div><p style="text-align:center;color:#64748b;font-size:12px;margin-top:4px">掃描原圖${s.img && s.img.roi ? "（青框為實際量測範圍）" : ""}</p></div>
     <div>${s.simulated ? `<p style="margin:0 0 8px;padding:6px 10px;background:#e0f2fe;border:1px solid #7dd3fc;border-radius:6px;font-size:12px;color:#075985"><b>⚠ ${esc(SIMULATED_LABEL)}</b> — 本筆不列入通過率統計。</p>` : ""}
       ${s.measurable
         ? `<p style="margin:0 0 8px"><b>參考等級：</b><span style="color:${GC[s.grade]};font-weight:800;font-size:20px">${s.grade}</span>
@@ -1668,6 +1830,7 @@ function exportPdf() {
              ${s.unmeasHint ? `<span style="font-size:12px;color:#78350f">建議：${esc(s.unmeasHint)}</span><br>` : ""}
              <span style="font-size:12px;color:#78350f">本筆不列入通過率統計。</span></p>`}
       <p style="margin:0 0 8px"><b>解碼：</b>${s.decoded?"成功":"不可讀"} · ${esc(s.data)}</p>
+      ${whySummary(s.why)}
       ${s.shot ? `<p style="margin:0 0 8px;font-size:12px;color:#475569"><b>取幀：</b>${shotSummary(s.shot)}</p>` : ""}
       <table class="rpt"><tr><th>級</th><th>參數</th><th>分數</th></tr>
         ${s.params.map(p=>`<tr><td>${p.letter}</td><td>${p.label} (${p.code})</td><td>${p.score.toFixed(2)}</td></tr>`).join("")}</table></div></div></div>`).join("");
@@ -1715,7 +1878,12 @@ $("listItems").addEventListener("click", (e) => {
 });
 
 // view switch
-function show(v) { document.querySelectorAll(".view").forEach(x=>x.classList.remove("active")); $("v-"+v).classList.add("active"); }
+function show(v) {
+  document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
+  $("v-"+v).classList.add("active");
+  // 被 display:none 藏過的 video 在 iOS 上不會自動續播,回到拍攝頁一定要叫醒(見 resumePreview)
+  if (v === "capture") resumePreview();
+}
 // inspect 是 async,直接綁 onclick 的話它拋出的例外會變成 unhandled rejection。
 // 內層三段(inspectSim / capturePhoto / inspectReal)各自包了 try/catch,但 try 起頭與
 // finally 的 recompute() 沒有 —— 它碰 6 個 DOM 節點又呼叫 evaluateGate,任一處丟例外

@@ -57,6 +57,9 @@ import {
   roi1DMetrology,
   GEOMETRY_APERTURE_X,
   assessShotFreshness,
+  explainGrade,
+  PARAM_CAUSE,
+  GRADE_RULE,
   SHOT_FRESHNESS,
   SHOT_FRESHNESS_LABEL,
   SLOW_SHUTTER_MS,
@@ -2683,5 +2686,100 @@ describe("assessShotFreshness — 快門延遲下的取幀誠實性", () => {
       // 定位護欄(規格 A3):講的是「這張照片」,不得寫成符號本身印壞了
       expect(label).toContain("這張照片");
     }
+  });
+});
+
+// ── 等級成因說明(規格 §3.8)────────────────────────────────────────────────
+// 這組測試守的主要是「不要說謊」:1D 的總分是逐條取最差再平均,**不等於任何單一參數**,
+// 所以 1D 不可以說「等級由 X 決定」。2D 才可以。
+describe("explainGrade — 等級成因說明", () => {
+  const P = (code: string, score: number, letter = "B") =>
+    ({ code, letter, score, label: code, kind: "PHOTOMETRIC" });
+
+  it("2D:總分就是最小值 → 限制項精確可指名", () => {
+    const r = explainGrade({ is2D: true, overallScore: 1.5,
+      parameters: [P("SC", 3.2), P("MOD", 1.5, "D"), P("GNU", 4)] });
+    expect(r.limiting.map((x: { code: string }) => x.code)).toEqual(["MOD"]);
+    expect(r.rule).toBe(GRADE_RULE.twoD);
+  });
+
+  it("2D:兩項並列最低時**都要列出**,不可只挑一個", () => {
+    const r = explainGrade({ is2D: true, overallScore: 2,
+      parameters: [P("SC", 2), P("MOD", 2), P("DEC", 3.5)] });
+    expect(r.limiting.map((x: { code: string }) => x.code).sort()).toEqual(["MOD", "SC"]);
+  });
+
+  it("1D:依「成為限制項的次數」排序,不是依第 1 條的最低分", () => {
+    // 第 1 條的最低是 SC,但 10 條裡有 7 條是 DEC 在拖 —— 該講 DEC
+    const r = explainGrade({ is2D: false, overallScore: 2.4,
+      parameters: [P("SC", 1.9), P("DEC", 2.1), P("DEF", 3.0)],
+      scanlineScores: [1.9, 2.1, 2.1, 2.0, 2.2, 2.1, 2.1, 2.3, 2.1, 2.1],
+      scanlineLimiters: ["SC", "DEC", "DEC", "DEC", "DEC", "DEC", "DEC", "DEC", "SC", "SC"] });
+    expect(r.limiting[0].code).toBe("DEC");
+    expect(r.limiting[0].count).toBe(7);
+    expect(r.limiting[1].code).toBe("SC");
+    expect(r.limiting[1].count).toBe(3);
+  });
+
+  it("1D 的規則說明必須明講「總等級不等於任何單一參數」", () => {
+    const r = explainGrade({ is2D: false, parameters: [P("SC", 2)], scanlineScores: [2, 2] });
+    expect(r.rule).toBe(GRADE_RULE.oneD);
+    expect(r.rule).toContain("不等於任何單一參數");
+  });
+
+  it("離散度 = 逐條總分的最大最小差;超過門檻給「重拍」提示而非「印壞了」", () => {
+    const tight = explainGrade({ is2D: false, parameters: [P("SC", 2)],
+      scanlineScores: [2.0, 2.1, 2.05], scanlineLimiters: ["SC", "SC", "SC"] });
+    expect(tight.spread).toBeCloseTo(0.1, 6);
+    expect(tight.spreadHint).toBe("");
+
+    const loose = explainGrade({ is2D: false, parameters: [P("SC", 2)],
+      scanlineScores: [1.0, 3.4, 2.0], scanlineLimiters: ["SC", "SC", "SC"] });
+    expect(loose.spread).toBeCloseTo(2.4, 6);
+    expect(loose.spreadHint).toContain("拍攝條件不穩");
+    // 定位護欄:離散度大是拍攝問題,措辭不得指向印刷品質
+    expect(loose.spreadHint).not.toContain("印壞");
+  });
+
+  it("掃描線少於 2 條時不給離散度(算不出來就不給,不補假值)", () => {
+    const r = explainGrade({ is2D: false, parameters: [P("SC", 2)], scanlineScores: [2.0] });
+    expect(r.spread).toBe(null);
+    expect(r.spreadHint).toBe("");
+  });
+
+  it("沒有逐條資料時退化成「第 1 條的最差項」,不丟例外", () => {
+    const r = explainGrade({ is2D: false, parameters: [P("SC", 3), P("DEC", 1.2)] });
+    expect(r.limiting[0].code).toBe("DEC");
+    expect(r.lines).toBe(0);
+  });
+
+  it("每個限制項都帶得出現場語言的成因", () => {
+    const r = explainGrade({ is2D: true, parameters: [P("DEC", 1.2)] });
+    expect(r.limiting[0].name).toBe("可解碼性");
+    expect(r.limiting[0].why).toContain("墨量增益");
+  });
+
+  it("成因文案不得暗示 ISO 合規或直接斷言不合格(定位護欄)", () => {
+    for (const v of Object.values(PARAM_CAUSE) as { name: string; why: string }[]) {
+      for (const bad of ["ISO", "合規", "不合格", "認證", "證書"]) {
+        expect(v.why).not.toContain(bad);
+        expect(v.name).not.toContain(bad);
+      }
+    }
+  });
+
+  it("退化輸入不丟例外", () => {
+    for (const i of [undefined, null, {}, { parameters: null }]) {
+      const r = explainGrade(i as never);
+      expect(Array.isArray(r.limiting)).toBe(true);
+      expect(r.spread).toBe(null);
+    }
+  });
+
+  it("引擎的參數代號都有對應的成因說明(引擎加了新參數就會紅)", () => {
+    const src = readFileSync("src/engines/grade.ts", "utf8");
+    const codes = [...src.matchAll(/makeParam\("([^"]+)"/g)].map((m) => m[1]!);
+    expect(codes.length).toBeGreaterThan(0);
+    for (const c of codes) expect(Object.keys(PARAM_CAUSE)).toContain(c);
   });
 });

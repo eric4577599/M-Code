@@ -2067,3 +2067,102 @@ export function assessShotFreshness(input) {
     note: parts.join(" · "),
   };
 }
+
+// ── 等級成因說明(規格 §3.8 · 2026-08-06)──────────────────────────────────
+// 由來:實機回報「報告沒有照片,只能憑感覺」。結果頁只給一個字母加一排代號
+// (`SC B(2.76)`),看的人無從判斷這個等級是怎麼來的、該去改什麼。
+//
+// **這支函式最重要的工作是不要說謊。** 聚合規則兩種符號別不同(src/engines/grade.ts):
+//   · 2D:總分 = 所有參數的**最小值** ⇒ 講得出「就是這一項決定的」,精確。
+//   · 1D:每條掃描線先取自己參數的最小值,再把 N 條**平均** ⇒ 總分不等於任何單一參數,
+//        而且 GradeResult.parameters 回報的只是**第 1 條掃描線**的參數。
+//        所以 1D 不可以說「等級由 X 決定」—— 那是錯的。只能說「最常成為限制項的是 X」,
+//        並且要把逐條的離散度講出來(它本身就是拍攝穩定度的指標)。
+// 呼叫端必須把逐條掃描線各自的結果傳進來(對每條各跑一次 buildGradeResult 即可,
+// 那是純函式且很便宜),否則 1D 只能退化成「單條」敘述。
+
+/** 參數代號 → 現場語言的成因。措辭只描述「可能的物理成因」,不下合規判定。 */
+export const PARAM_CAUSE = Object.freeze({
+  SC:   { name: "對比",     why: "條與空的反射差不夠 —— 墨太淡、箱面顏色太深,或現場光線不足" },
+  MOD:  { name: "調變",     why: "條與空的反射分不開 —— 墨量不均、楞痕透印把空的地方壓暗" },
+  Rmin: { name: "最低反射", why: "條不夠黑 —— 墨量不足或印版壓力不夠" },
+  DEC:  { name: "可解碼性", why: "條空寬度偏離標稱值 —— 墨量增益(柔印最常見)、印版變形,或拍攝角度傾斜" },
+  DEF:  { name: "缺陷",     why: "單一元素內部反射不均 —— 紙面瑕疵、楞痕、噴頭斷線或刮痕" },
+  FPD:  { name: "定位圖形", why: "定位/時序圖形破損 —— 印壞、磨損,或取像時被遮到" },
+  GNU:  { name: "網格均勻性", why: "模組位置偏離理想格點 —— 印版變形或拍攝透視沒矯正掉" },
+  UEC:  { name: "錯誤更正", why: "已經吃掉較多錯誤更正餘裕 —— 符號本身有損傷" },
+});
+
+/** 聚合規則的說明文字,兩種符號別各一句。呈現端照這張表顯示,不另外造詞。 */
+export const GRADE_RULE = Object.freeze({
+  oneD: "1D:每條掃描線先取自己最差的參數,再把各條平均 —— 所以總等級不等於任何單一參數。",
+  twoD: "2D:總等級就是所有參數裡最低的那一項。",
+});
+
+/** 逐條掃描線等級的離散度門檻(級)。超過就提示拍攝條件不穩,**不參與任何評級**。 */
+export const SCANLINE_SPREAD_HINT = 1.0;
+
+/**
+ * 等級成因說明(純函式)。輸入:
+ *   - is2D:是否為 2D 符號別
+ *   - overallScore:總分
+ *   - parameters:GradeResult.parameters(1D 時是第 1 條掃描線的)
+ *   - scanlineScores:各掃描線的總分陣列(1D 才有;沒有就傳空陣列或省略)
+ *   - scanlineLimiters:各掃描線各自的限制項代號陣列(1D 才有,與上面同長)
+ * 輸出:{ rule, limiting, spread, spreadHint, lines }
+ *   - limiting:[{ code, name, why, letter, score, count }],已依「成為限制項的次數」排序
+ *   - spread:逐條總分的最大最小差(級);掃描線少於 2 條時為 null
+ *   - lines:掃描線條數
+ * 呼叫端只負責顯示,不得自行推導成因。
+ */
+export function explainGrade(input) {
+  const o = input || {};
+  const params = Array.isArray(o.parameters) ? o.parameters : [];
+  const scores = Array.isArray(o.scanlineScores) ? o.scanlineScores.filter(
+    (v) => typeof v === "number" && Number.isFinite(v)) : [];
+  const limiters = Array.isArray(o.scanlineLimiters) ? o.scanlineLimiters : [];
+  const byCode = new Map(params.map((p) => [p.code, p]));
+
+  let limiting = [];
+  if (o.is2D) {
+    // 2D:總分就是最小值,取所有等於最小值的參數(可能不只一項)
+    let lo = Infinity;
+    for (const p of params) if (p.score < lo) lo = p.score;
+    limiting = params.filter((p) => Number.isFinite(lo) && p.score === lo)
+      .map((p) => ({ code: p.code, letter: p.letter, score: p.score, count: 1 }));
+  } else if (limiters.length) {
+    // 1D:統計「成為該條限制項」的次數。次數多的排前面,同次數時分數低的排前面。
+    const n = new Map();
+    for (const c of limiters) if (c) n.set(c, (n.get(c) || 0) + 1);
+    limiting = [...n.entries()]
+      .map(([code, count]) => {
+        const p = byCode.get(code);
+        return { code, count, letter: p ? p.letter : "", score: p ? p.score : null };
+      })
+      .sort((a, b) => (b.count - a.count) || ((a.score ?? 9) - (b.score ?? 9)));
+  } else {
+    // 沒有逐條資料就退化成「第 1 條的最差項」,並由呼叫端據 lines 判斷該怎麼講
+    let lo = Infinity;
+    for (const p of params) if (p.score < lo) lo = p.score;
+    limiting = params.filter((p) => Number.isFinite(lo) && p.score === lo)
+      .map((p) => ({ code: p.code, letter: p.letter, score: p.score, count: 1 }));
+  }
+
+  limiting = limiting.map((x) => ({
+    ...x,
+    name: (PARAM_CAUSE[x.code] || {}).name || x.code,
+    why: (PARAM_CAUSE[x.code] || {}).why || "",
+  }));
+
+  const spread = scores.length >= 2 ? Math.max(...scores) - Math.min(...scores) : null;
+  return {
+    rule: o.is2D ? GRADE_RULE.twoD : GRADE_RULE.oneD,
+    limiting,
+    spread,
+    // 離散度大 = 同一個符號在不同掃描線上量到差很多,通常是拍攝條件不穩(手震/反光/傾斜),
+    // 不是印刷不均 —— 措辭要指向「重拍」而不是「這批印壞了」。
+    spreadHint: spread !== null && spread > SCANLINE_SPREAD_HINT
+      ? "各掃描線之間差異偏大,較可能是拍攝條件不穩(手震、反光或傾斜),建議重拍一次比對" : "",
+    lines: scores.length,
+  };
+}
