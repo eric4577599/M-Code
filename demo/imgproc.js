@@ -2166,3 +2166,52 @@ export function explainGrade(input) {
     lines: scores.length,
   };
 }
+
+// ── 取幀候選挑選(規格 §3.9 · 2026-08-06)──────────────────────────────────
+// 由來:實機(iPhone 14 Pro)實拍證據 —— 預覽畫面清晰有細節,按下快門後拿到的卻是
+// 一張**糊掉且整片偏藍偏暗**的影像。兩個病徵各自獨立:糊 = 對焦沒收斂,
+// 偏藍偏暗 = 白平衡與感光增益沒收斂。合起來就是「相機剛換模式、管線重啟後的過渡幀」。
+// 也就是說 `applyConstraints` 升壓在該機**確實生效**,而我們抓到的正是重啟後那幾幀。
+//
+// 先前的做法是「多等幾幀讓它收斂」,但幀數是猜的:等太少沒用(1 幀實測不夠),
+// 等太多又拉長使用者必須維持不動的時間 —— 而等待本身就是手震窗口。
+// **改成不猜**:升壓前先留一張已收斂的預覽幀,升壓後兩張都量,誰通過閘門用誰。
+//
+// **不引入任何新門檻**:判準就是既有的、已校準的對焦與眩光閘門(policies.ts,§6.1 凍結)。
+// 只在「升壓幀沒過、預覽幀過了」這個明確組合下才退回 —— 那是升壓幫了倒忙的鐵證。
+// 兩張都過就用升壓幀(解析度較高);兩張都沒過就維持原本流程(交給既有的告警與
+// 可量測性分流處理),不在這裡假裝挑得出好的。
+
+/** 取幀候選的代號。 */
+export const FRAME_CHOICE = Object.freeze({
+  CAPTURED: "captured",  // 原本那條路取到的(L1 照片 / L2 升壓幀)
+  PREVIEW: "preview",    // 升壓前留下的預覽幀(已收斂)
+});
+
+/** 退回預覽幀時要記進報告的理由。呈現端照這張表顯示,不另外造詞。 */
+export const FRAME_FALLBACK_REASON = Object.freeze({
+  focus: "取到的影像對焦不如升壓前的預覽,已改用預覽幀",
+  glare: "取到的影像眩光高於升壓前的預覽,已改用預覽幀",
+});
+
+/**
+ * 挑選要拿去分析的那一張(純函式)。輸入:
+ *   - capturedFocusOk / previewFocusOk:兩張各自的**對焦**閘門結果(布林,拿不到傳 null)
+ *   - capturedGlareOk / previewGlareOk:兩張各自的**眩光**閘門結果
+ * 輸出:{ use, reason }
+ *   - use 為 FRAME_CHOICE.PREVIEW 時呼叫端應改用預覽幀,並把 reason 記進取幀資訊。
+ *   - 判斷刻意只看「沒過 / 過了」而不比分數:分數受來源尺度影響(高解析來源縮到同尺度時
+ *     抗鋸齒平均更重,高頻能量被多吃掉),比分數會產生偽陽性;閘門的絕對門檻沒有這個問題。
+ */
+export function chooseCaptureFrame(input) {
+  const o = input || {};
+  const keep = { use: FRAME_CHOICE.CAPTURED, reason: "" };
+  // 對焦優先於眩光:對焦垮掉時量到的根本不是符號的邊界
+  if (o.capturedFocusOk === false && o.previewFocusOk === true) {
+    return { use: FRAME_CHOICE.PREVIEW, reason: FRAME_FALLBACK_REASON.focus };
+  }
+  if (o.capturedGlareOk === false && o.previewGlareOk === true) {
+    return { use: FRAME_CHOICE.PREVIEW, reason: FRAME_FALLBACK_REASON.glare };
+  }
+  return keep;
+}

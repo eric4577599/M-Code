@@ -58,6 +58,9 @@ import {
   GEOMETRY_APERTURE_X,
   assessShotFreshness,
   explainGrade,
+  chooseCaptureFrame,
+  FRAME_CHOICE,
+  FRAME_FALLBACK_REASON,
   PARAM_CAUSE,
   GRADE_RULE,
   SHOT_FRESHNESS,
@@ -2781,5 +2784,64 @@ describe("explainGrade — 等級成因說明", () => {
     const codes = [...src.matchAll(/makeParam\("([^"]+)"/g)].map((m) => m[1]!);
     expect(codes.length).toBeGreaterThan(0);
     for (const c of codes) expect(Object.keys(PARAM_CAUSE)).toContain(c);
+  });
+});
+
+// ── 取幀候選挑選(規格 §3.9)──────────────────────────────────────────────
+// 由來:iPhone 14 Pro 實拍 —— 預覽清晰有細節,升壓後取到的卻是糊掉且整片偏藍的過渡幀。
+// 這組測試守的是「只在升壓幫了倒忙時才退回」,以及**不得引入新門檻**(只看閘門過/沒過)。
+describe("chooseCaptureFrame — 取幀候選挑選", () => {
+  const both = (v: boolean) => ({ capturedFocusOk: v, previewFocusOk: v,
+    capturedGlareOk: v, previewGlareOk: v });
+
+  it("兩張都過 → 用取到的那張(解析度較高)", () => {
+    expect(chooseCaptureFrame(both(true)).use).toBe(FRAME_CHOICE.CAPTURED);
+  });
+
+  it("**升壓幀對焦沒過、預覽過了 → 退回預覽幀**(實拍看到的那一種)", () => {
+    const r = chooseCaptureFrame({ ...both(true), capturedFocusOk: false });
+    expect(r.use).toBe(FRAME_CHOICE.PREVIEW);
+    expect(r.reason).toBe(FRAME_FALLBACK_REASON.focus);
+  });
+
+  it("升壓幀眩光沒過、預覽過了 → 退回預覽幀", () => {
+    const r = chooseCaptureFrame({ ...both(true), capturedGlareOk: false });
+    expect(r.use).toBe(FRAME_CHOICE.PREVIEW);
+    expect(r.reason).toBe(FRAME_FALLBACK_REASON.glare);
+  });
+
+  it("對焦與眩光同時垮 → 理由報對焦(對焦垮掉時量到的根本不是符號邊界)", () => {
+    const r = chooseCaptureFrame({ ...both(true), capturedFocusOk: false, capturedGlareOk: false });
+    expect(r.reason).toBe(FRAME_FALLBACK_REASON.focus);
+  });
+
+  it("**兩張都沒過 → 不退回**,不假裝挑得出好的(交給既有的告警與可量測性分流)", () => {
+    const r = chooseCaptureFrame(both(false));
+    expect(r.use).toBe(FRAME_CHOICE.CAPTURED);
+    expect(r.reason).toBe("");
+  });
+
+  it("預覽沒過、升壓幀過了 → 當然用升壓幀", () => {
+    const r = chooseCaptureFrame({ ...both(false), capturedFocusOk: true, capturedGlareOk: true });
+    expect(r.use).toBe(FRAME_CHOICE.CAPTURED);
+  });
+
+  it("閘門結果不可得(null)時不退回 —— 拿不到就不猜", () => {
+    const r = chooseCaptureFrame({ capturedFocusOk: null, previewFocusOk: null,
+      capturedGlareOk: null, previewGlareOk: null });
+    expect(r.use).toBe(FRAME_CHOICE.CAPTURED);
+  });
+
+  it("退化輸入不丟例外", () => {
+    for (const i of [undefined, null, {}]) {
+      expect(chooseCaptureFrame(i as never).use).toBe(FRAME_CHOICE.CAPTURED);
+    }
+  });
+
+  it("退回理由的文案指向取幀,不得暗示印刷品質或合規(定位護欄)", () => {
+    for (const v of Object.values(FRAME_FALLBACK_REASON) as string[]) {
+      expect(v).toContain("預覽");
+      for (const bad of ["ISO", "合規", "不合格", "印壞"]) expect(v).not.toContain(bad);
+    }
   });
 });

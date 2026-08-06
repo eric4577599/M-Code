@@ -394,6 +394,7 @@ import {
   roi1DMetrology,
   assessShotFreshness,
   explainGrade,
+  chooseCaptureFrame, FRAME_CHOICE,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1721,13 +1722,53 @@ async function capturePhoto() {
     const now = captureViaDrawImage();
     return now ? recordShot("L3/即時(使用者選)", now.canvas, now.settings, now.extra, null) : null;
   }
+  // 升壓前先留一張**已收斂**的預覽幀當保底(規格 §3.9)。只用 drawImage(GPU 路徑),
+  // 成本接近零。實拍證據顯示升壓後的過渡幀可能比它差很多(糊 + 偏藍),
+  // 留著它,下面就能「誰通過閘門用誰」,不必再猜要沉澱幾幀。
+  const safe = captureViaDrawImage();
+  const safeQ = safe ? measureQuality(safe.canvas, safe.canvas.width, safe.canvas.height) : null;
+
   const byPhoto = await captureViaImageCapture();
-  if (byPhoto) return recordShot("L1/ImageCapture", byPhoto.canvas, byPhoto.settings, byPhoto.extra, byPhoto.req);
+  if (byPhoto) return acceptFrame("L1/ImageCapture", byPhoto, safe, safeQ);
   const byConstraint = await captureViaConstraints();
-  if (byConstraint) return recordShot("L2/applyConstraints", byConstraint.canvas, byConstraint.settings, byConstraint.extra, byConstraint.req);
+  if (byConstraint) return acceptFrame("L2/applyConstraints", byConstraint, safe, safeQ);
   const byDraw = captureViaDrawImage();
   // L3 從不送任何解析度請求 —— req 恆為 null,誠實印「未請求」(見 recordShot)
   return byDraw ? recordShot("L3/drawImage", byDraw.canvas, byDraw.settings, byDraw.extra, null) : null;
+}
+
+// 對某張影像跑閘門,取出對焦與眩光兩項的結果。輸入:measureQuality 的輸出;
+// 輸出:{ focusOk, glareOk }(拿不到時為 null)。
+// 幾何三項在此刻還沒算(要解碼才有),一律傳預覽放行值 —— 這裡只比光度,
+// 不讓未知的幾何值影響「哪一張比較好」的判斷。
+function photometricGateOf(q) {
+  if (!q) return { focusOk: null, glareOk: null };
+  const g = evaluateGate({ symbolDetected: true, varLap: q.varLap, glareRatio: q.glare / 100,
+    washboardAmpRatio: q.wash, wbGainDeviation: q.wb / 100, scaleRefDetected: state.gate.scaleRef,
+    picketAngleDeg: 0, perspectiveTiltDeg: 0, gsdMmPerPx: null, pxPerModule: 9,
+    fluteType: (profileOf() || {}).fluteType });
+  const pick = (k) => { const c = g.report.checks.find((x) => x.key === k); return c ? c.status === "OK" : null; };
+  return { focusOk: pick("focus"), glareOk: pick("glare") };
+}
+
+// 收下一張取幀結果,必要時退回升壓前的預覽幀(規格 §3.9)。
+// 輸入:層別代號、該層的輸出、保底預覽幀與其品質讀數;輸出:要拿去分析的 canvas。
+// **決策由 imgproc.js 的純函式做**(demo/*.html 無自動化測試可覆蓋),此處只負責量與記錄。
+function acceptFrame(path, got, safe, safeQ) {
+  if (!safe || !safeQ) return recordShot(path, got.canvas, got.settings, got.extra, got.req);
+  const gotQ = measureQuality(got.canvas, got.canvas.width, got.canvas.height);
+  const a = photometricGateOf(gotQ), b = photometricGateOf(safeQ);
+  const pick = chooseCaptureFrame({
+    capturedFocusOk: a.focusOk, previewFocusOk: b.focusOk,
+    capturedGlareOk: a.glareOk, previewGlareOk: b.glareOk });
+  if (pick.use !== FRAME_CHOICE.PREVIEW) {
+    return recordShot(path, got.canvas, got.settings, got.extra, got.req);
+  }
+  // 退回預覽幀。**path 要誠實反映實際用的是哪一張** —— 報告若仍印 L2,
+  // 事後看紀錄的人會以為量的是升壓後的高解析影像,那是假的。
+  const c = recordShot(path + "→退回預覽幀", safe.canvas, safe.settings, safe.extra, null);
+  if (lastShotInfo) lastShotInfo.frameFallback = pick.reason;
+  return c;
 }
 
 // 存入掃描清單。img:真實檢驗傳入快門照縮圖;null 時退回 captureImage()(SVG 快照)
@@ -1837,6 +1878,7 @@ function shotSummary(shot) {
   // 過去完全沒有量過);後者只在「預覽是好的、照片卻不是」時才出現,是那張照片不可
   // 採信的具名理由 —— 它必須跟著紀錄進 PDF,否則事後翻報告看不出為何當時要重拍。
   if (shot.shotTiming) parts.push("取幀時序 " + esc(shot.shotTiming));
+  if (shot.frameFallback) parts.push("⚠ " + esc(shot.frameFallback));
   if (shot.staleShot) parts.push("⚠ " + esc(shot.staleShot));
   return parts.join(" · ");
 }
