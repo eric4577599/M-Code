@@ -1586,6 +1586,333 @@ export function finderDamageProxy(gray, w, roi, photometric) {
   return Math.max(0, Math.min(1, (sd / sc) * 0.8));
 }
 
+// ═══ 1D 元素計量(規格 §3.5 · 2026-08-05 重新設計)═══════════════════════════
+//
+// 取代 roi1DGeometry 的量測路徑。動機是兩個**在像素完美、零雜訊合成圖上就成立**的失效
+//(所以與鏡頭 / 光線 / 拍攝技巧全都無關):
+//
+//  失效 A —— 量測模型套錯符號別。roi1DGeometry 對所有 1D 符號一律算「元素寬 ÷ 模組寬,
+//    離最近整數多遠」。這對**模組型**符號(Code 128 / QR / DataMatrix,元素是模組整數倍)
+//    是對的,但 **ITF-14 是雙寬(two-width)符號** —— 元素只有窄與寬兩種,寬窄比是一個
+//    允許落在 2.0–3.0 的比例,GS1 建議 2.5。於是 2.5 離最近整數剛好 0.5,而容差正是 0.5:
+//    DEC = 1 − 0.5/0.5 = 0 → **F**,而且 6 / 12 / 24 px/元素全部一樣。提高解析度永遠無效。
+//
+//  失效 B —— 模組寬被量化成整數像素。scanlineRuns 以整數像素切 run,模組寬取十百分位,
+//    所以永遠是整數;實拍時每模組像素數幾乎不可能是整數,誤差由全部元素繼承。
+//    實測:5.5 px/模組 → DEC 0.80(F);9.7 px → 3.20(B);14.2 px → 3.43(A/B)。
+//    **同一張完美圖,只是換個距離拍。**
+//
+// 業界(ISO/IEC 15416)的做法與此處採用的對應:
+//   ① 量測孔徑 —— verifier 讀的是規定直徑圓孔徑內的平均反射率,本質是空間低通濾波,
+//      把比孔徑細的紙紋 / 楞痕 / 網點抹平。**本檔只把孔徑施加在幾何掃描線上**,
+//      光度量測(roiPhotometric)完全不經過它 —— 故不影響 SC / MOD / Rmin,
+//      不觸及規格 §6.1 的門檻凍結(2026-08-05 裁示 D3 已把光度與幾何拆開,前提成立)。
+//   ② 邊界取剖面**穿越全域門檻 GT=(Rmax+Rmin)/2 的次像素內插位置**,不是二值化後的整數 run。
+//   ③ Decodability 依**該符號別自己的參考解碼演算法**定義,雙寬與模組型不是同一個量。
+//   ④ 模組型用**邊到同向邊(E2SE)**,天生免疫於均勻墨量增益(柔印瓦楞的主要劣化)。
+//
+// **未做(留待後續)**:逐掃描線評級後平均(ISO 的聚合順序)—— 那要動 src/engines/grade.ts,
+//   影響面最大,依落地順序排在實拍數字回來之後。
+
+/** 1D 符號別的量測模型類別。改這裡就要改規格 §3.5 的對照表。 */
+export const ONE_D_KIND = Object.freeze({
+  ITF14: "twoWidth",   // 雙寬:元素只有窄 / 寬,比例 2.0–3.0(GS1 建議 2.5)
+  GS1_128: "modular",  // 模組型:元素為 1–4 個模組的整數倍
+  CODE128: "modular",
+});
+
+/** ITF(Interleaved 2 of 5)每個數字的五元素窄寬樣式。N=窄 W=寬。 */
+const ITF_DIGIT = Object.freeze({
+  0: "NNWWN", 1: "WNNNW", 2: "NWNNW", 3: "WWNNN", 4: "NNWNW",
+  5: "WNWNN", 6: "NWWNN", 7: "NNNWW", 8: "WNNWN", 9: "NWNWN",
+});
+
+/**
+ * 由解碼字串重建 ITF 的標稱窄/寬序列(規格 §3.5 的 S6「參考解碼取回標稱值」)。
+ * **這是整個重新設計的樞紐**:解碼已經成功,所以真值是已知的 ——
+ * 不必再從量到的數字裡「猜」模組寬,改成對已知答案做擬合。
+ * 輸入:偶數長度的數字字串;輸出:Uint8Array(0=窄, 1=寬),長度 4 + 10×(n/2) + 3;
+ *   位數為奇數 / 含非數字 / 空字串一律回 null(呼叫端據此走「不可量測」)。
+ */
+export function itfNominalPattern(digits) {
+  const s = String(digits == null ? "" : digits);
+  if (!s.length || s.length % 2 !== 0 || !/^\d+$/.test(s)) return null;
+  const out = [];
+  out.push(0, 0, 0, 0);                    // start pattern NNNN
+  for (let i = 0; i < s.length; i += 2) {
+    const a = ITF_DIGIT[s[i]], b = ITF_DIGIT[s[i + 1]];
+    if (!a || !b) return null;
+    for (let k = 0; k < 5; k++) {          // 交錯:前碼給條、後碼給空
+      out.push(a[k] === "W" ? 1 : 0);
+      out.push(b[k] === "W" ? 1 : 0);
+    }
+  }
+  out.push(1, 0, 0);                       // stop pattern WNN
+  return Uint8Array.from(out);
+}
+
+/**
+ * 合成孔徑(規格 §3.5 的 S2)。圓形孔徑投影到一維掃描線上的等效權重是**弦長**
+ * w(x) = 2√((d/2)² − x²) —— 不是方波也不是高斯,那是圓孔徑的幾何。
+ * 輸入:剖面(Float64Array 或數值陣列)、孔徑直徑(px);輸出:新的 Float64Array。
+ * 直徑 < 1.05 px 視為無孔徑,直接回傳複本(不做無意義的卷積)。
+ */
+export function apertureProfile(prof, diameterPx) {
+  const n = prof.length;
+  const out = new Float64Array(n);
+  if (!(diameterPx > 1.05)) { for (let i = 0; i < n; i++) out[i] = prof[i]; return out; }
+  const R = diameterPx / 2, r = Math.floor(R);
+  const k = new Float64Array(2 * r + 1);
+  let sum = 0;
+  for (let i = -r; i <= r; i++) {
+    const v = Math.max(0, R * R - i * i);
+    const w = 2 * Math.sqrt(v);
+    k[i + r] = w; sum += w;
+  }
+  if (sum <= 0) { for (let i = 0; i < n; i++) out[i] = prof[i]; return out; }
+  for (let i = 0; i < k.length; i++) k[i] /= sum;
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let j = -r; j <= r; j++) s += prof[Math.min(n - 1, Math.max(0, i + j))] * k[j + r];
+    out[i] = s;
+  }
+  return out;
+}
+
+/**
+ * 次像素邊界(規格 §3.5 的 S4)。回傳剖面穿越 gt 的內插座標陣列。
+ * **用「明/暗狀態轉換」判定,不用乘積變號**:取樣值精確等於門檻時乘積為 0,
+ * 嚴格變號判定會整個漏掉那條邊 —— 合成圖在非整數取樣密度下邊界覆蓋率剛好 0.5,
+ * 會系統性踩到這個情形(實拍幾乎不會,但守門測試會)。
+ */
+export function subpixelEdges(prof, gt) {
+  const e = [];
+  if (!prof || prof.length < 2) return e;
+  let prevLight = prof[0] >= gt;
+  for (let i = 1; i < prof.length; i++) {
+    const light = prof[i] >= gt;
+    if (light !== prevLight) {
+      const a = prof[i - 1], b = prof[i], d = b - a;
+      e.push(d === 0 ? i - 0.5 : i - 1 + (gt - a) / d);
+      prevLight = light;
+    }
+  }
+  return e;
+}
+
+/**
+ * 已知標稱模組數時的模組寬閉式最小平方解(規格 §3.5 的 S7)。
+ *   w = argmin Σ (mᵢ − w·nᵢ)²  ⇒  w = Σ(mᵢnᵢ) / Σ(nᵢ²)
+ * 比十百分位估計穩健:用上**全部**元素而非單一分位點,且不會被量化成整數。
+ */
+export function fitModuleLS(measured, nominal) {
+  let num = 0, den = 0;
+  for (let i = 0; i < measured.length; i++) { num += measured[i] * nominal[i]; den += nominal[i] * nominal[i]; }
+  return den > 0 ? num / den : 0;
+}
+
+/**
+ * Code 128 的總模組數 —— 由**元素數**推出,不需要 103 個樣式的編碼表。
+ * 結構(ISO/IEC 15417)是固定的:start / 每個資料字元 / check 各為 **6 元素 11 模組**,
+ * stop 為 **7 元素 13 模組**。故 元素數 E = 6n + 19、總模組數 = 11n + 35(n = 資料字元數)。
+ * 輸入:元素數;輸出:總模組數,或 null(元素數不符 Code 128 結構 → 數錯了)。
+ *
+ * **為什麼需要它:** 無約束的模組寬估計在墨量增益下會收斂到錯誤的局部解 ——
+ * 實測:條各胖 0.3 模組、空各瘦 0.3 模組時,迭代擬合收斂到 module 8.56(真值 12)、
+ * 標稱序列整組錯位,DEC 與 BWR 一起被污染。而柔印墨量增益正是瓦楞箱的主要劣化,
+ * 不能在那個情境下失效。總跨距 ÷ 已知總模組數是閉式解、沒有歧義,
+ * 且對稱的墨量增益**不改變總跨距**,天生免疫。
+ */
+export function code128TotalModules(elementCount) {
+  if (!Number.isInteger(elementCount)) return null;
+  const n = (elementCount - 19) / 6;
+  if (!Number.isInteger(n) || n < 0) return null;
+  return 11 * n + 35;
+}
+
+/**
+ * 模組型符號的模組寬與標稱序列(規格 §3.5 的 S7,模組型分支)。
+ * 以 totalModules 為錨:w = 總跨距 ÷ 總模組數 → 四捨五入得標稱 → 閉式 LS 精修。
+ * **捨入後的總模組數必須對得回 totalModules**,否則就是數錯了(回 ok:false,呼叫端作廢該掃描線)。
+ * 輸入:量到的元素寬、總模組數;輸出:{ module, nominal, ok }。
+ */
+export function fitModuleAnchored(measured, totalModules) {
+  if (!measured.length || !(totalModules > 0)) return { module: 0, nominal: null, ok: false };
+  let span = 0;
+  for (const m of measured) span += m;
+  const w0 = span / totalModules;
+  if (!(w0 > 0)) return { module: 0, nominal: null, ok: false };
+  const nominal = measured.map((m) => Math.max(1, Math.round(m / w0)));
+  let sum = 0;
+  for (const n of nominal) sum += n;
+  if (sum !== totalModules) return { module: 0, nominal: null, ok: false };
+  const w = fitModuleLS(measured, nominal);
+  return w > 0 ? { module: w, nominal, ok: true } : { module: 0, nominal: null, ok: false };
+}
+
+/**
+ * 雙寬符號的擬合與判別餘裕(規格 §3.5 的 S8)。
+ * 輸入:量到的元素寬、標稱窄寬序列(0/1);
+ * 輸出:{ narrow, wide, ratio, margin } —— margin 是**最差元素離判別門檻還剩多少**,
+ *   1 = 完美、0 = 剛好落在門檻上、< 0 = 已經會誤讀。語意對應 ISO 的 V=(RT−RM)/RT。
+ * 判別門檻 RT 取窄寬兩群平均的中點(這是雙寬符號參考解碼的做法:窄寬分不分得開,
+ * 而不是「離某個整數倍多遠」—— 後者正是失效 A)。
+ */
+export function fitTwoWidth(measured, isWide) {
+  const nArr = [], wArr = [];
+  for (let i = 0; i < measured.length; i++) (isWide[i] ? wArr : nArr).push(measured[i]);
+  if (!nArr.length || !wArr.length) return { narrow: 0, wide: 0, ratio: 0, margin: -1 };
+  // 用**中位數**而非平均:單一個印歪的元素若把判別門檻拉向自己,就會遮掉自己的異常
+  // (平均下實測 margin 0.33,中位數下 ≈ 0 —— 後者才是該回報的)。
+  const med = (a) => { const s = [...a].sort((x, y) => x - y); const h = s.length >> 1;
+    return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2; };
+  const narrow = med(nArr), wide = med(wArr), rt = (narrow + wide) / 2;
+  if (!(wide > narrow)) return { narrow, wide, ratio: 0, margin: -1 };
+  let margin = Infinity;
+  for (let i = 0; i < measured.length; i++) {
+    // 窄元素應落在 RT 之下、寬元素在 RT 之上;各自以「到 RT 的半距」正規化
+    const m = isWide[i] ? (measured[i] - rt) / (wide - rt) : (rt - measured[i]) / (rt - narrow);
+    if (m < margin) margin = m;
+    }
+  return { narrow, wide, ratio: wide / narrow, margin: Math.min(1, margin) };
+}
+
+/** 幾何掃描的孔徑直徑(以模組寬計)。ISO 對大 X 尺寸的參考孔徑約 0.5 X。 */
+export const GEOMETRY_APERTURE_X = 0.5;
+
+/**
+ * 1D 元素計量主入口(規格 §3.5)。取代 roi1DGeometry 的**量測**職責。
+ * 輸入:ROI 灰階、寬、ROI 座標、opts { sym, text, scanlines, apertureX }
+ * 輸出:{ scanlines:[{maxWidthDeviation, tolerance, maxElementReflectanceNonUniformity}],
+ *        modulePx, kind, bwr, elementsExpected, elementsMatched, marginWorst }
+ *   —— scanlines 的形狀與 roi1DGeometry 相同,呼叫端(buildGradeResult)不必改。
+ *
+ * 兩趟:第一趟不加孔徑求粗略模組寬,第二趟以 0.5 × 粗略模組寬的孔徑重量。
+ * 孔徑直徑必須以**模組數**而非像素指定,否則它會隨拍攝距離漂移。
+ */
+export function roi1DMetrology(gray, w, roi, opts = {}) {
+  const kind = ONE_D_KIND[opts.sym] || "modular";
+  const nScan = opts.scanlines || 10;
+  const apX = opts.apertureX === undefined ? GEOMETRY_APERTURE_X : opts.apertureX;
+  const r = roiSlice(gray, w, roi);
+  const nominalPat = kind === "twoWidth" ? itfNominalPattern(opts.text) : null;
+  const expected = nominalPat ? nominalPat.length : null;
+
+  const rows = [];
+  for (let k = 0; k < nScan; k++) {
+    const y = Math.floor((r.h * (k + 0.5)) / nScan);
+    rows.push(Float64Array.from(r.data.subarray(y * r.w, (y + 1) * r.w)));
+  }
+
+  // 第一趟:無孔徑,取粗略模組寬(只為了決定孔徑大小)
+  let seed = 0, seedN = 0;
+  for (const row of rows) {
+    const e = subpixelEdges(row, gtOf(row));
+    if (e.length < 5) continue;
+    const wid = [];
+    for (let i = 1; i < e.length; i++) wid.push(e[i] - e[i - 1]);
+    const s = [...wid].sort((a, b) => a - b);
+    seed += s[Math.floor(s.length * 0.1)] || s[0]; seedN++;
+  }
+  const apDiam = seedN ? (seed / seedN) * apX : 0;
+
+  const out = [];
+  const modules = [];
+  let bwrSum = 0, bwrN = 0, matched = 0, marginWorst = Infinity, elemResidualWorst = 0;
+
+  for (const row of rows) {
+    const prof = apDiam > 1.05 ? apertureProfile(row, apDiam) : row;
+    const gt = gtOf(prof);
+    const edges = subpixelEdges(prof, gt);
+    if (edges.length < 5) { continue; }
+    const meas = [];
+    for (let i = 1; i < edges.length; i++) meas.push(edges[i] - edges[i - 1]);
+    // 暗元素的反射不均(DEF 輸入):沿用原語意,量在**未經孔徑**的原始剖面上
+    let maxDef = 0;
+    for (let i = 0; i < meas.length; i += 2) {
+      const a = Math.ceil(edges[i]), b = Math.floor(edges[i + 1]);
+      let lo = 255, hi = 0;
+      for (let x = a; x <= b && x < row.length; x++) { if (row[x] < lo) lo = row[x]; if (row[x] > hi) hi = row[x]; }
+      if (hi >= lo) { const nu = (hi - lo) / 255; if (nu > maxDef) maxDef = nu; }
+    }
+
+    if (kind === "twoWidth") {
+      // S5 元素數驗證:對不上就是數錯了,該掃描線作廢(不硬湊一個等級出來)
+      if (!nominalPat || meas.length !== expected) continue;
+      matched++;
+      const f = fitTwoWidth(meas, nominalPat);
+      if (!(f.narrow > 0)) continue;
+      modules.push(f.narrow);
+      if (f.margin < marginWorst) marginWorst = f.margin;
+      // 條 / 空殘差差 → 條寬增益(BWR),偶數索引為條
+      let bs = 0, bn = 0, ss = 0, sn = 0;
+      for (let i = 0; i < meas.length; i++) {
+        const nomW = nominalPat[i] ? f.wide : f.narrow;
+        const res = meas[i] - nomW;
+        if (i % 2 === 0) { bs += res; bn++; } else { ss += res; sn++; }
+      }
+      if (bn && sn) { bwrSum += (bs / bn - ss / sn) / f.narrow; bwrN++; }
+      // margin 直接就是 DEC:令 tolerance=0.5、deviation=(1−margin)×0.5 ⇒ DEC = margin
+      out.push({ maxWidthDeviation: (1 - Math.max(0, f.margin)) * 0.5, tolerance: 0.5,
+                 maxElementReflectanceNonUniformity: maxDef });
+    } else {
+      // S5 元素數驗證(模組型):元素數必須符合 Code 128 的固定結構,
+      // 且捨入後的總模組數要對得回去。任一條不成立就是數錯了 → 該掃描線作廢。
+      const total = code128TotalModules(meas.length);
+      if (total === null) continue;
+      const f = fitModuleAnchored(meas, total);
+      if (!f.ok) continue;
+      matched++;
+      modules.push(f.module);
+      // E2SE(邊到同向邊):量「這個條的左緣到下一個條的左緣」,均勻墨量增益會抵銷掉。
+      // 同時算「元素逐一殘差」只為了診斷與守門對照 —— 它**不**參與評級,
+      // 因為它正是會被墨量增益污染的那個量(實測:條各胖 0.3 模組時,
+      // 元素逐一殘差 0.330、E2SE 殘差 0.054,污染降到約 1/6)。
+      let worst = 0, elemWorst = 0;
+      for (let i = 0; i + 1 < meas.length; i++) {
+        const me = meas[i] + meas[i + 1], no = f.nominal[i] + f.nominal[i + 1];
+        const d = Math.abs(me - f.module * no) / f.module;   // 以模組為單位
+        if (d > worst) worst = d;
+      }
+      for (let i = 0; i < meas.length; i++) {
+        const d = Math.abs(meas[i] - f.module * f.nominal[i]) / f.module;
+        if (d > elemWorst) elemWorst = d;
+      }
+      if (elemWorst > elemResidualWorst) elemResidualWorst = elemWorst;
+      let bs = 0, bn = 0, ss = 0, sn = 0;
+      for (let i = 0; i < meas.length; i++) {
+        const res = meas[i] - f.module * f.nominal[i];
+        if (i % 2 === 0) { bs += res; bn++; } else { ss += res; sn++; }
+      }
+      if (bn && sn) { bwrSum += (bs / bn - ss / sn) / f.module; bwrN++; }
+      if (1 - worst / 0.5 < marginWorst) marginWorst = 1 - worst / 0.5;
+      out.push({ maxWidthDeviation: worst, tolerance: 0.5,
+                 maxElementReflectanceNonUniformity: maxDef });
+    }
+  }
+
+  modules.sort((a, b) => a - b);
+  return {
+    scanlines: out,
+    modulePx: modules.length ? modules[Math.floor(modules.length / 2)] : 0,
+    kind,
+    bwr: bwrN ? bwrSum / bwrN : null,
+    elementsExpected: expected,
+    elementsMatched: matched,
+    marginWorst: Number.isFinite(marginWorst) ? marginWorst : null,
+    // 診斷用:模組型的「元素逐一殘差」。**不參與評級** —— 它是會被墨量增益污染的量,
+    // 留著是為了讓「E2SE 有沒有真的擋掉污染」變成可斷言的事實(見規格 §3.5)。
+    elementResidualWorst: kind === "modular" ? elemResidualWorst : null,
+  };
+}
+
+/** 單條剖面的全域門檻 GT = (Rmax + Rmin) / 2(ISO 15416 的定義)。 */
+function gtOf(prof) {
+  let hi = -Infinity, lo = Infinity;
+  for (let i = 0; i < prof.length; i++) { const v = prof[i]; if (v > hi) hi = v; if (v < lo) lo = v; }
+  return (hi + lo) / 2;
+}
+
 // ── 可量測性判定(規格 §3.4 · 2026-08-05 裁示 D4)──────────────────────────
 // 由來:對抗性稽核 IMG-09 / IMG-03 / IMG-04 —— 解碼失敗時仍以「畫面中央 70%」的任意
 // 像素產出等級與「通過/未通過」;1D 橫躺時掃描線全滅、落到硬寫的 {0.5,0.5,0.5} 最差值

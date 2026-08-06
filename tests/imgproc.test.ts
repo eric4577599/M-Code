@@ -46,6 +46,16 @@ import {
   UNMEASURABLE_LABEL,
   SIMULATED_LABEL,
   ROTATED_HINT_MIN_DEG,
+  ONE_D_KIND,
+  itfNominalPattern,
+  apertureProfile,
+  subpixelEdges,
+  fitModuleLS,
+  fitModuleAnchored,
+  code128TotalModules,
+  fitTwoWidth,
+  roi1DMetrology,
+  GEOMETRY_APERTURE_X,
 } from "../demo/imgproc.js";
 
 // 產生單色 RGBA 影像
@@ -2291,5 +2301,271 @@ describe("光度量測基底對照(矯正 vs 未矯正,同一張合成圖)", () 
     // mobile.html 的 inspectReal 若把 1D 光度改回 rect.gray,上面三條會同時失敗。
     const { pmRaw } = pair(25);
     expect(minOf(pmRaw.edgeContrasts as number[])).toBeGreaterThan(0);
+  });
+});
+
+// ══ 1D 元素計量(規格 §3.5 · 2026-08-05 重新設計)══════════════════════════════
+// 這一組守的是兩個「在像素完美、零雜訊合成圖上就成立」的失效 —— 與拍攝條件無關。
+describe("1D 元素計量", () => {
+  const DIGITS = "14712345678907";
+  const LIGHT = 235, DARK = 20;
+
+  /** 以**面積覆蓋率**取樣(真實感測器的行為),支援非整數的每元素像素數。 */
+  function render1D(widths: number[], ppm: number, h = 12) {
+    const QUIET = 10;
+    const total = widths.reduce((s, v) => s + v, 0);
+    const W = Math.ceil((total + QUIET * 2) * ppm) + 2;
+    const edges: number[] = [];
+    let x = QUIET * ppm;
+    for (const wd of widths) { edges.push(x); x += wd * ppm; }
+    edges.push(x);
+    const row = new Float64Array(W).fill(LIGHT);
+    for (let px = 0; px < W; px++) {
+      let cov = 0;
+      for (let i = 0; i < widths.length; i += 2) {           // 偶數索引 = 條(暗)
+        cov += Math.max(0, Math.min(px + 1, edges[i + 1]!) - Math.max(px, edges[i]!));
+      }
+      cov = Math.min(1, cov);
+      row[px] = LIGHT + (DARK - LIGHT) * cov;
+    }
+    const gray = new Uint8ClampedArray(W * h);
+    for (let y = 0; y < h; y++) for (let px = 0; px < W; px++) gray[y * W + px] = Math.round(row[px]!);
+    return { gray, W, h, roi: { x0: 0, y0: 0, x1: W, y1: h } };
+  }
+  /** ITF-14 的元素寬序列(窄=1、寬=ratio) */
+  const itfWidths = (ratio: number) =>
+    Array.from(itfNominalPattern(DIGITS)! as Uint8Array, (v: number) => (v ? ratio : 1));
+  // 模組型:**結構上合法的 Code 128**(不是可解碼的內容,但計量只依賴結構)——
+  // start / 資料 / check 各 6 元素 11 模組,stop 7 元素 13 模組。
+  // 共 6 組 + stop = 43 元素、79 模組,符合 E = 6n+19、模組 = 11n+35(n = 4)。
+  const MOD_PAT = [
+    2,1,2,2,2,2,   1,2,3,2,1,2,   3,1,1,3,2,1,
+    1,3,2,2,2,1,   2,1,3,1,2,2,   1,1,2,3,2,2,
+    2,3,3,1,1,1,2,
+  ];
+
+  const DEC = (r: { scanlines: { maxWidthDeviation: number; tolerance: number }[] }) => {
+    if (!r.scanlines.length) return null;
+    const dev = Math.max(...r.scanlines.map((s) => s.maxWidthDeviation));
+    return Math.max(0, Math.min(1, 1 - dev / 0.5)) * 4;
+  };
+
+  it("符號別 → 量測模型的對照表(改這裡就要改規格 §3.5)", () => {
+    expect(ONE_D_KIND.ITF14).toBe("twoWidth");
+    expect(ONE_D_KIND.GS1_128).toBe("modular");
+    expect(ONE_D_KIND.CODE128).toBe("modular");
+    // 1D 符號別清單與量測模型表必須一一對應,不得有孤兒
+    expect(Object.keys(ONE_D_KIND).sort()).toEqual([...(ONE_D_SYMBOLOGIES as string[])].sort());
+  });
+
+  describe("itfNominalPattern — 由解碼結果取回標稱值(S6 樞紐)", () => {
+    it("14 位數 → 77 個元素,start=NNNN、stop=WNN", () => {
+      const p = itfNominalPattern(DIGITS)!;
+      expect(p.length).toBe(77);                       // 4 + 10×7 + 3
+      expect(Array.from(p.slice(0, 4))).toEqual([0, 0, 0, 0]);
+      expect(Array.from(p.slice(-3))).toEqual([1, 0, 0]);
+    });
+    it("每個數字對貢獻 10 個元素,且窄寬各半(ITF 每碼恆 2 寬 3 窄)", () => {
+      const p = itfNominalPattern("1234567890")!;
+      expect(p.length).toBe(4 + 10 * 5 + 3);
+      const body = Array.from(p.slice(4, -3));
+      expect(body.filter((v) => v === 1).length).toBe(body.length * 0.4); // 每 5 元素 2 寬
+    });
+    it("退化輸入回 null(呼叫端據此走不可量測)", () => {
+      for (const bad of ["", "123", "12a4", null, undefined, 12.5]) {
+        expect(itfNominalPattern(bad as never)).toBeNull();
+      }
+    });
+  });
+
+  describe("subpixelEdges — 次像素邊界(S4)", () => {
+    it("線性內插求穿越點", () => {
+      const e = subpixelEdges([100, 100, 0, 0], 50);
+      expect(e.length).toBe(1);
+      expect(e[0]).toBeCloseTo(1.5, 6);
+    });
+    it("**取樣值精確等於門檻時仍算一條邊**(乘積變號判定會整個漏掉)", () => {
+      const e = subpixelEdges([100, 50, 0], 50);   // 中間那點剛好落在門檻
+      expect(e.length).toBe(1);
+    });
+    it("全亮 / 全暗沒有邊", () => {
+      expect(subpixelEdges([100, 100, 100], 50).length).toBe(0);
+      expect(subpixelEdges([0, 0, 0], 50).length).toBe(0);
+    });
+  });
+
+  describe("apertureProfile — 合成孔徑(S2)", () => {
+    it("常數輸入保持不變(核已正規化)", () => {
+      const out = apertureProfile(new Float64Array(40).fill(180), 7);
+      for (let i = 5; i < 35; i++) expect(out[i]).toBeCloseTo(180, 6);
+    });
+    it("直徑 ≤ 1 px 視為無孔徑,原樣回傳", () => {
+      const src = [10, 200, 10, 200];
+      expect(Array.from(apertureProfile(src, 1))).toEqual(src);
+    });
+    it("**壓得掉比孔徑細的雜訊,壓不掉比孔徑寬的元素**(這就是它的用途)", () => {
+      const n = 200, fine = new Float64Array(n), coarse = new Float64Array(n);
+      for (let i = 0; i < n; i++) {
+        fine[i] = i % 2 ? 200 : 60;                       // 1 px 週期(紙紋)
+        coarse[i] = Math.floor(i / 20) % 2 ? 200 : 60;    // 20 px 週期(元素)
+      }
+      const amp = (a: ArrayLike<number>) => {
+        let hi = -Infinity, lo = Infinity;
+        for (let i = 40; i < 160; i++) { if (a[i]! > hi) hi = a[i]!; if (a[i]! < lo) lo = a[i]!; }
+        return hi - lo;
+      };
+      expect(amp(apertureProfile(fine, 8))).toBeLessThan(amp(fine) * 0.15);
+      expect(amp(apertureProfile(coarse, 8))).toBeGreaterThan(amp(coarse) * 0.7);
+    });
+  });
+
+  describe("模組寬擬合(S7)", () => {
+    it("fitModuleLS 是閉式最小平方解", () => {
+      expect(fitModuleLS([6, 12, 18], [1, 2, 3])).toBeCloseTo(6, 9);
+      expect(fitModuleLS([6.5, 12, 18], [1, 2, 3])).toBeCloseTo((6.5 + 24 + 54) / 14, 9);
+    });
+    it("**非整數模組寬也回得出來**(失效 B 的核心)", () => {
+      for (const w of [5.5, 6.3, 7.4, 9.7, 14.2]) {
+        const nominal = [1, 2, 3, 4, 1, 2];
+        const total = nominal.reduce((a, b) => a + b, 0);
+        const f = fitModuleAnchored(nominal.map((n) => n * w), total);
+        expect(f.ok).toBe(true);
+        expect(f.module).toBeCloseTo(w, 6);
+      }
+    });
+
+    it("code128TotalModules:由元素數推總模組數(E=6n+19 → 11n+35)", () => {
+      expect(code128TotalModules(19)).toBe(35);   // 只有 start + check + stop
+      expect(code128TotalModules(25)).toBe(46);   // n=1
+      expect(code128TotalModules(43)).toBe(79);   // n=4,本檔測試樣式
+      for (const bad of [0, 18, 20, 24, -6, 7.5, NaN]) expect(code128TotalModules(bad)).toBeNull();
+    });
+
+    it("捨入後總模組數對不回去 → ok:false(數錯了就不硬湊)", () => {
+      expect(fitModuleAnchored([10, 10, 10], 7).ok).toBe(false);
+      expect(fitModuleAnchored([], 10).ok).toBe(false);
+    });
+    it("fitTwoWidth:margin 1 = 完美、0 = 落在判別門檻上", () => {
+      const perfect = fitTwoWidth([10, 25, 10, 25], [0, 1, 0, 1]);
+      expect(perfect.ratio).toBeCloseTo(2.5, 6);
+      expect(perfect.margin).toBeCloseTo(1, 6);
+      // 用中位數當窄/寬中心,所以單一個印歪的元素不會把門檻拉向自己、遮掉自己
+      const meas = [10, 25, 10, 25, 10, 25, 17.5, 25];   // 最後一個窄元素胖到門檻上
+      const isW = [0, 1, 0, 1, 0, 1, 0, 1];
+      const onEdge = fitTwoWidth(meas, isW);
+      expect(onEdge.narrow).toBeCloseTo(10, 6);          // 中位數不受那一個影響
+      expect(onEdge.margin).toBeLessThan(0.05);
+    });
+  });
+
+  describe("**失效 A:ITF-14 的寬窄比不再影響等級**", () => {
+    it("GS1 建議的 2.5:1 拿到滿分(舊路徑在此恆為 F)", () => {
+      const s = render1D(itfWidths(2.5), 12);
+      const r = roi1DMetrology(s.gray, s.W, s.roi, { sym: "ITF14", text: DIGITS });
+      expect(r.kind).toBe("twoWidth");
+      expect(r.elementsExpected).toBe(77);
+      expect(r.elementsMatched).toBeGreaterThan(0);
+      expect(DEC(r)).toBeGreaterThan(3.9);
+    });
+    it("整條合法比例區間(2.0–3.0)都拿滿分,且模組寬量得準", () => {
+      for (const ratio of [2.0, 2.25, 2.5, 2.75, 3.0]) {
+        const s = render1D(itfWidths(ratio), 12);
+        const r = roi1DMetrology(s.gray, s.W, s.roi, { sym: "ITF14", text: DIGITS });
+        expect(DEC(r), `ratio ${ratio}`).toBeGreaterThan(3.9);
+        expect(r.modulePx, `ratio ${ratio}`).toBeCloseTo(12, 1);   // narrow = 12 px
+      }
+    });
+    it("對照:舊路徑 roi1DGeometry 在 2.5:1 確實是 F(記錄病灶,不得回頭)", () => {
+      const s = render1D(itfWidths(2.5), 12);
+      const old = roi1DGeometry(s.gray, s.W, s.roi);
+      const dev = Math.max(...old.scanlines.map((x: { maxWidthDeviation: number }) => x.maxWidthDeviation));
+      expect(dev).toBeCloseTo(0.5, 2);            // 離最近整數剛好半個模組 → DEC 0
+    });
+    it("**條真的印歪了就要掉下來**(不是把所有東西都判成 A)", () => {
+      const wds = itfWidths(2.5);
+      wds[20] = 1.75;                              // 一個窄元素胖到接近判別門檻
+      const s = render1D(wds, 12);
+      const r = roi1DMetrology(s.gray, s.W, s.roi, { sym: "ITF14", text: DIGITS });
+      expect(DEC(r)).toBeLessThan(1.5);
+    });
+    it("元素數對不上 → 該掃描線作廢,不硬湊等級", () => {
+      const s = render1D(itfWidths(2.5), 12);
+      // 餵錯的解碼字串(位數不同)→ 標稱序列長度不符
+      const r = roi1DMetrology(s.gray, s.W, s.roi, { sym: "ITF14", text: "123456789012" });
+      expect(r.elementsMatched).toBe(0);
+      expect(r.scanlines.length).toBe(0);
+    });
+  });
+
+  describe("**失效 B:等級不再隨取樣密度的小數部分跳動**", () => {
+    it("ITF-14:6.0→14.0 px/元素 連續掃描,擺動 < 0.25 級", () => {
+      const vals: number[] = [];
+      for (let ppm = 6; ppm <= 14.0001; ppm += 0.1) {
+        const s = render1D(itfWidths(2.5), ppm);
+        const r = roi1DMetrology(s.gray, s.W, s.roi, { sym: "ITF14", text: DIGITS });
+        const d = DEC(r);
+        expect(d, `ppm ${ppm.toFixed(1)} 應可量測`).not.toBeNull();
+        vals.push(d!);
+      }
+      expect(vals.length).toBeGreaterThan(75);
+      expect(Math.max(...vals) - Math.min(...vals)).toBeLessThan(0.25);
+    });
+    it("模組型:同樣的掃描,擺動 < 0.25 級", () => {
+      const vals: number[] = [];
+      for (let ppm = 6; ppm <= 14.0001; ppm += 0.1) {
+        const s = render1D(MOD_PAT, ppm);
+        const r = roi1DMetrology(s.gray, s.W, s.roi, { sym: "GS1_128" });
+        const d = DEC(r);
+        expect(d, `ppm ${ppm.toFixed(1)} 應可量測`).not.toBeNull();
+        vals.push(d!);
+      }
+      expect(Math.max(...vals) - Math.min(...vals)).toBeLessThan(0.25);
+    });
+    it("對照:舊路徑在同一段掃描裡擺動超過 2 級(這就是要修的病)", () => {
+      const vals: number[] = [];
+      for (let ppm = 6; ppm <= 14.0001; ppm += 0.5) {
+        const s = render1D(MOD_PAT, ppm);
+        const old = roi1DGeometry(s.gray, s.W, s.roi);
+        const dev = Math.max(...old.scanlines.map((x: { maxWidthDeviation: number }) => x.maxWidthDeviation));
+        vals.push(Math.max(0, Math.min(1, 1 - dev / 0.5)) * 4);
+      }
+      expect(Math.max(...vals) - Math.min(...vals)).toBeGreaterThan(2);
+    });
+  });
+
+  describe("條寬增益(BWR)第一次成為可量測值", () => {
+    it("條與空對稱變胖 / 變瘦時量得出來,且符號正確", () => {
+      const base = MOD_PAT.slice();
+      const gain = 0.3;                              // 每個條胖 0.3 模組、每個空瘦 0.3
+      const fat = base.map((n, i) => (i % 2 === 0 ? n + gain : n - gain));
+      const s = render1D(fat, 12);
+      const r = roi1DMetrology(s.gray, s.W, s.roi, { sym: "GS1_128" });
+      expect(r.bwr).not.toBeNull();
+      expect(r.bwr!).toBeGreaterThan(0.4);           // 條 − 空 ≈ 2 × gain
+      const thin = base.map((n, i) => (i % 2 === 0 ? n - gain : n + gain));
+      const r2 = roi1DMetrology(render1D(thin, 12).gray, render1D(thin, 12).W,
+        render1D(thin, 12).roi, { sym: "GS1_128" });
+      expect(r2.bwr!).toBeLessThan(-0.4);
+    });
+    it("**E2SE 把墨量增益對 DEC 的污染降到約 1/6**(柔印瓦楞的主要劣化)", () => {
+      const base = MOD_PAT.slice();
+      const fat = base.map((n, i) => (i % 2 === 0 ? n + 0.3 : n - 0.3));
+      const s = render1D(fat, 12);
+      const inked = roi1DMetrology(s.gray, s.W, s.roi, { sym: "GS1_128" });
+      const e2se = Math.max(...inked.scanlines.map((x) => x.maxWidthDeviation));
+      // 這才是實質主張:同一組量測下,E2SE 殘差遠小於元素逐一殘差。
+      // (不是「歸零」—— 條 22 個、空 21 個並不相等,總跨距淨移 +0.3 模組,
+      //  讓模組寬偏約 0.9%,這一點 E2SE 擋不掉,誠實記錄。)
+      expect(inked.elementResidualWorst!).toBeGreaterThan(0.3);
+      expect(e2se).toBeLessThan(inked.elementResidualWorst! / 4);
+      // 走 E2SE 仍留在 A 級;若改用元素逐一殘差會掉到 D
+      expect(DEC(inked)!).toBeGreaterThan(3.4);
+      const decIfElementWise = Math.max(0, Math.min(1, 1 - inked.elementResidualWorst! / 0.5)) * 4;
+      expect(decIfElementWise).toBeLessThan(1.5);
+    });
+  });
+
+  it("孔徑常數以模組數指定(不隨拍攝距離漂移),且與規格一致", () => {
+    expect(GEOMETRY_APERTURE_X).toBe(0.5);
   });
 });
