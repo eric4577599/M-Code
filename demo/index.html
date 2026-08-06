@@ -4,6 +4,29 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>瓦楞箱條碼 / QR 品質檢驗 — 現場檢測 Demo</title>
+<!-- modulepreload:攤平模組匯入的瀑布(2026-08-06)。
+     `dist/index.js` 是未打包的 ES module 樹,瀏覽器必須先把它**下載完並解析**才會發現
+     底下這 15 支子模組 —— 那是一整層額外的往返。實測經 Cloudflare 隧道(邊緣在 SIN、
+     origin 在台灣)每個往返約 0.7 秒,四層瀑布使 DOMContentLoaded 要 3.8 秒;手機 RTT
+     更高時會拉到十幾秒,畫面就是一直轉圈。預先宣告後這些會在解析 HTML 當下就平行開抓。
+     ⚠ 本清單必須與 `src/index.ts` 的匯入一致 —— 由 `tests/modulepreload-sync.test.ts` 守著,
+     不必手工核對,但**改了 src/index.ts 的匯入就要跑一次測試**。 -->
+<link rel="modulepreload" href="../dist/index.js" />
+<link rel="modulepreload" href="../dist/data/flutes.js" />
+<link rel="modulepreload" href="../dist/data/policies.js" />
+<link rel="modulepreload" href="../dist/data/profiles.js" />
+<link rel="modulepreload" href="../dist/data/rules.js" />
+<link rel="modulepreload" href="../dist/domain/flags.js" />
+<link rel="modulepreload" href="../dist/domain/scale.js" />
+<link rel="modulepreload" href="../dist/domain/types.js" />
+<link rel="modulepreload" href="../dist/engines/acceptance.js" />
+<link rel="modulepreload" href="../dist/engines/decode.js" />
+<link rel="modulepreload" href="../dist/engines/diagnosis.js" />
+<link rel="modulepreload" href="../dist/engines/gate.js" />
+<link rel="modulepreload" href="../dist/engines/grade.js" />
+<link rel="modulepreload" href="../dist/engines/measurement.js" />
+<link rel="modulepreload" href="../dist/erp/client.js" />
+<link rel="modulepreload" href="../dist/export/csv.js" />
 <style>
   :root {
     --ok:#1f9d55; --warn:#d97706; --fail:#dc2626; --ink:#0f172a; --mut:#64748b;
