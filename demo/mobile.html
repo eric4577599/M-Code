@@ -1277,10 +1277,18 @@ function resumePreview() {
   try { p = v.play(); } catch (e) { p = null; }
   if (p && p.catch) {
     p.catch(() => {
-      // 叫不醒多半是串流真的被系統收回了 —— 交給既有的故障訊息路徑,不要留在黑畫面
-      camFault = camFault || "預覽已中斷 — 請點畫面重新開啟相機";
-      setCamStatus("⚠ " + camFault, "warn");
-      recompute();
+      // 2026-08-06 實機事故:「第一張沒問題,第二張後相機中斷無法檢驗」。
+      // 成因就是這裡 —— 原本把 play() 的 rejection 當成相機故障。
+      // **那不是故障的證據**:快門後的降壓協商期間串流本來就會短暫掉到 readyState<2,
+      // 此時呼叫 play() 幾乎必然被下一次載入打斷而 reject(AbortError)。
+      // 於是第一張拍完就設起 camFault,而 camFault 當時只進不出 → 快門永久鎖死。
+      // 只有 **track 自己說它死了** 才算故障;其餘一律當作暫時性,交給下面的自癒。
+      const t = camTrack;
+      if (t && (t.readyState === "ended" || t.muted)) {
+        camFault = camFault || "預覽已中斷 — 請點畫面重新開啟相機";
+        setCamStatus("⚠ " + camFault, "warn");
+        recompute();
+      }
     });
   }
 }
@@ -1448,6 +1456,14 @@ function measureFrame() {
   // 順手叫醒(這條路每 500ms 跑一次,所以就算 show() 那次沒叫醒也會自癒),
   // 但這一輪不更新任何讀數:寧可讓燈號停在原地,也不要拿凍結幀刷新它。
   if (v.paused || v.readyState < 2) { resumePreview(); return; }
+  // 故障旗標自癒(同一次事故的另一半):camFault 原本只進不出 —— 除了登出與 unmute
+  // 事件,沒有任何路徑清得掉它,於是**一次瞬間抖動就讓快門永久鎖死**。
+  // 故障應該由「當下可觀測的狀態」決定,不是被某一刻的一次失敗鎖死。
+  // 走到這一行代表:video 在播、有可用的當前幀。再確認 track 自己也還活著就放行。
+  if (camFault && camTrack && camTrack.readyState === "live" && !camTrack.muted && v.videoWidth > 0) {
+    camFault = null;
+    setCamStatus("● 相機已恢復 · 對準條碼後按快門檢驗", "ok");
+  }
   Object.assign(state.gate, measureQuality(v, v.videoWidth, v.videoHeight));
   // 幾何檢查(印向/透視/解析度)需解碼定位點才算得出,即時預覽不解碼 →
   // 還原為安全放行值,避免「上一張拍攝殘留的幾何值」把下一張預覽快門鎖死。
