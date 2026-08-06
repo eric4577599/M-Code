@@ -61,6 +61,13 @@ def main():
         raise SystemExit("外殼缺檔,中止蓋章(是不是忘了 npm run build?):\n  "
                          + "\n  ".join(missing))
 
+    # sw.js 自己也要進雜湊。它不在 SHELL 清單裡(外殼不快取自己),但**它的行為變了
+    # 就是換了一版** —— 2026-08-06 修掉 fetch 用全域 caches.match 造成版本混搭的那次,
+    # 外殼檔案一個都沒動,版本章因此沒變,畫面上顯示的版本也沒變 → 使用者無從得知
+    # 自己有沒有拿到修正。雜湊的是**蓋章前**的原文(含 __STAMP__ 佔位),故仍然穩定。
+    h.update(b"sw.js")
+    h.update(text.encode("utf-8"))
+
     stamp = h.hexdigest()[:12]
     if PLACEHOLDER not in text:
         raise SystemExit(f"{sw_path} 沒有 {PLACEHOLDER} —— 可能已經蓋過章了,重跑 rsync 再試")

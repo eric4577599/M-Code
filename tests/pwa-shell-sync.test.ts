@@ -79,6 +79,21 @@ describe("PWA 離線外殼與實際依賴同步", () => {
     expect(s).toMatch(/SKIP_WAITING"\)\s*self\.skipWaiting\(\)/);
   });
 
+  it("**fetch 必須查本版快取,不可用全域 caches.match**(混搭版本的成因)", () => {
+    // 2026-08-06 實機事故:頁面丟出「Importing binding name 'barBandExtent' is not found」——
+    // 新的 mobile.html 配到舊的 imgproc.js。成因是 fetch handler 用了全域 caches.match(),
+    // 它會搜尋網域下的**每一個**快取;而更新策略刻意讓新版只待命、舊版完整服務,
+    // 新版 install 完就已建立第二個快取 → 全域查找伸手進去 → 一半新一半舊。
+    // 比對前先去掉行註解:上面那段解釋本身就寫著 caches.match(),
+    // 直接比對字樣會把「解釋自己為什麼不能這樣寫」的註解當成違規(同 skipWaiting 那條的教訓)。
+    const s = readFileSync(SW, "utf8").split("\n")
+      .map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+    const fetchBlock = s.slice(s.indexOf('addEventListener("fetch"'));
+    expect(fetchBlock).not.toMatch(/\bcaches\.match\s*\(/);
+    expect(fetchBlock).toContain("caches.open(CACHE)");
+    expect(fetchBlock).toMatch(/cache\.match\s*\(/);
+  });
+
   it("快取名帶版本章,且 repo 內保留未蓋章的字面值", () => {
     const s = readFileSync(SW, "utf8");
     expect(s).toContain('const VERSION = "__STAMP__"');

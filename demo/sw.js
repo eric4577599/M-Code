@@ -71,14 +71,24 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // 跨網域不碰
   e.respondWith((async () => {
-    const hit = await caches.match(req, { ignoreSearch: true });
+    // ⚠ **必須用 cache.match(本版快取)而不是 caches.match(全域)。**
+    // 2026-08-06 實機事故:頁面丟出
+    //   「SyntaxError: Importing binding name 'barBandExtent' is not found」
+    // —— 新的 mobile.html 配到舊的 imgproc.js。成因就是這一行原本寫成全域的
+    // `caches.match()`:CacheStorage 的全域查找會搜尋**這個網域下的每一個快取**。
+    // 而本檔的更新策略刻意讓新版只待命(不 skipWaiting),好讓舊版**完整**服務到
+    // 使用者按下更新為止 —— 但新版一旦 install 完就已經建立了第二個快取,
+    // 全域查找便會伸手進去,一半新一半舊,正好造出這個策略要避免的混搭。
+    // 限定在本版快取內查,原子性才真的成立。
+    const cache = await caches.open(CACHE);
+    const hit = await cache.match(req, { ignoreSearch: true });
     if (hit) return hit;                            // 外殼 cache-first(一致性優先)
     try {
       return await fetch(req);
     } catch (err) {
       // 離線且不在外殼內:導覽請求退回手機版首頁,其餘照實失敗
       if (req.mode === "navigate") {
-        const fallback = await caches.match("./mobile.html");
+        const fallback = await cache.match("./mobile.html");
         if (fallback) return fallback;
       }
       throw err;
