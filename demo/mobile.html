@@ -322,6 +322,7 @@ import {
   rectifyQuad, rectifyPlan, resolveTiltDeg, focalPxFromSettings, TILT_SOURCE_LABEL,
   ONE_D_SYMBOLOGIES, edgeFitRoi,
   assessMeasurability, SIMULATED_LABEL,
+  roi1DMetrology,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -684,8 +685,21 @@ function inspectReal(photo) {
     // modulePx 量在「ROI 實際取樣尺寸」上(不再被 1024 上限壓低,但 ROI 超過
     // MAX_ROI_PIXELS 時是量在縮過的密度上,見上方 roiScale)—— 故它是真實量測值,
     // 但解讀時必須帶著 roiScale 一起看,不可當成全解析度下的 px/module。
-    const g1 = roi1DGeometry(gray, gw, roi);
+    // 2026-08-05 重新設計(規格 §3.5):改走 roi1DMetrology —— 次像素邊界 +
+    // 由解碼結果取回標稱值 + 依符號別分流的可解碼性。取代 roi1DGeometry 的量測職責。
+    // 動機是兩個**在像素完美合成圖上就成立**的失效(與拍攝條件無關):
+    //   A 量測模型套錯符號別 —— ITF-14 是雙寬符號,卻被當成模組型量,
+    //     GS1 建議的 2.5:1 比例離最近整數剛好 0.5 = 容差 ⇒ DEC 恆為 0(F),提高解析度無效;
+    //   B 模組寬被量化成整數像素 —— 等級追隨的是「每模組像素數的小數部分」而非印刷品質
+    //     (實測 5.5 px/模組 → F、14.2 px → A,同一張完美圖只是換個距離拍)。
+    // 幾何吃正射影像(gray),光度仍走未矯正 ROI(裁示 D3),兩者互不影響。
+    const g1 = roi1DMetrology(gray, gw, roi, { sym, text: zx ? zx.text : "" });
     scanlineCount = g1.scanlines.length;
+    if (lastShotInfo) {
+      lastShotInfo.metrology = g1.kind === "twoWidth" ? "雙寬(窄/寬判別)" : "模組型(E2SE)";
+      if (g1.elementsExpected) lastShotInfo.elements = `${g1.elementsMatched}/10 條掃描線 · 標稱 ${g1.elementsExpected} 元素`;
+      if (g1.bwr !== null) lastShotInfo.bwrModules = +g1.bwr.toFixed(3);
+    }
     // 掃描線全滅時**不再**用硬寫的 {0.5,0.5,0.5} 兜出一個等級(稽核 IMG-04):
     // 那組值不是量到的,它只是「最差」,會讓橫躺的完好條碼被判 F 且不說原因。
     // 改由下方的可量測性判定接手 —— 沒有掃描線就不出等級。此處先給空陣列避免
@@ -698,7 +712,9 @@ function inspectReal(photo) {
     // 寫進 lastShotInfo → 跟著 shot 進 scans 與 PDF 明細,規格 §5.2 的實機驗收才拿得到。
     if (g1.modulePx) {
       state.gate.pxm = g1.modulePx;
-      if (lastShotInfo) lastShotInfo.pxPerModule = g1.modulePx;
+      // 次像素量測後 modulePx 是浮點數(正是失效 B 的修正點)—— 報告顯示取兩位小數,
+      // 但**寫進閘門的是未截斷的原值**:截斷回整數等於把剛修好的東西再弄壞一次。
+      if (lastShotInfo) lastShotInfo.pxPerModule = +g1.modulePx.toFixed(2);
     }
     if (zx) state.gate.picket = +lineAngleDeg(zx.points).toFixed(1);
     // 1D:ZXing 只給掃描線兩端點,四角改由 imgproc 的 quadFrom1DEdges 從條端擬合
@@ -1438,6 +1454,9 @@ function shotSummary(shot) {
   //   shotGate 這張照片的實測閘門讀數(D5③;純記錄,不鎖快門、不改分級)
   //   wb 白平衡讀數(D1 移出面板後改在此留存,標「預覽」因為它量的是即時預覽幀)
   if (shot.photometricBase) parts.push("光度基底 " + esc(shot.photometricBase));
+  if (shot.metrology) parts.push("計量模型 " + esc(shot.metrology));
+  if (shot.elements) parts.push("元素數 " + esc(shot.elements));
+  if (typeof shot.bwrModules === "number") parts.push("BWR " + esc(shot.bwrModules) + " 模組");
   if (shot.shotGate) parts.push("本張閘門 " + esc(shot.shotGate));
   if (typeof shot.wb === "number") parts.push("白平衡Δ(預覽) " + esc(shot.wb) + "%");
   return parts.join(" · ");
