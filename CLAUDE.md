@@ -61,8 +61,15 @@ npm run build       # tsc → dist/(demo 依賴,必跑)
 ### 資料庫與重要路徑
 
 - 無資料庫(離線佇列與儲存由前端 host 提供)。
-- 線上 docroot 是 **`~/m-code-site`**,不是 repo 本身;上線靠
-  `rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/`。
+- 線上 docroot 是 **`~/m-code-site`**,不是 repo 本身。**上線是三步,缺一不可**:
+  ```bash
+  npm run build
+  rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/
+  python3 deploy/stamp-sw.py          # ← 必須在 rsync 之後
+  ```
+  第三步漏掉 = `sw.js` 的 `VERSION` 留在 `__STAMP__` → 快取名恆定 → 新版 install 時
+  開到舊版正在服務的那個快取並就地覆寫 → **「新 HTML 配舊 JS」的混搭事故復活**
+  (2026-08-06 才修掉一次)。**失敗時沒有症狀**,所以不能靠人記得。
 
 ### 這個專案跟通則不同的地方
 

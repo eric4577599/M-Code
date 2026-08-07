@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-08-06T20:40+0800
+> 最後更新:2026-08-07T08:5x+0800
 
 ## Current Task
 
@@ -152,7 +152,9 @@
    修正後三項情境全過(見規格 §3.13 表)。
    **⚠ 仍待實機:** 假相機沒有 iOS「同時只給一條串流」的排他性,實機表現可能是
    「第二條卡到逾時」而非「兩條都 resolve」。根因與修法相同,但要 iPhone 14 Pro
-   連續兩張以上才算驗過。**本輪未上線**(未 rsync、未蓋章)。
+   連續兩張以上才算驗過。**已上線**(2026-08-07,章 `8e7ff33b8771` → **`bb935873fb3c`**)。
+   ⚠ **SW 刻意不自動生效** —— 手機要按下「有新版本可用」橫幅才會切換,
+   沒按就還是跑舊那份。**驗之前先看快門下方的版本章是不是 `bb935873`。**
    仍未做的:**相機生命週期的可見紀錄**(C3)—— `pagehide`/`pageshow`/`stopCamera` 被誰呼叫、
    `play()` 何時 reject 都還是沒留痕,而 `stopCamera` 會清掉 `lastShotInfo`。
    若實機證明 §3.13 仍沒解掉,**先補紀錄再修**,不要再猜。
@@ -201,7 +203,8 @@
   ```
   push 依全域 §0 需 Eric 明確同意;`fetch` / `pull` / `commit` 不在此限。
 - **上線狀態同理,現查不要信快照** —— 線上 docroot 是 `~/m-code-site`,不是 repo 本身。
-  上線要跑 `npm run build` → `rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/`。
+  上線要跑 `npm run build` → `rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/`
+  → **`python3 deploy/stamp-sw.py`**(蓋章這一步以前三處清單全都漏記,權威版見專案 `CLAUDE.md`)。
   **驗法不是看 HTTP 200,是比 hash**:
   ```bash
   for f in demo/imgproc.js dist/index.js; do
@@ -209,8 +212,10 @@
     b=$(shasum "$f" | awk '{print $1}'); [ "$a" = "$b" ] && echo "$f 一致" || echo "$f 不同"
   done
   ```
-  `demo/mobile.html` 的 hash **會對不上,那是正常的** —— Cloudflare 在 `</body>` 前
-  注入 bot-detection script,差異僅此一段,別誤判成沒同步。
+  **任何 `.html` 的 hash 都會對不上,那是正常的**(不只 `mobile.html` —— 2026-08-07 上線時
+  `index.html` 也對不上,一度誤以為沒同步)。成因是 Cloudflare 在 `</body>` 前注入
+  bot-detection script,差異僅此一段。要確認就 `diff` 一下,只有那一行就是同步好了;
+  HTML 改驗**內容**(例如 `grep -c camInitializing`)而不是 hash。
 - **測試基線同樣現查,不寫快照**(2026-08-07 改)—— 本檔原本寫「14 檔 471」,
   而 2026-08-06 一天就漲到 **16 檔 521**,快照當場變成假的。與 git / 上線狀態同一個道理:
   ```bash
@@ -221,7 +226,8 @@
   **但不要拿它當現況** —— 它已經自己過期三次,§5.1 補記載明了建議改法。
 - **實機驗收要跑的三步(缺一不可)** —
   `npm run build` → `rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/`
-  → 8765 測試台實際操作。**只 git pull 不 rsync = 線上不會變**。
+  → **`python3 deploy/stamp-sw.py`** → 8765 測試台實際操作。
+  **只 git pull 不 rsync = 線上不會變;rsync 了不蓋章 = 快取名不換,新舊版共用快取。**
 - **沒有實機時怎麼驗 `demo/*.html`** — 假相機探針。**做法與 ITF 編碼表已寫進
   `report20260805-1.md` §5**(上一輪只寫了做法沒留碼,這次補上),照著重建即可。
   兩個省時間的點:① 快門 FAIL 時是 `disabled`,`.click()` 沒反應,改呼叫
