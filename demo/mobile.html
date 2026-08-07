@@ -1879,6 +1879,16 @@ function photometricGateOf(q) {
   return { focusOk: pick("focus"), glareOk: pick("glare") };
 }
 
+// 釋放被淘汰那張的畫布後備儲存(規格 §3.15 · 2026-08-07)。
+// 輸入:canvas;輸出:無。**WebKit 只有在尺寸歸零時才立刻歸還後備儲存** —— 單靠 GC
+// 不夠,而升壓幀是 3024×4032 ≈ 48MB 且**每一張都被淘汰**(實機四戰四敗),連拍幾張
+// 就是上百 MB 滯留在相機管線旁邊。§3.14 定罪的正是記憶體壓力下的靜默清空,
+// 這一行對「AF 沒收斂」與「畫布配置失敗」兩種成因都是淨收益,且不改變任何判定。
+function releaseCanvas(c) {
+  if (!c || typeof c.width !== "number") return;
+  try { c.width = 0; c.height = 0; } catch (e) {}
+}
+
 // 收下一張取幀結果,必要時退回升壓前的預覽幀(規格 §3.9)。
 // 輸入:層別代號、該層的輸出、保底預覽幀與其品質讀數;輸出:要拿去分析的 canvas。
 // **決策由 imgproc.js 的純函式做**(demo/*.html 無自動化測試可覆蓋),此處只負責量與記錄。
@@ -1889,8 +1899,19 @@ function acceptFrame(path, got, safe, safeQ) {
   const pick = chooseCaptureFrame({
     capturedFocusOk: a.focusOk, previewFocusOk: b.focusOk,
     capturedGlareOk: a.glareOk, previewGlareOk: b.glareOk });
+  // 挑幀決策的**兩個輸入**(規格 §3.15 · 2026-08-07)。過去只記結論(「對焦不如預覽」),
+  // 記不出差多少、也記不出被淘汰的那張是「有點糊」還是「整片黑」——
+  // 而那正是「AF 沒收斂」與「畫布配置失敗」的分界。沒有這兩個數字就只能猜,
+  // 2026-08-07 的稽核就是卡在這裡(A/B 兩個候選症狀完全相同)。
+  // 兩條分支都記:升壓幀勝出時同樣要看得到它贏多少,否則只有失敗案例有資料。
+  const cmp = `升壓 varLap ${gotQ.varLap}（${got.canvas.width}×${got.canvas.height}）`
+            + ` / 保底 varLap ${safeQ.varLap}（${safe.canvas.width}×${safe.canvas.height}）`;
   if (pick.use !== FRAME_CHOICE.PREVIEW) {
-    return recordShot(path, got.canvas, got.settings, got.extra, got.req);
+    const kept = recordShot(path, got.canvas, got.settings, got.extra, got.req);
+    if (lastShotInfo) lastShotInfo.frameCompare = cmp;
+    // 保底幀落選:像素已存在 safe.pixels(§3.14),畫布本身可以立刻還回去
+    releaseCanvas(safe.canvas);
+    return kept;
   }
   // 退回預覽幀。**path 要誠實反映實際用的是哪一張** —— 報告若仍印 L2,
   // 事後看紀錄的人會以為量的是升壓後的高解析影像,那是假的。
@@ -1905,7 +1926,12 @@ function acceptFrame(path, got, safe, safeQ) {
     safeCanvas = c2;
   }
   const c = recordShot(path + "→退回預覽幀", safeCanvas, safe.settings, safe.extra, null);
-  if (lastShotInfo) lastShotInfo.frameFallback = pick.reason;
+  if (lastShotInfo) { lastShotInfo.frameFallback = pick.reason; lastShotInfo.frameCompare = cmp; }
+  // 升壓幀落選 —— 這就是那塊 3024×4032 ≈ 48MB,而它每一張都走到這裡。
+  releaseCanvas(got.canvas);
+  // 原保底畫布也不再需要(分析吃的是 putImageData 重建的那張);
+  // 但 safe.pixels 取不到時 safeCanvas 就是它本人,那種情形不可釋放。
+  if (safeCanvas !== safe.canvas) releaseCanvas(safe.canvas);
   return c;
 }
 
@@ -2018,6 +2044,9 @@ function shotSummary(shot) {
   if (shot.shotTiming) parts.push("取幀時序 " + esc(shot.shotTiming));
   if (shot.appVersion) parts.push("版本 " + esc(String(shot.appVersion).slice(0, 8)));
   if (shot.barBand) parts.push("條帶 " + esc(shot.barBand));
+  // 挑幀決策的兩個輸入(§3.15)。放在 frameFallback 之前 —— 先給數字再給結論,
+  // 事後看報告的人才有辦法自己判斷那個結論站不站得住。
+  if (shot.frameCompare) parts.push("挑幀 " + esc(shot.frameCompare));
   if (shot.frameFallback) parts.push("⚠ " + esc(shot.frameFallback));
   if (shot.staleShot) parts.push("⚠ " + esc(shot.staleShot));
   return parts.join(" · ");
