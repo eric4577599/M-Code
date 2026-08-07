@@ -122,24 +122,40 @@
   ③ `resumePreview()` 把 `play()` reject 當故障 → 第一張拍完就永久鎖死快門。
   **共同模式:在現場壓力下改一個症狀,而新程式碼自己的失敗模式沒被同等強度地驗過。**
 
+- **設計規劃流程檢視 + 全程式碼逐檔審查(2026-08-07,`report20260807-1.md`)** ——
+  流程 7 條、程式 20 條,涵蓋 `src/` 全 16 檔、`imgproc.js`、`mobile.html`、`sw.js`、`index.html`。
+  **本輪只修了 1 條**(C1 = 規格 §3.13,見 Next Step 0aa),其餘全部只記錄未動。
+  流程診斷一句話:**紀律品質極高,機制品質極低** —— 找到的問題幾乎都是
+  「文件寫了正確的自我要求,但沒被寫成測試或腳本」;而五組 `*-sync.test.ts`
+  守住的東西一次都沒漂過。**未修但值得先看的三條**(細節在報告):
+  **B1** `barBandExtent` 條帶擴張沒有上限,楞紋背景會吃掉整張影像(觸發條件正是本專案場景);
+  **S1** `WASHBOARD_AMP_RATIO_FLOOR` 的防漂註解沒接上,`gate.ts` 沒 import 它,已漂成三個數字;
+  **E1** `src/` 約 38% 在實拍路徑上從未被呼叫,C8 診斷被 `PARAM_CAUSE` 平行重寫,
+  而 `BWR_GAIN`(柔印墨量過多,severity 3)所需的 `barWidthGainMm` 根本沒被算出來 ——
+  **這條要 Eric 裁示**:接上實拍路徑,還是承認已被取代並把 `rules.ts` 標為未接線。
+
 ## Next Step
 
 **不卡實機的項目已全部做完。** 順序:
 
-0aa. **🔴 未解的 blocker:第一張正常,第二張相機失聯。**
-   最後回報(部署 `8e7ff33b8771` 之後):「第一張清晰,第二張未拍相機仍失聯」。
-   §3.12 的自癒修正**沒解掉,或當時用的還是舊版(未確認)**。
-   **第一件事:確認 Eric 當時在哪一版** —— 快門下方現在顯示 `版本 xxxxxxxx`(§3.11)。
-   **第二件事:不要再猜著修。先加相機生命週期的可見紀錄** ——
-   `pagehide` / `pageshow` / track `ended` / `mute` / `play()` reject / `stopCamera` 被誰呼叫,
-   各在何時觸發。與 §3.11 錯誤出口同一套哲學:**先讓現場講得出發生了什麼,再決定修哪裡。**
-   懷疑清單(未驗證,依可疑度):
-   ① **`pagehide` → `stopCamera()`**(當天為修多分頁互搶而加)—— iOS 在進 bfcache、
-      切分頁、App 進背景都可能觸發,而 `pageshow` 未必對稱回來;不對稱就是串流被停掉不再重開。
-      **這是我當天加的,可疑度最高。**
-   ② iOS 在 `applyConstraints` 之後直接結束 track(部分機型已知)。
-   ③ 記憶體壓力回收串流。
-   **在這件事解掉之前,拿不到任何連續兩張以上的實拍數據。**
+0aa. **🟠 blocker 已找到根因並修好,但**仍未在實機驗過**(2026-08-07,`report20260807-1.md`)。**
+   **版本疑點已排除** —— 線上 docroot 的 `demo/*.html`、`imgproc.js`、`dist/*.js` 與 repo HEAD
+   逐檔一致,`sw.js` 的章與內容相符。Eric 回報時跑的就是含 §3.12 的版本,**那個修正確實沒解掉**。
+   **真正的根因是 `initCamera` 沒有防重入(規格 §3.13)** —— `if (camVideo) return` 讀的是
+   `await` **之前**的值,而 `camVideo` 要到 `getUserMedia` resolve(最長 8 秒)之後才賦值。
+   注入式實測(還原版 = 當時線上程式碼):**單純載入頁面就有 2 次並行 `getUserMedia`、
+   洩漏 1 條仍 live 的串流**(`enterApp` 與 `pageshow` 同時觸發,`pageshow` 正常載入也會 fire);
+   `pagehide` 後連點三下再多 3 次、洩漏 3 條。洩漏的 track 仍握著鏡頭 →
+   下一次 `getUserMedia`「既不 resolve 也不 reject」= 相機失聯。
+   §3.12 修的是 `camFault` 被鎖死,本條是串流被洩漏、`camFault` 全程 `null` —— **兩個獨立成因**。
+   修法:`camInitializing` 旗標 + `camGeneration` 序號(作廢時把串流 stop 掉)。
+   修正後三項情境全過(見規格 §3.13 表)。
+   **⚠ 仍待實機:** 假相機沒有 iOS「同時只給一條串流」的排他性,實機表現可能是
+   「第二條卡到逾時」而非「兩條都 resolve」。根因與修法相同,但要 iPhone 14 Pro
+   連續兩張以上才算驗過。**本輪未上線**(未 rsync、未蓋章)。
+   仍未做的:**相機生命週期的可見紀錄**(C3)—— `pagehide`/`pageshow`/`stopCamera` 被誰呼叫、
+   `play()` 何時 reject 都還是沒留痕,而 `stopCamera` 會清掉 `lastShotInfo`。
+   若實機證明 §3.13 仍沒解掉,**先補紀錄再修**,不要再猜。
 
 0a. **⏳ 接著等的:iPhone 14 Pro 上「高解析 vs 即時」的同標的對照。**
    同一個條碼、手不移動、兩種模式各拍一張,比 PDF 那兩行「取幀」的三欄:
@@ -195,9 +211,14 @@
   ```
   `demo/mobile.html` 的 hash **會對不上,那是正常的** —— Cloudflare 在 `</body>` 前
   注入 bot-detection script,差異僅此一段,別誤判成沒同步。
-- **實跑基線(2026-08-06 09:4x)** — `npm test` **14 檔 471 測試**全綠
-  (`tests/imgproc.test.ts` 214);`npm run typecheck`、`npm run build` 通過。
-  測試數 SSOT 是規格 §5.1 表,**收工當場加一列**。
+- **測試基線同樣現查,不寫快照**(2026-08-07 改)—— 本檔原本寫「14 檔 471」,
+  而 2026-08-06 一天就漲到 **16 檔 521**,快照當場變成假的。與 git / 上線狀態同一個道理:
+  ```bash
+  npx vitest run --reporter=dot | tail -3   # 檔數與測試數以此為準
+  npm run typecheck && npm run build        # 兩者都要過
+  ```
+  規格 §5.1 那張表仍是「歷史沿革」的權威(每階段收工加一列),
+  **但不要拿它當現況** —— 它已經自己過期三次,§5.1 補記載明了建議改法。
 - **實機驗收要跑的三步(缺一不可)** —
   `npm run build` → `rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/`
   → 8765 測試台實際操作。**只 git pull 不 rsync = 線上不會變**。
