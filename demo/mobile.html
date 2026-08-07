@@ -1844,6 +1844,17 @@ async function capturePhoto() {
   // 留著它,下面就能「誰通過閘門用誰」,不必再猜要沉澱幾幀。
   const safe = captureViaDrawImage();
   const safeQ = safe ? measureQuality(safe.canvas, safe.canvas.width, safe.canvas.height) : null;
+  // 立即把保底幀的像素讀進 JS 記憶體(規格 §3.14 · 2026-08-07 實機黑幀事件)。
+  // 實機 PDF 證據:同一張 canvas 兩次讀數 —— 快門當下量測對焦 OK(否則「對焦版」退回
+  // 不會觸發),分析時再讀卻是全黑(對焦相對預覽 0%)。canvas 的像素不會自己變,
+  // 是 **iOS 在記憶體壓力下靜默清空 canvas 的後備儲存**(兩讀之間隔著 L2 升壓的
+  // 大配置,3024×4032 RGBA ≈ 47MB),清空不擲錯、讀回只回全黑。
+  // ImageData 在 JS heap,不走那條回收路;720×1280×4 ≈ 3.7MB,每張快門一次,可承受。
+  if (safe && safeQ) {
+    try {
+      safe.pixels = safe.canvas.getContext("2d").getImageData(0, 0, safe.canvas.width, safe.canvas.height);
+    } catch (e) { safe.pixels = null; }
+  }
 
   const byPhoto = await captureViaImageCapture();
   if (byPhoto) return acceptFrame("L1/ImageCapture", byPhoto, safe, safeQ);
@@ -1883,7 +1894,17 @@ function acceptFrame(path, got, safe, safeQ) {
   }
   // 退回預覽幀。**path 要誠實反映實際用的是哪一張** —— 報告若仍印 L2,
   // 事後看紀錄的人會以為量的是升壓後的高解析影像,那是假的。
-  const c = recordShot(path + "→退回預覽幀", safe.canvas, safe.settings, safe.extra, null);
+  // **用像素快照重建,不直接用原 canvas**(§3.14):走到這裡距離拍下保底幀已隔著
+  // 整段 L2 升壓,原 canvas 的後備儲存可能已被 iOS 清空(讀回全黑、不擲錯)。
+  // putImageData 回一張新 canvas,保證分析的就是快門當下量測過的那批像素。
+  let safeCanvas = safe.canvas;
+  if (safe.pixels) {
+    const c2 = document.createElement("canvas");
+    c2.width = safe.pixels.width; c2.height = safe.pixels.height;
+    c2.getContext("2d").putImageData(safe.pixels, 0, 0);
+    safeCanvas = c2;
+  }
+  const c = recordShot(path + "→退回預覽幀", safeCanvas, safe.settings, safe.extra, null);
   if (lastShotInfo) lastShotInfo.frameFallback = pick.reason;
   return c;
 }
