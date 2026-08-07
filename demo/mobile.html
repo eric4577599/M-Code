@@ -1230,6 +1230,22 @@ const PREVIEW_W = 1280, PREVIEW_H = 720;
 // (iOS Safari 同時只給一個分頁用相機),而它自己沒有 timeout 選項 —— 只能賽跑。
 // 8 秒是折衷:比正常授權流程(含使用者按下「允許」)寬鬆,又不至於讓人乾等。
 const CAMERA_OPEN_TIMEOUT_MS = 8000;
+// 是否已有一次 initCamera 在進行中(2026-08-07)。
+// **防重入必須靠獨立旗標,不能只看 camVideo** —— camVideo 要到 getUserMedia resolve
+// 之後(最長 CAMERA_OPEN_TIMEOUT_MS = 8 秒)才被賦值,而 `if (camVideo) return` 這道守衛
+// 讀的是 await **之前**的值:整整 8 秒的窗口內每一次呼叫都會通過。
+// 而「點畫面重試」綁在整個 document 上(見檔末的 click 監聽),使用者看到黑畫面連點三下,
+// 就是三個並行的 getUserMedia。後果:
+//   · iOS 同時只給一個分頁/一條串流 → 其餘卡到逾時,使用者看到「相機沒有回應(8 秒)」,
+//     而真正佔住相機的是自己;
+//   · 兩個都 resolve 時,後者覆寫 camVideo / camTrack,而**前者的 track 從來沒有被 stop()**
+//     (srcObject 重新指派不會停掉舊 track)—— 一條沒有任何變數指向、卻仍握著鏡頭的
+//     洩漏串流,下一次 getUserMedia 就進入「既不 resolve 也不 reject」的狀態。
+let camInitializing = false;
+// 開相機的「這一次」序號;stopCamera() 會 +1,用來作廢仍在 await 中的那一次。
+// 8 秒的等待期間登出或 pagehide 都可能發生,回來若照樣把串流裝上去,同樣是一條洩漏串流,
+// 而且違背 stopCamera 的用意(登出後鏡頭不該還開著)。
+let camGeneration = 0;
 function setCamStatus(txt, cls) { const el=$("camStatus"); if(el){ el.textContent=txt; el.className="camStatus "+(cls||""); } }
 
 // 快門解析度能力偵測(規格 §3.1 第 2 段):串流開啟後才讀得到完整能力表。
@@ -1294,9 +1310,13 @@ function resumePreview() {
 }
 
 async function initCamera(userGesture) {
-  if (camVideo) return;
+  // 兩道守衛缺一不可:camVideo 擋「已經開好了」,camInitializing 擋「正在開、還沒回來」。
+  // 只有前者的話,await 期間的每一次呼叫都會通過(見 camInitializing 的說明)。
+  if (camVideo || camInitializing) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setCamStatus("此瀏覽器不支援相機，顯示示意條碼", "warn"); return; }
   if (!window.isSecureContext) { setCamStatus("需 HTTPS 才能開相機", "warn"); return; }
+  camInitializing = true;
+  const gen = camGeneration; // 這一次的序號;stopCamera() 跑過就不再相等
   try {
     setCamStatus("開啟相機中…", "");
     // ideal(非 exact)避免 OverconstrainedError:裝置給不到 720p 時仍照常開串流
@@ -1311,6 +1331,13 @@ async function initCamera(userGesture) {
       new Promise((_, rej) => setTimeout(
         () => rej(new Error("getUserMedia-timeout")), CAMERA_OPEN_TIMEOUT_MS)),
     ]);
+    // 等待期間若 stopCamera() 跑過(登出 / pagehide / 換串流),這一次已經作廢:
+    // 把剛拿到的串流關掉再退出。**不可以只是 return** —— 沒有人指向它、卻仍持有鏡頭的
+    // track 就是上面說的那種洩漏串流,下一次 getUserMedia 會永遠不回應。
+    if (gen !== camGeneration) {
+      stream.getTracks().forEach((t) => { try { t.stop(); } catch (e) {} });
+      return;
+    }
     const v = $("cam"); v.srcObject = stream; await v.play().catch(()=>{});
     $("frame").classList.add("live"); camVideo = v;
     camTrack = stream.getVideoTracks()[0] || null;
@@ -1335,6 +1362,10 @@ async function initCamera(userGesture) {
       ? "相機沒有回應（8 秒）— 多半是被其他分頁佔用：iOS 同時只給一個分頁用相機。請關掉其他分頁後點畫面重試"
       : (map[e.name] || ("相機開啟失敗："+e.name));
     setCamStatus(msg + (userGesture?"":" ·點畫面重試"), "warn");
+  } finally {
+    // 一定要放在 finally:成功、逾時、被拒、被作廢四條路徑都得把旗標放掉,
+    // 少放一條就再也開不起來(比原本的重入更難查,因為它完全沒有症狀可看)。
+    camInitializing = false;
   }
 }
 // 串流健康監看(稽核 COMPAT-01)。輸入:video track;輸出:無(改 camFault 並更新畫面)。
@@ -1483,6 +1514,9 @@ function startMetricsLoop() { if (!metricsTimer) metricsTimer = setInterval(meas
 //   video track(釋放鏡頭、熄滅相機指示燈)、清空 srcObject/camVideo 與 live 樣式,
 //   使登入層蓋回時不再有相機開啟與 500ms 背景運算(隱私/資源考量)。
 function stopCamera() {
+  // 作廢任何仍在 await 中的 initCamera(見 camGeneration)。**必須在最前面** ——
+  // 放後面的話,那一次回來時序號仍相等,會把串流裝回剛清乾淨的狀態上。
+  camGeneration++;
   if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
   if (camVideo) {
     const s = camVideo.srcObject;
