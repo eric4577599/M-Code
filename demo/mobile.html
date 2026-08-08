@@ -467,7 +467,8 @@ const SAMPLE_DATA = {
 const state = {
   symbology:"AUTO", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
   decoded:SAMPLE_DATA.ITF14, expected:SAMPLE_DATA.ITF14, canDecode:true,
-  captureMode:"auto", // 取幀模式:auto = 三層降級(可能升壓);instant = 直接用當下預覽幀
+  captureMode:"auto", // 取幀模式:auto = 先試 L1 照片解析度;instant = 直接用當下預覽幀
+  // L2 移除後(§3.16)兩者在 iOS 上等價 —— L1 在 WebKit 不存在,兩條路都取預覽幀
   gate:{ varLap:210, glare:0.4, wash:0.06, wb:2, picket:3, tilt:2, pxm:9, scaleRef:true },
   grade:{ rLight:0.84, rDark:0.16, edge:0.62, dec:0.25, def:0.18, fpd:0.05, gnu:0.1, uecUsed:2, uecTotal:10 },
 };
@@ -568,7 +569,7 @@ function recompute() {
   if (camFault) { sh.className = "shutter"; sh.disabled = true; $("shutterLbl").textContent = "相機中斷 — 無法檢驗"; }
   // 無相機的示範模式:快門可按,但必須讓使用者知道拿到的是模擬值而非實拍量測。
   else if (!camVideo) { $("shutterLbl").textContent = "示範模式 — 產生模擬結果"; }
-  // 檢驗中(升壓等待 + 降回 + 最多 4M 像素同步分析,可能超過 1 秒)覆寫成忙碌樣式。
+  // 檢驗中(取幀 + 最多 4M 像素同步分析)覆寫成忙碌樣式。
   // 必須寫在這裡而非只在 inspect() 內設一次:即時量測迴圈每 500ms 也會呼叫 recompute(),
   // 否則檢驗途中快門會被重新點亮成「可拍」,使用者以為沒反應而連點。
   // 「請維持不動」不是客套話:取幀發生在按下之後(L1 takePhoto 的手機快門延遲典型
@@ -579,7 +580,7 @@ function recompute() {
 }
 
 // inspect:快門入口。有相機 → 對拍到的照片做真實解碼與實測評分;無相機 → 情境模擬。
-// 取幀改為非同步(三層降級含 await),以 inspecting 旗標擋連點重入。
+// 取幀為非同步(L1 探測含 await),以 inspecting 旗標擋連點重入。
 // 數值誠實護欄:有相機時取幀或分析失敗一律回報失敗並中止,**絕不退回 inspectSim()**——
 // 情境模擬的 grade/DEC/DEF 是假值,當成真實檢驗結果呈現、存清單、進報告等於偽造量測。
 // inspectSim() 只在確定無相機(camVideo 為 null,純示範模式)時才走。
@@ -610,7 +611,8 @@ async function inspect() {
     if (fault) { camFault = camFault || fault; setCamStatus("⚠ " + fault, "warn"); return; }
     let photo = null;
     // 快門延遲實測(2026-08-06):按下到取幀完成之間到底過了多久,過去沒有任何一處量過,
-    // 「似乎有延遲」始終停在猜測。t0 取在取幀之前、複驗之後,量到的就是三層降級本身的成本。
+    // 「似乎有延遲」始終停在猜測。t0 取在取幀之前、複驗之後,量到的就是取幀本身的成本。
+    // §3.16 移除 L2 之後,這個數字應該從實機的 1.4–1.5 秒掉到接近零 —— 那是驗收判準。
     // performance.now 不可得的環境退回 Date.now;兩者都不可得就記 null(誠實印「不可得」)。
     const clock = typeof performance === "object" && performance && performance.now
       ? () => performance.now() : () => Date.now();
@@ -621,7 +623,7 @@ async function inspect() {
       console.warn("capturePhoto 失敗", e); // 保留現場,實機才有得除錯
       photo = null;
     }
-    if (!photo) { console.warn("取幀失敗：三層降級都沒取到畫面"); setCamStatus("取幀失敗，請重試", "warn"); return; }
+    if (!photo) { console.warn("取幀失敗：L1 與預覽幀都沒取到畫面"); setCamStatus("取幀失敗，請重試", "warn"); return; }
     // 寫在 recordShot 之後 —— lastShotInfo 由該函式建立,提前寫會被整個蓋掉
     if (lastShotInfo) lastShotInfo.latencyMs = Math.round(clock() - t0);
     try {
@@ -631,10 +633,6 @@ async function inspect() {
       setCamStatus("影像分析失敗，請重試", "warn");
     }
   } finally {
-    // 先等 L2 的降壓收尾(見 captureViaConstraints 的 finally)才放掉 inspecting ——
-    // 保護區間與改動前一致,差別只在這段等待已與影像分析並行跑完,通常等於零。
-    // 任何路徑(取幀失敗、分析丟例外)都會走到這裡,不會漏等。
-    if (pendingDownscale) { try { await pendingDownscale; } catch (e) {} pendingDownscale = null; }
     inspecting = false;
     // 收尾 recompute 之前必須先還原幾何項:此刻 state.gate.picket / tilt / pxm 已被
     // inspectReal 寫成「那一張照片」的真實幾何值,而拍攝頁燈號的語意是**即時預覽量測**。
@@ -1002,7 +1000,7 @@ function inspectSim() {
 // geom:階段 ④ 的幾何量測摘要 { rectify, tilt },**只有真實檢驗才有**;
 //   模擬檢驗傳 null —— 沿用上一張的摘要等於在沒有像素的情況下編造幾何量測結果。
 // 取樣條件註記(稽核裁示 D2 · COMPAT-02)。輸入:shot 取幀資訊;輸出:中性說明字串或 ""。
-// 由來:第一層取幀建立在 ImageCapture 上,而 WebKit 從未實作 —— iOS 只走得到 L2/L3,
+// 由來:第一層取幀建立在 ImageCapture 上,而 WebKit 從未實作 —— iOS 只走得到預覽幀,
 //   Android Chrome 拿得到照片解析度,兩邊的分析影像密度結構性不對等,卻套同一組允收門檻。
 // **只說明取樣條件差異,不改任何門檻、不做準確度或合規宣稱**(規格 §6.1 門檻凍結 + A3 定位護欄)。
 function samplingNote(shot) {
@@ -1207,14 +1205,9 @@ const stageLabelOf = (v) => (STAGES.find(([k])=>k===v)||[,v])[1];
 
 // ── 相機:進入網頁自動開啟後鏡頭;無相機/未授權則保留 mock 條碼 ──
 let camVideo = null;
-let camTrack = null;        // 目前預覽串流的 video track(能力偵測 / 升壓 / 回讀 settings 用)
+let camTrack = null;        // 目前預覽串流的 video track(能力偵測 / 回讀 settings 用)
 let camImageCapture = null; // ImageCapture 實例;不支援(iOS Safari)時維持 null
-// L2 取幀後「把預覽降回 720p 並等它真的降回」的未完成 promise(見 captureViaConstraints
-// 的 finally)。它不在取幀的關鍵路徑上,但必須在清除 inspecting 之前等完 ——
-// 由 inspect() 的 finally 負責,好讓影像分析與降壓並行、使用者早 300ms 看到結果。
-let pendingDownscale = null;
 let shotResolution = null;  // pickBestResolution 的結果 { width, height, source, tier };偵測失敗為 null
-let trackResolution = null; // 同上但只看 track 能力表(第二層升壓專用,見 captureViaConstraints)
 let lastShotInfo = null;    // 最近一次快門的請求值 / getSettings 實拿值 / 分析影像寬(誠實回報用)
 // 相機串流故障訊息(null = 正常)。稽核 COMPAT-01:iOS Safari 切到其他 App / 接來電 /
 // 鎖屏,或 Android 其他 App 搶相機時,track 會 mute 或 ended,但畫面停在**最後一幀**。
@@ -1223,9 +1216,24 @@ let lastShotInfo = null;    // 最近一次快門的請求值 / getSettings 實�
 // 看起來完全正常、卻與現場無關的報告。
 // **這是可用性守衛,不是品質閘門**:它不碰 evaluateGate 的任何門檻,只擋快門並說明原因。
 let camFault = null;
-// 預覽解析度:規格 §3.1「預覽與拍攝分離」。預覽固定 720p —— 串流拉到 4K 會掉幀、
-// 發燙、耗電,而即時迴圈本來就降到 320px,拉高零收益;高解析度只在快門瞬間取。
-const PREVIEW_W = 1280, PREVIEW_H = 720;
+// 預覽解析度(規格 §3.16 · 2026-08-07 Eric 裁示,**推翻 §3.1 原本的「預覽固定 720p」**)。
+//
+// 原設計是「預覽維持 720p,高解析度只在快門瞬間由 L2 升壓取得」,理由是串流拉高會掉幀、
+// 發燙、耗電,而即時迴圈本來就降到 320px、拉高零收益。**前半段的理由仍然成立,
+// 但後半段被實機推翻**:L2 升壓四戰四敗(見 §3.15),分析永遠落在預覽解析度上,
+// 於是「高解析度只在快門瞬間取」這件事**從來沒有真的發生過**。
+//
+// 既然實際被分析的一定是預覽幀,解析度就必須由預覽本身提供:
+//   1280 寬 → ITF-14 約 6.70 px/module(仍不足)
+//   1920 寬 → 約 10.06 px/module ⇒ **過 A4.3 的 ≥8 門檻**
+// 取 1920×1080 而非更高:再往上換來的密度邊際遞減,而掉幀與發燙是線性上升的,
+// 且 1080p 是行動裝置最普遍的原生視訊模式,協商失敗的機會最低。
+//
+// ⚠ **這是取捨不是免費的**:預覽從 720p 拉到 1080p,耗電與發熱確實會增加。
+// 換到的是「不再切相機模式」—— 而三起事故(§3.13 串流洩漏 / §3.14 畫布清空 /
+// §3.15 畫布滯留)全部發生在切模式的窗口裡。實機的實拿值記在報告的「串流」欄,
+// **裝置若給不到 1920,那一欄會誠實顯示它實際給了多少**。
+const PREVIEW_W = 1920, PREVIEW_H = 1080;
 // 開相機的逾時(毫秒)。getUserMedia 在「相機被其他分頁佔用」時可能永遠不回應
 // (iOS Safari 同時只給一個分頁用相機),而它自己沒有 timeout 選項 —— 只能賽跑。
 // 8 秒是折衷:比正常授權流程(含使用者按下「允許」)寬鬆,又不至於讓人乾等。
@@ -1249,8 +1257,7 @@ let camGeneration = 0;
 function setCamStatus(txt, cls) { const el=$("camStatus"); if(el){ el.textContent=txt; el.className="camStatus "+(cls||""); } }
 
 // 快門解析度能力偵測(規格 §3.1 第 2 段):串流開啟後才讀得到完整能力表。
-// 輸入:已開啟的 video track;輸出:無(結果寫入 camImageCapture / shotResolution /
-//   trackResolution)。
+// 輸入:已開啟的 video track;輸出:無(結果寫入 camImageCapture / shotResolution)。
 // 邏輯:track.getCapabilities() 取視訊上限、ImageCapture.getPhotoCapabilities() 取
 //   照片上限(Android Chrome 通常遠高於視訊),交給純函式 pickBestResolution 選值。
 //   每一步都獨立 try/catch —— 任何一步失敗都只是少一份資訊,絕不中斷相機流程。
@@ -1272,8 +1279,6 @@ async function detectShotCapability(track) {
   try { shotResolution = pickBestResolution(caps, photoCaps); } catch (e) { shotResolution = null; }
   // 同時保留「只看 track 能力」的一組:各層取自己該用的那組解析度。第一層下的是
   // ImageCapture 的照片尺寸,第二層下的是 video track 的約束,兩者的模式表不共通,
-  // 混用會在 L1 失敗落到 L2 時把照片長寬比當成視訊約束(見 captureViaConstraints)。
-  try { trackResolution = pickBestResolution(caps, null); } catch (e) { trackResolution = null; }
 }
 
 // 把預覽叫醒。輸入:無;輸出:無(必要時設 camFault)。
@@ -1319,7 +1324,8 @@ async function initCamera(userGesture) {
   const gen = camGeneration; // 這一次的序號;stopCamera() 跑過就不再相等
   try {
     setCamStatus("開啟相機中…", "");
-    // ideal(非 exact)避免 OverconstrainedError:裝置給不到 720p 時仍照常開串流
+    // ideal(非 exact)避免 OverconstrainedError:裝置給不到 1080p 時仍照常開串流,
+    // 實拿多少由報告的「串流」欄誠實顯示(§3.16 的驗收就是看這一欄)
     // 2026-08-06 實機回報「第二次拍照相機無影像」,畫面永遠停在「開啟相機中…」。
     //   成因:**iOS Safari 同時只給一個分頁用相機**。先前的分頁還持有串流時,
     //   新分頁的 getUserMedia **既不 resolve 也不 reject** —— 沒有錯誤、沒有超時,
@@ -1344,7 +1350,7 @@ async function initCamera(userGesture) {
     camFault = null;
     watchTrackHealth(camTrack);
     // 能力偵測不 await:偵測慢或失敗都不該卡住相機就緒與即時量測,
-    // 快門時 shotResolution 仍為 null 就自動走第三層(現行 drawImage 行為)。
+    // 快門時 shotResolution 仍為 null 就自動走預覽幀路徑。
     detectShotCapability(camTrack).catch(() => {});
     const label = (stream.getVideoTracks()[0] || {}).label || "";
     setCamStatus("● 相機已開啟" + (label?("："+label):"（後鏡頭）") + " · 對準條碼後按快門檢驗", "ok");
@@ -1474,13 +1480,11 @@ function measureQuality(src, srcW, srcH) {
   };
 }
 function measureFrame() {
-  // 檢驗期間整段停量:切換模式中的畫面不是穩定的量測對象。第二層取幀會 applyConstraints
-  // 升壓 → 最多等 500ms 重新協商 → 再降回 720p 並等它真的降回(兩側的等待都是 await,
-  // 且降壓那段寫在 captureViaConstraints 的 finally 內,故 inspecting 確實涵蓋整段),
-  // 這段期間對 video 做 drawImage/getImageData 量到的 varLap / glare / wb / wash 不具
-  // 代表性。檢驗中 recompute 被覆寫成忙碌樣式所以看不出來,但 inspect() 的 finally
-  // recompute 會直接吃到這批髒值,可能讓快門在檢驗剛結束時無故 LOCKED(要等下一個 tick
-  // 才自癒)。⚠ 降壓側的等待逾時放行後仍可能殘留過渡幀,只是窗口比沒等時小得多。
+  // 檢驗期間整段停量:取幀與分析進行中的畫面不是穩定的量測對象,而 inspect() 的 finally
+  // recompute 會直接吃到這批讀數,可能讓快門在檢驗剛結束時無故 LOCKED(要等下一個 tick
+  // 才自癒)。**L2 移除後(§3.16)這段窗口大幅縮短** —— 不再有升壓/降壓的串流過渡,
+  // 只剩解碼與量測的運算時間,期間畫面本身其實是穩定的;仍維持停量,理由改為單純的
+  // 「不要讓檢驗中的讀數蓋掉快門前那一組對照值」(assessShotFreshness 要用)。
   if (inspecting) return;
   const v = camVideo; if (!v || !v.videoWidth) return;
   // 暫停中的 video 畫出來是**暫停前那一幀**,不是現場 —— 拿它更新燈號等於用舊畫面判定。
@@ -1525,8 +1529,7 @@ function stopCamera() {
     camVideo = null;
   }
   // 一併清掉快門解析度相關狀態,避免下次開相機沿用上一台裝置/串流的能力表
-  camTrack = null; camImageCapture = null; shotResolution = null; trackResolution = null; lastShotInfo = null;
-  pendingDownscale = null; // 那條 track 已 stop,未完成的降壓對新串流沒有意義,不可跨串流殘留
+  camTrack = null; camImageCapture = null; shotResolution = null; lastShotInfo = null;
   camFault = null; // 故障旗標屬於那條串流,不可跨串流殘留(否則重開相機後快門永遠鎖死)
   const fr = $("frame"); if (fr) fr.classList.remove("live");
   setCamStatus("", "");
@@ -1572,7 +1575,7 @@ function zxDecodeCanvas(c) {
     zxReader.reset();
   }
 }
-// ── 快門取幀(規格 §3.1 三層降級)──
+// ── 快門取幀(規格 §3.1,L2 已於 §3.16 移除,現為 L1 → 預覽幀兩層)──
 // 分析影像不再被 1024px 硬砍;解析度取自裝置實際能力,並記錄實拿值供誠實回報。
 
 // 把來源(video 或 canvas)等比畫進新 canvas。輸入:來源、來源寬高、目標寬;
@@ -1584,78 +1587,6 @@ function drawToCanvas(src, srcW, srcH, targetW) {
   c.getContext("2d").drawImage(src, 0, 0, w, h);
   return c;
 }
-// 等預覽串流長到目標寬度(applyConstraints 升壓需要重新協商,約 1–2 幀)。
-// 輸入:目標寬 minW、升壓前的 videoWidth baseW、逾時毫秒;輸出:Promise。
-// 目標寬必須取自 applyConstraints resolve 後的 getSettings().width(協商後的實拿值),
-//   不可用請求值 —— 約束下的是 ideal,裝置常給不到請求值(tier-3 請求 4096 時尤其),
-//   拿請求值當目標會每次都白等滿逾時。
-// minW 不可得(getSettings 不支援)時退成「videoWidth 相對升壓前有變化就放行」;
-//   降壓側(captureViaConstraints 的 finally)也刻意傳 minW=0 走這條 —— 變小的方向
-//   沒辦法用 videoWidth >= minW 判定,只能看「相對降壓前有沒有變」。
-// 逾時就放行,拿到多少算多少,絕不卡住快門;rAF 若不可用或(分頁隱藏時)不觸發,
-//   另有 setTimeout 保底一定會 resolve。
-function waitForVideoWidth(minW, baseW, timeoutMs) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    setTimeout(finish, timeoutMs);
-    const poll = () => {
-      if (done) return;
-      const v = camVideo;
-      if (!v) { finish(); return; }
-      const reached = minW > 0 ? v.videoWidth >= minW : (v.videoWidth > 0 && v.videoWidth !== baseW);
-      if (reached) { finish(); return; }
-      try { requestAnimationFrame(poll); } catch (e) { finish(); }
-    };
-    try { requestAnimationFrame(poll); } catch (e) { finish(); }
-  });
-}
-// 升壓協商完成後的沉澱幀數。applyConstraints 換解析度等於換相機模式,自動曝光與自動
-// 對焦會重新收斂,**第一幀通常偏暗且未合焦** —— waitForVideoWidth 一到目標寬就放行,
-// 抓到的正是那一幀。
-//
-// 2026-08-06 由 3 幀下修為 1 幀(Eric 現場判斷,直接推翻本函式原本的折衷):
-//   **等待本身就是手震窗口** —— 手持拍攝下,多等的每一幀都在累積位移,而位移造成的
-//   動態模糊是連續且必然的,AE/AF 未收斂只是一次性的過渡。拿「一定會發生的手震」去換
-//   「可能發生的過渡幀」是賠本的,方向錯了。
-//   1 幀(≈33ms @30fps)保留「不抓模式切換當下那一幀」這個最低限度的保護,成本可忽略。
-//   逾時 60ms:約兩個視訊幀,逾時就放行,不讓它變成新的延遲來源。
-//   底氣來自 F1 —— 閘門已改量在被分析的影像上,真的抓到爛幀會被具名告警,不會靜默出等級。
-const SETTLE_FRAMES = 1;
-const SETTLE_TIMEOUT_MS = 60;
-// 等 n 個視訊幀過去。輸入:幀數、逾時毫秒;輸出:Promise。
-// 優先用 requestVideoFrameCallback(數的是真正的視訊幀;rAF 數的是繪製幀,60Hz 下
-// 兩個 rAF 才約等於一個 30fps 的視訊幀,拿 rAF 當幀數會少等一半)。
-// 逾時一定放行,絕不卡住快門 —— 分頁被切到背景時兩種 callback 都可能完全不觸發。
-function waitVideoFrames(n, timeoutMs) {
-  return new Promise((resolve) => {
-    const v = camVideo;
-    if (!v || n <= 0) { resolve(); return; }
-    let done = false, left = n;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    setTimeout(finish, timeoutMs);
-    const tick = () => {
-      if (done) return;
-      if (--left <= 0) { finish(); return; }
-      step();
-    };
-    const step = () => {
-      try {
-        if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick);
-        else requestAnimationFrame(tick);
-      } catch (e) { finish(); }
-    };
-    step();
-  });
-}
-// 讀取 track 目前協商到的實際串流寬度。輸入:無;輸出:寬度數字,不可得時 0
-function trackWidth() {
-  try {
-    const s = camTrack && camTrack.getSettings ? camTrack.getSettings() : null;
-    if (s && typeof s.width === "number" && s.width > 0) return s.width;
-  } catch (e) {}
-  return 0;
-}
 // 讀取 track 目前的實際串流尺寸。輸入:無;輸出:"W×H" 或 "不可得"(getSettings 不支援時)
 function trackSizeText() {
   try {
@@ -1665,7 +1596,7 @@ function trackSizeText() {
   return "不可得";
 }
 // 記錄本次快門的三個數字(規格 §5.2 實機驗收要的請求值 / 實拿值 / 分析影像寬)。
-// 輸入:降級層別代號、分析用 canvas、取幀當下的串流尺寸(第二層降回 720p 前先讀好,
+// 輸入:取幀路徑代號、分析用 canvas、取幀當下的串流尺寸(傳 null 則現場讀,
 //   不填則現場讀)、該層額外要記的欄位 extra(照片/畫面原尺寸與面積上限縮放)、
 //   res 該層實際採用的解析度來源(第二層用 track 版,不填則用 shotResolution);
 //   輸出:同一個 canvas(方便串接)。
@@ -1696,12 +1627,12 @@ function recordShot(path, canvas, settingsText, extra, req) {
   return canvas;
 }
 
-// 三層取幀的回傳型別一致為 { canvas, settings, extra?, res? } 或 null:settings 是「取幀
-// 當下」的串流尺寸文字,只有第二層需要在降回 720p 之前先讀好,其餘兩層傳 null 由呼叫端
-// 現場讀;extra 是該層特有的誠實回報欄位(第一層 photo 記照片原尺寸,二三層 frame 只在
-// 撞到面積上限時記);res 是該層實際採用的解析度來源,只有第二層要覆寫(track 版)。
+// 兩層取幀的回傳型別一致為 { canvas, settings, extra? } 或 null:settings 是取幀當下的
+// 串流尺寸文字,兩層都傳 null 由呼叫端現場讀(L2 移除後不再有「降回前要先讀好」的情形);
+// extra 是該層特有的誠實回報欄位(L1 的 photo 記照片原尺寸,預覽幀的 frame 只在撞到
+// 面積上限時記)。
 
-// 取幀面積上限(三層共用)。超過瀏覽器的 canvas 面積上限時 canvas 不會丟例外,而是
+// 取幀面積上限(兩層共用)。超過瀏覽器的 canvas 面積上限時 canvas 不會丟例外,而是
 // **靜默變成空白** —— ZXing 與 ROI 會拿到全黑影像,結果「成功但是假的」,正好繞過本頁
 // 「取幀或分析失敗一律誠實中止」的護欄。故超過上限先等比縮進上限內:寧可解析度低一點被
 // resolution 檢查擋下,也不要拿一張全黑影像算出漂亮分數。
@@ -1717,7 +1648,7 @@ const MAX_PHOTO_PIXELS = 16e6;
 //   sizeText 是「來源尺寸(→縮至 n%)」的誠實文字、capped 表示這次真的縮過。
 // 邏輯:等比縮算式沿用 fitRoiToBudget,它只是「面積預算 → 取樣寬高」的純函式,
 //   對照片與串流畫面同樣適用。
-// 三層都必須走這裡,不是只有 L1:L2 會對 track 下 width:{ideal:4096} 升壓,協商到的
+// 兩層都必須走這裡,不是只有 L1:預覽幀吃的是協商到的
 //   videoWidth 直接就是 canvas 寬;L3 也吃預覽協商到的寬。上面那段「超過面積上限靜默
 //   變空白」對這兩層一字不差地成立,少夾一層就是留一條路讓假結果溜過誠實性護欄。
 function drawCapped(src, srcW, srcH) {
@@ -1748,76 +1679,12 @@ async function captureViaImageCapture() {
     return { canvas: shot.canvas, settings: null, extra: { photo: shot.sizeText }, req };
   } catch (e) { return null; }
 }
-// 第二層:applyConstraints 暫時升壓 → 等 1–2 幀重新協商 → drawImage → 降回 720p。
-// 輸入:無;輸出:{ canvas, settings, res, extra } 或 null。無論成功與否 finally 都會把預覽降回
-// 720p,避免預覽長期停在高解析度(掉幀、發燙、耗電)。
-// 輸出的 settings 為「降回 720p 之前」讀到的實拿尺寸,否則回報的會是已降回的 720p。
-async function captureViaConstraints() {
-  const t = camTrack;
-  // 只採 track 來源的解析度,不用 shotResolution:第一層失敗(ImageCapture 存在但
-  // takePhoto 丟例外,部分 Android 機型常見)會落到這裡,而此時 shotResolution 仍是
-  // tier 1 的**照片**尺寸(如 4032×3024),把它當成 video track 的約束等於逼裝置去湊
-  // 一個未必存在於視訊模式表的長寬比 —— 正是 pickBestResolution JSDoc 警告的情形,
-  // 只是換成跨層來源不匹配。detectShotCapability 另存的 trackResolution 才是這一層該用的。
-  const res = trackResolution;
-  if (!t || !t.applyConstraints || !res) return null;
-  const v0 = camVideo, baseW = v0 ? v0.videoWidth : 0; // 升壓前的畫面寬,供「有變化就放行」用
-  try {
-    // widthOnly 接線(規格 §3.1):tier 2/3 的 width.max 與 height.max 來自兩個獨立區間、
-    // 不保證屬於同一個模式(tier 3 的 4096×4096 更是 1:1 假比例),兩邊一起下 ideal 會
-    // 逼裝置去湊一個不存在的長寬比 —— 只對 width 下 ideal,高度交給裝置照原生比例配。
-    // track 來源的 widthOnly 恆為 true,保留判斷是不想在 pickBestResolution 日後改動時
-    // 靜默走錯分支。
-    const c = { width:{ ideal:res.width } };
-    if (!res.widthOnly) c.height = { ideal:res.height };
-    await t.applyConstraints(c);
-    // 等待目標取協商後的實拿寬(getSettings),不是請求值 —— ideal 常給不到請求值,
-    // 拿請求值當目標會每次都白等滿 500ms 才逾時放行
-    await waitForVideoWidth(trackWidth(), baseW, 500);
-    // 跳過模式切換當下那一幀再取(見 SETTLE_FRAMES):上一行放行的那一刻是新解析度的
-    // **第一幀**,也正是曝光與對焦重新收斂中的那一幀。
-    await waitVideoFrames(SETTLE_FRAMES, SETTLE_TIMEOUT_MS);
-    const v = camVideo;
-    if (!(v && v.videoWidth)) return null;
-    // settings 在 finally 降回 720p 之前先讀(return 的運算式先算完才跑 finally);
-    // 升壓後的畫面同樣可能撞上 canvas 面積上限,故一律過 drawCapped
-    const shot = drawCapped(v, v.videoWidth, v.videoHeight);
-    // req 就是上面真的 applyConstraints 下去的那組(track 來源),這一層本來就誠實
-    return { canvas: shot.canvas, settings: trackSizeText(), req: res,
-      extra: shot.capped ? { frame: shot.sizeText } : null };
-  } catch (e) {
-    return null;
-  } finally {
-    // 降壓側要跟升壓側對稱地等:applyConstraints 的 resolve **不等於** video 真的協商回
-    // 720p(升壓那一半正是因為這件事才需要 waitForVideoWidth)。少了這段,inspecting 會在
-    // 串流還在過渡時就被清掉,下一個 measureFrame tick 有機會量到過渡幀。
-    // minW 傳 0 是刻意的:降壓是「變小」,不能用 videoWidth >= minW 判定,改走
-    // waitForVideoWidth 的「相對 baseW 有變化就放行」分支,baseW 取降壓前的實拿寬。
-    // 逾時取 300ms(比升壓的 500ms 短):降回預設預覽模式通常比協商到高解析度快。
-    //
-    // 2026-08-06 移出關鍵路徑(Eric 反映快門整體過慢):
-    //   **這段等待發生在照片已經取到之後,對「拍到哪一幀」毫無影響** —— 它唯一的作用是
-    //   讓 inspecting 涵蓋整段串流過渡。原本寫成 `await`,於是它連帶把 capturePhoto →
-    //   inspectReal → 結果頁整條路都往後推 300ms,純粹是使用者多等、沒有換到任何品質。
-    //   改成把 promise 存起來不在此 await,交給 inspect() 的 finally 在**清除 inspecting
-    //   之前**等它 —— 保護區間一模一樣,但影像分析(ZXing + ROI + 計量)與降壓變成並行,
-    //   使用者看到結果的時間提前約 300ms。
-    const wBefore = camVideo ? camVideo.videoWidth : 0;
-    pendingDownscale = (async () => {
-      try {
-        await t.applyConstraints({ width:{ ideal:PREVIEW_W }, height:{ ideal:PREVIEW_H } });
-        // 本來就沒升上去(升壓失敗或裝置只給得到 720p)就不必等,否則每次都白等滿逾時
-        if (wBefore > PREVIEW_W) await waitForVideoWidth(0, wBefore, 300);
-      } catch (e) {}
-    })();
-  }
-}
-// 第三層(保底,等同改版前行為除了不再砍到 1024):直接對預覽 video drawImage。
+// 預覽幀取像(L2 移除後這是 iOS 的唯一路徑):直接對預覽 video drawImage。
 // 輸入:無;輸出:{ canvas, settings, extra } 或 null。
 function captureViaDrawImage() {
   const v = camVideo;
   if (!(v && v.videoWidth)) return null;
-  // 預覽通常是 720p,但預覽解析度由裝置協商、不保證,故一樣過面積夾制
+  // 預覽目標為 1920×1080(§3.16),但實拿由裝置協商、不保證,故一樣過面積夾制
   const shot = drawCapped(v, v.videoWidth, v.videoHeight);
   return { canvas: shot.canvas, settings: null, extra: shot.capped ? { frame: shot.sizeText } : null };
 }
@@ -1829,15 +1696,14 @@ async function capturePhoto() {
   // ── 即時取幀(2026-08-06)────────────────────────────────────────────────
   // 直接畫下**當下這一幀**,不呼叫 takePhoto、不下任何約束、不等任何協商 ——
   // 按下即所得,快門延遲趨近於 0,螢幕上看到什麼就量什麼。
-  // 代價是解析度只有預覽等級(通常 720p)而非照片等級。
-  // 為什麼現在敢給這個選項:規格 §3.5 的計量重新設計之後,等級不再隨取樣密度擺盪
-  // (同一張合成圖 6→14 px/元素,舊路徑擺動 2.67 級、新路徑 0.00–0.03 級)。
-  // **但實拍的誤拒率仍未知**,所以這是使用者明選的模式而不是預設,
-  // 且每張都記下 path / 串流 / 分析 / px per module,兩種模式的紀錄可直接對照 ——
-  // 那正是規格 §6.1 要求的「提高解析度前 / 後實拍對照」。
+  // 代價是解析度只有預覽等級 —— **但 §3.16 把預覽拉到 1920×1080 之後,那已經足夠**
+  // (ITF-14 約 10.06 px/module,過 A4.3 的 ≥8 門檻),而 L2 也已移除。
+  // 於是在 iOS 上這個模式與「高解析」實際等價,兩條路都取預覽幀;
+  // 差別只剩在支援 ImageCapture 的裝置(Android)上,高解析會改取照片解析度。
+  // 每張仍記下 path / 串流 / 分析 / px per module,兩種模式的紀錄可直接對照。
   if (state.captureMode === "instant") {
     const now = captureViaDrawImage();
-    return now ? recordShot("L3/即時(使用者選)", now.canvas, now.settings, now.extra, null) : null;
+    return now ? recordShot("預覽幀/即時(使用者選)", now.canvas, now.settings, now.extra, null) : null;
   }
   // 升壓前先留一張**已收斂**的預覽幀當保底(規格 §3.9)。只用 drawImage(GPU 路徑),
   // 成本接近零。實拍證據顯示升壓後的過渡幀可能比它差很多(糊 + 偏藍),
@@ -1858,11 +1724,21 @@ async function capturePhoto() {
 
   const byPhoto = await captureViaImageCapture();
   if (byPhoto) return acceptFrame("L1/ImageCapture", byPhoto, safe, safeQ);
-  const byConstraint = await captureViaConstraints();
-  if (byConstraint) return acceptFrame("L2/applyConstraints", byConstraint, safe, safeQ);
-  const byDraw = captureViaDrawImage();
+  // **L2(applyConstraints 升壓)已移除**(規格 §3.16 · 2026-08-07 Eric 裁示)。
+  // 實機四戰四敗:四次快門都協商到 3024×4032、四次都因對焦不過被淘汰,分析最後
+  // 全部跑在升壓前留的預覽幀上 —— 每張白付 1.4–1.5 秒延遲、兩次相機模式切換、
+  // 一塊 48MB 畫布。而 §3.13(串流洩漏)/ §3.14(畫布靜默清空)/ §3.15(畫布滯留)
+  // 三起事故全部發生在那段升壓與降壓的窗口裡。
+  // 解析度改由**預覽本身**提供(PREVIEW_W 拉到 1920,見該常數),不再切模式。
+  // L1 不可用(iOS Safari 恆如此)→ **直接用上面那張 `safe`**,不要再拍一張:
+  // L2 拿掉之後兩者之間不再有升壓,再拍一張只是同一瞬間的同一畫面,拿它們互比毫無意義
+  // (還會因為雜訊讓 chooseCaptureFrame 隨機退回)。safe 已帶像素快照,照 §3.14 重建。
+  if (!safe) return null;
+  const c = safe.pixels ? canvasFromPixels(safe.pixels) : safe.canvas;
   // L3 從不送任何解析度請求 —— req 恆為 null,誠實印「未請求」(見 recordShot)
-  return byDraw ? recordShot("L3/drawImage", byDraw.canvas, byDraw.settings, byDraw.extra, null) : null;
+  const kept = recordShot("預覽幀/drawImage", c, safe.settings, safe.extra, null);
+  if (c !== safe.canvas) releaseCanvas(safe.canvas);
+  return kept;
 }
 
 // 對某張影像跑閘門,取出對焦與眩光兩項的結果。輸入:measureQuality 的輸出;
@@ -1887,6 +1763,16 @@ function photometricGateOf(q) {
 function releaseCanvas(c) {
   if (!c || typeof c.width !== "number") return;
   try { c.width = 0; c.height = 0; } catch (e) {}
+}
+
+// 由像素快照重建一張 canvas(規格 §3.14)。輸入:ImageData;輸出:canvas。
+// 兩個呼叫端共用:退回保底幀時、以及 L1 不可用直接採用保底幀時 —— 兩者的理由相同
+// (原 canvas 的後備儲存可能已被 iOS 清空,而 ImageData 在 JS heap 清不掉)。
+function canvasFromPixels(px) {
+  const c = document.createElement("canvas");
+  c.width = px.width; c.height = px.height;
+  c.getContext("2d").putImageData(px, 0, 0);
+  return c;
 }
 
 // 收下一張取幀結果,必要時退回升壓前的預覽幀(規格 §3.9)。
@@ -1916,18 +1802,12 @@ function acceptFrame(path, got, safe, safeQ) {
   // 退回預覽幀。**path 要誠實反映實際用的是哪一張** —— 報告若仍印 L2,
   // 事後看紀錄的人會以為量的是升壓後的高解析影像,那是假的。
   // **用像素快照重建,不直接用原 canvas**(§3.14):走到這裡距離拍下保底幀已隔著
-  // 整段 L2 升壓,原 canvas 的後備儲存可能已被 iOS 清空(讀回全黑、不擲錯)。
+  // 整段取幀,原 canvas 的後備儲存可能已被 iOS 清空(讀回全黑、不擲錯)。
   // putImageData 回一張新 canvas,保證分析的就是快門當下量測過的那批像素。
-  let safeCanvas = safe.canvas;
-  if (safe.pixels) {
-    const c2 = document.createElement("canvas");
-    c2.width = safe.pixels.width; c2.height = safe.pixels.height;
-    c2.getContext("2d").putImageData(safe.pixels, 0, 0);
-    safeCanvas = c2;
-  }
+  const safeCanvas = safe.pixels ? canvasFromPixels(safe.pixels) : safe.canvas;
   const c = recordShot(path + "→退回預覽幀", safeCanvas, safe.settings, safe.extra, null);
   if (lastShotInfo) { lastShotInfo.frameFallback = pick.reason; lastShotInfo.frameCompare = cmp; }
-  // 升壓幀落選 —— 這就是那塊 3024×4032 ≈ 48MB,而它每一張都走到這裡。
+  // 被淘汰的那張(L2 移除後只剩 L1 的照片)立刻歸還後備儲存
   releaseCanvas(got.canvas);
   // 原保底畫布也不再需要(分析吃的是 putImageData 重建的那張);
   // 但 safe.pixels 取不到時 safeCanvas 就是它本人,那種情形不可釋放。
@@ -2153,9 +2033,13 @@ $("capMode").addEventListener("click", (e) => {
   if (!b) return;
   state.captureMode = b.dataset.mode;
   renderCapMode();
+  // 文案必須跟著 §3.16 一起改 —— L2 移除後「嘗試升壓、快門會有延遲」已經是假的,
+  // 而支援 ImageCapture 與否是裝置能力,程式當下就知道,不必讓使用者猜。
   setCamStatus(state.captureMode === "instant"
-    ? "即時取幀:按下即所得,不升壓、無等待;解析度為預覽等級"
-    : "高解析取幀:嘗試升壓到裝置上限,快門會有延遲", "");
+    ? "即時取幀:按下即所得,直接畫下當下預覽幀"
+    : (camImageCapture
+        ? "高解析取幀:改取裝置的照片解析度(比預覽幀高,快門略有延遲)"
+        : "高解析取幀:本機不支援照片取像,實際與「即時」相同"), "");
 });
 renderCapMode();
 
