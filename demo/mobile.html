@@ -186,6 +186,16 @@
   /* 取樣條件註記(D2):中性敘述,只講取樣差異,不得寫成準確度或合規聲明 */
   .sampNote { width:100%; margin:6px 0 0; padding:8px 11px; border-radius:10px; text-align:left;
               background:#f1f5f9; border:1px solid #e2e8f0; color:#475569; font-size:11.5px; line-height:1.6; }
+  /* 取幀讀數(§3.16 實機驗收):四個數字一眼可見,不必匯出 PDF 才看得到。
+     **這是取像條件的紀錄,不是品質判定** —— 顏色只標「有沒有達到取樣條件」,
+     與參考等級、允收判定完全無關,措辭不得寫成合格與否。 */
+  .shotRead { width:100%; margin:8px 0 0; display:grid; grid-template-columns:repeat(2,1fr); gap:6px; }
+  .shotRead .cell { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:7px 10px; text-align:left; }
+  .shotRead .k { font-size:10.5px; color:#64748b; display:block; letter-spacing:.02em; }
+  .shotRead .v { font:700 14px/1.35 ui-monospace,monospace; color:#0f172a; font-variant-numeric:tabular-nums; }
+  .shotRead .cell.good { background:#f0fdf4; border-color:#bbf7d0; } .shotRead .cell.good .v { color:#15803d; }
+  .shotRead .cell.poor { background:#fef2f2; border-color:#fecaca; } .shotRead .cell.poor .v { color:#b91c1c; }
+  .shotRead .n { font-size:10px; color:#64748b; font-weight:400; display:block; margin-top:1px; }
   /* 判定下方的辨識文字(解碼字串)顯示框 */
   .decodedBox { width:100%; margin-top:10px; text-align:left; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:9px 11px; }
   .decodedBox .lbl { font-size:11px; color:#64748b; display:block; margin-bottom:2px; }
@@ -350,6 +360,7 @@
       <div class="legal">相對值・非 ISO 合規證書<br>本工具不出具 ISO 證書，合規驗證請用合規 verifier。</div>
       <div class="verdict" id="verdict"></div>
       <div class="margin" id="margin"></div>
+      <div class="shotRead" id="shotRead" hidden></div>
       <div class="sampNote" id="sampNote" hidden></div>
       <div class="decodedBox"><span class="lbl">辨識文字（解碼結果）</span><div class="val" id="decodedText">–</div></div>
       <div class="whyBox" id="whyBox" hidden></div>
@@ -426,7 +437,7 @@ import {
   ONE_D_SYMBOLOGIES, edgeFitRoi,
   assessMeasurability, SIMULATED_LABEL,
   roi1DMetrology,
-  assessShotFreshness,
+  assessShotFreshness, SLOW_SHUTTER_MS,
   explainGrade,
   chooseCaptureFrame, FRAME_CHOICE,
   barBandExtent,
@@ -708,10 +719,26 @@ function rectifyRoi(zx, kx, ky, rg, photo) {
 }
 
 // 真實檢驗:輸入快門照片 canvas;ZXing 單次解碼 + 影像量測算分級參數(C7 proxy 實算)
-// 記憶體護欄(規格 §3.1):解碼與 ROI 定位跑「降取樣版(≤1024px 寬)」,
+// 解碼與 ROI 定位用的降取樣寬度上限。
+//
+// ⚠ **這個數字是 §3.16 之後的新瓶頸候選,但門檻未經證實,故維持原值 1024。**
+// 結構事實(讀程式碼即可確認,無爭議):**量測**吃全解析度的 ROI,而**解碼**吃的是
+// 這張縮圖 —— 兩者的取樣密度自 §3.1 起就不一樣。§3.16 把預覽 720 → 1920 之後,
+// 量測密度提升 167%,解碼密度卻只從 720 提升到 1024(+42%),因為這條上限先夾住了。
+// 若現場仍出現「量得到卻讀不出來」,這裡是第一個該看的地方。
+//
+// **為什麼不現在就調高:** 2026-08-07 曾以合成 ITF-14 試圖量出 ZXing 的密度門檻,
+// 據以把上限提到 2048 —— 但那組數據**自己就不可信**:同一支量測在 2560 寬
+// (13.3 px/module)失敗、1024 寬(5.3 px/module)卻成功,結果非單調,
+// 病因是合成時元素寬未對齊像素邊界所累積的捨入誤差。**合成條碼在這件事上不是可用的
+// 量測工具**,故依專案紀律(未經實拍對照不得動門檻)退回原值,等一張真實條碼的實拍。
+// 調高的代價也要一併衡量:Android 走 L1 時照片可達 4032 寬,上限翻倍等於 getImageData
+// 從 3.1MB 變 12.6MB、ZXing 掃描面積四倍。
+const DECODE_MAX_W = 1024;
+// 記憶體護欄(規格 §3.1):解碼與 ROI 定位跑「降取樣版(≤DECODE_MAX_W 寬)」,
 // 定出的 ROI 座標再依比例放大回全解析度,只對放大後的 ROI 取像素做光度與幾何量測。
 // 取降取樣版(small)的整張灰階。輸入:無(用閉包外的 small);輸出:灰階陣列或 null。
-// 只有 1D 的條帶偵測需要它,故做成延遲取用 —— small 最大 1024 寬,整張 getImageData
+// 只有 1D 的條帶偵測需要它,故做成延遲取用 —— small 最大 DECODE_MAX_W 寬,整張 getImageData
 // 的成本遠低於全解析度,且本來就會為了解碼而讀過一次。
 function grayOfCanvas(c) {
   try {
@@ -722,8 +749,9 @@ function grayOfCanvas(c) {
 }
 
 function inspectReal(photo) {
-  // 降取樣版:照片本來就 ≤1024 寬時直接沿用,不多做一張 canvas
-  const small = photo.width > 1024 ? drawToCanvas(photo, photo.width, photo.height, 1024) : photo;
+  // 降取樣版:照片本來就 ≤DECODE_MAX_W 寬時直接沿用,不多做一張 canvas
+  // (§3.16 之後 iOS 的預覽是 1920 < 2048,故這條路徑不再縮放,解碼吃的就是原圖)
+  const small = photo.width > DECODE_MAX_W ? drawToCanvas(photo, photo.width, photo.height, DECODE_MAX_W) : photo;
   const w = small.width, h = small.height;
   // 快門前最後一次的**預覽**讀數。必須在這裡先抄下來 —— 它是「按快門那一刻使用者看到
   // 的燈號依據」,是後面判斷「劣化是不是發生在延遲窗口內」的對照組。
@@ -734,7 +762,7 @@ function inspectReal(photo) {
   // 於是快門延遲期間的任何位移 / 重新對焦都不會被任何一處發現。改量在這裡之後,
   // 延遲多久都不影響結論正確性 —— 判的就是被分級的那張。
   // 來源取 small 不取 photo:measureQuality 反正要縮到 320,從 4032 直縮多做一次大圖
-  // 重採樣沒有意義;small 已是 ≤1024 的等比縮圖,兩者縮到 320 的結果實務上等價。
+  // 重採樣沒有意義;small 已是 ≤DECODE_MAX_W 的等比縮圖,兩者縮到 320 的結果實務上等價。
   const shotQ = measureQuality(small, small.width, small.height);
   let _smallGray;
   const smallGray = () => (_smallGray !== undefined ? _smallGray : (_smallGray = grayOfCanvas(small)));
@@ -843,7 +871,7 @@ function inspectReal(photo) {
     applyTilt(zx ? q.tiltDeg : null);
   } else {
     // 1D:10 條掃描線的 DEC/DEF 實測;全部掃描線不可用時給最差半模組偏差
-    // modulePx 量在「ROI 實際取樣尺寸」上(不再被 1024 上限壓低,但 ROI 超過
+    // modulePx 量在「ROI 實際取樣尺寸」上(不再被降取樣上限壓低,但 ROI 超過
     // MAX_ROI_PIXELS 時是量在縮過的密度上,見上方 roiScale)—— 故它是真實量測值,
     // 但解讀時必須帶著 roiScale 一起看,不可當成全解析度下的 px/module。
     // 2026-08-05 重新設計(規格 §3.5):改走 roi1DMetrology —— 次像素邊界 +
@@ -1013,6 +1041,43 @@ function samplingNote(shot) {
     + "與不同取樣密度下的紀錄**不宜直接互比**；同一台裝置、同一取幀層別的前後比較才有意義。";
 }
 
+// 結果頁的取幀讀數(規格 §3.16 實機驗收)。輸入:lastShotInfo 形狀的物件;輸出:無。
+//
+// 由來:§3.16 的驗收判準是四個數字 —— 串流 / 分析 / px per module / 快門延遲。
+// 它們一直都有被記錄,但**只活在 PDF 明細那一長串裡**,現場要驗證得先匯出再逐字找。
+// 實機驗收本來就是最容易被跳過的一步(規格 §5.2 卡了整整一週),不該再加摩擦。
+//
+// **這是取像條件的紀錄,不是品質判定。** 顏色只標「有沒有達到取樣條件」:
+//   · px/module 對 A4.3 的 ≥8 —— 那是 resolution **閘門**既有的門檻,不是新增的
+//   · 快門延遲對 SLOW_SHUTTER_MS —— 該常數本來就註明「純顯示用,不參與任何判定」
+// 兩者都與參考等級、允收判定完全無關,措辭一律只講取樣條件,不寫成合格與否。
+function renderShotRead(shot) {
+  const box = $("shotRead");
+  if (!shot) { box.hidden = true; box.innerHTML = ""; return; }
+  // 分析寬取自 "W×H" 字串的前段;px/module 只有 1D 量得出來,2D 與不可量測時留白
+  const aw = parseInt(String(shot.analysis || "").split("×")[0], 10);
+  const pxm = typeof shot.pxPerModule === "number" ? shot.pxPerModule : null;
+  const ms = typeof shot.latencyMs === "number" ? shot.latencyMs : null;
+  const cell = (k, v, cls, note) =>
+    `<div class="cell ${cls || ""}"><span class="k">${esc(k)}</span>`
+    + `<span class="v">${esc(v)}</span>${note ? `<span class="n">${esc(note)}</span>` : ""}</div>`;
+  const cells = [
+    cell("串流(裝置實拿)", shot.settings || "不可得", "",
+         Number.isFinite(aw) && aw >= 1920 ? "" : "低於請求的 1920"),
+    cell("分析影像", shot.analysis || "不可得", ""),
+    pxm === null
+      ? cell("px / module", "—", "", "非 1D 或未量到")
+      : cell("px / module", pxm.toFixed(2), pxm >= 8 ? "good" : "poor",
+             pxm >= 8 ? "達 ≥8 取樣條件" : "未達 ≥8,量測值僅供參考"),
+    ms === null
+      ? cell("快門延遲", "不可得", "")
+      : cell("快門延遲", ms + " ms", ms < SLOW_SHUTTER_MS ? "good" : "poor",
+             ms < SLOW_SHUTTER_MS ? "" : "偏慢"),
+  ];
+  box.innerHTML = cells.join("");
+  box.hidden = false;
+}
+
 // 結果頁的實拍照片 + 量測範圍框。輸入:掃描影像物件(含 roi 分數座標);輸出:無。
 // 由來:實機回報「報告沒有照片,只能憑感覺」。字母與代號講不出「量在畫面的哪一塊」——
 // ROI 框讓「量到的是不是符號本體」一眼可見,不必相信程式。
@@ -1095,6 +1160,7 @@ function presentUnmeasurable(decode, meas, img, geom) {
   renderShotPhoto(img);
   renderWhy(null);
   const note = samplingNote(lastShotInfo);
+  renderShotRead(lastShotInfo);
   $("sampNote").hidden = !note; $("sampNote").innerHTML = note ? esc(note).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") : "";
   $("resultText").value = [
     `製程環節：${stageLabelOf(state.processStage)}`,
@@ -1128,6 +1194,7 @@ function presentResult(decode, grade, acceptance, img, geom, meas, why) {
   renderShotPhoto(img);
   renderWhy(why);
   const note = samplingNote(lastShotInfo);
+  renderShotRead(lastShotInfo);
   $("sampNote").hidden = !note; $("sampNote").innerHTML = note ? esc(note).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") : "";
   $("decode").innerHTML = decode.decoded
     ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${esc(decode.data)}${decode.dimension?" · "+esc(decode.dimension):""}`
@@ -1576,7 +1643,7 @@ function zxDecodeCanvas(c) {
   }
 }
 // ── 快門取幀(規格 §3.1,L2 已於 §3.16 移除,現為 L1 → 預覽幀兩層)──
-// 分析影像不再被 1024px 硬砍;解析度取自裝置實際能力,並記錄實拿值供誠實回報。
+// 分析影像不再被硬砍;解析度取自裝置實際能力,並記錄實拿值供誠實回報。
 
 // 把來源(video 或 canvas)等比畫進新 canvas。輸入:來源、來源寬高、目標寬;
 // 輸出:canvas。只用 drawImage(GPU 路徑),不讀像素。
