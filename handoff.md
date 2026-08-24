@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-08-23T21:38+0800
+> 最後更新:2026-08-24T20:22+0800
 
 ## Current Task
 
@@ -19,6 +19,9 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 
 修法全部不動門檻(符合 §6.1 凍結),所以**不必等實機就能動手**;
 唯一的例外是 A-10,它會改變閘門實際嚴格度,修完前後的紀錄不可互比。
+
+**08-24 已處理掉半條**:A-13 的驗法進了專案 `CLAUDE.md` 的「已知的坑」
+(`grep -c __STAMP__` 必須為 0,且說明為何不可比 hash)。**剩下的十二條半一條未動。**
 
 ## Done
 
@@ -122,8 +125,9 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 4. **A-07 `isWorkOrder` 守衛** —— `src/` 唯一需要動的一條,比照 `isOAuthTokenResponse`,附測試。
 5. **收尾**:A-04(三處守衛換 `Number.isFinite`)、A-09(錯誤型別可區分)、A-11(補測試)。
 6. **需要決策不只是修**:A-05(文案對齊實作,或反之)、A-08(QR/DM 門檻要不要進 `policies.ts`)。
-7. **A-13** 建議跟 `report20260807-1.md` D1 的 `deploy.sh` 一起做。
-   最小補丁是上線後跑 `curl -s https://m-code.ericchh.work/demo/sw.js | grep -c __STAMP__`,**必須為 0**。
+7. **A-13 剩一半** —— 驗法已寫進專案 `CLAUDE.md`(08-24),但那只是「有人記得去驗」。
+   真正的解仍是 `report20260807-1.md` D1 建議的 `deploy.sh`,讓
+   build → rsync → stamp 三步不可能拆開。**做了才算關掉這條。**
 
 
 ## Key Context
@@ -189,6 +193,12 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
   整表,**外加可量測性護欄(文案不得含 ISO/合規/不合格/印壞)、光度基底對照,
   以及新的「取樣密度掃描」守門(6→14 px/元素、0.1 步進,等級擺動須 < 0.25 級 ——
   這一類病是改動前的 431 個測試全數漏掉的)**。
+
+- **這個專案的 L2 教訓在哪** —— M-Code scope 現有四條:`feedback-handoff-no-state-snapshots`
+  (本地)+ 三條 symlink 到 `-Users-hezhaoxing/memory/` 的正典檔
+  (`feedback-acceptance-and-verification` / `feedback-code-audit-discipline` /
+  `feedback-pm-rd-tester-workflow`)。**改正典檔會同時影響其他專案**,不要當成本專案私有。
+  其中 `feedback-code-audit-discipline` 的實證正是 2026-08-22 這輪稽核。
 
 ## Risk / Note
 
