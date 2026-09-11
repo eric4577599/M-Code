@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-09-11T20:05+0800
+> 最後更新:2026-09-11T20:30+0800
 
 ## Current Task
 
@@ -23,13 +23,19 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 **08-24 已處理掉半條**:A-13 的驗法進了專案 `CLAUDE.md` 的「已知的坑」
 (`grep -c __STAMP__` 必須為 0,且說明為何不可比 hash)。
 
-**09-11 修掉 src/ 側四條**:A-07 / A-09 / A-04 / A-11,走 `pm-rd-tester` workflow 1 輪 PASS,
-測試 521→554(+33),三道閘門主 session 親自重跑 + 18 項獨立重演(不用 workflow 的測試)全過。
-報告 `report20260911-1.md`、規格 `spec20260911-1.md`。**尚未 push。**
+**09-11 修掉五條**:
+- **src/ 側四條**(A-07 / A-09 / A-04 / A-11):走 `pm-rd-tester` workflow 1 輪 PASS,
+  測試 521→554(+33),三道閘門主 session 親自重跑 + 18 項獨立重演(不用 workflow 的測試)全過。
+  報告 `report20260911-1.md`、規格 `spec20260911-1.md`。
+- **demo 層第一條**(A-12 登出不清資料):兩檔同步,瀏覽器實際操作驗證 + 對照組 + 回歸。
+  報告 `report20260911-2.md`。
 
-**剩下八條半,全部在 demo 層**(A-10 / A-01 / A-02/03 / A-05 / A-06 / A-08 / A-12 + A-13 的另外半條)——
+**剩下七條半,全部在 demo 層**(A-10 / A-01 / A-02/03 / A-05 / A-06 / A-08 + A-13 的另外半條)——
 `typecheck` 只掃 `src/`、demo 無自動化測試,**workflow 的 Tester 層驗不到**,
-故 09-11 那輪刻意不納入。要動這批得改用「build 後在本機 8765 測試台實際操作驗證」的 DoD。
+故 src/ 那輪刻意不納入。這批的 DoD 是瀏覽器實際操作驗證,**且驗之前必須先清 SW 與 caches**
+(見 B 線第 1 項的兩個 ⚠)。
+
+> git 與上線狀態一律現查,本檔不記快照:`git log origin/main..HEAD --oneline` / `git status --short`。
 
 ## Done
 
@@ -56,7 +62,7 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 | ✅ A-07 | 🔴 | `getWorkOrder` 裸 cast → ERP 回髒 `requiredGrade` 時 `pass=false` 卻 `margin=+3.60`,**汙染預警與趨勢** |
 | A-02/03 | 🟠 | `expectedDataMatch` 拿解碼結果跟自己比,恆 `true`。mobile 潛伏(未存)、`index.html` 今天就顯示「比對符合」 |
 | A-01 | 🟠 | 「本張閘門 全部 OK」含從未量過的項;**2D 的 `pxm` 從來不寫入**,解析度恆綠 |
-| A-12 | 🟠 | `doLogout` 不清 `scans` 與表頭三欄 → 共用手機跨使用者殘留,新使用者可整批匯出 |
+| ✅ A-12 | 🟠 | `doLogout` 不清 `scans` 與表頭三欄 → 共用手機跨使用者殘留,新使用者可整批匯出 |
 | A-06 | 🟡 | 結果頁可同時顯示 F 級與全 A 參數;`explainGrade` 修了「是哪一項」沒修「顯示什麼數字」 |
 | A-05 | 🟡 | 付費文案承諾六項,mobile 實作約一項半;「尺寸量測」在實機**結構性不可得** |
 | A-08 | 🟡 | QR/DM 允收門檻寫死在 `mobile.html:487` 的 fallback,不受 §6.1 治理、無守門測試 |
@@ -122,8 +128,13 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 
 依 `report20260822-1.md` 的建議順序:
 
-1. **A-12 登出清資料** —— `doLogout` 多呼叫一次現成的 `clearList()` 並清
-   `f-customer` / `f-product` / `f-workorder`。一行,資料外洩性質,最該先修。
+1. ~~**A-12 登出清資料**~~ —— **✅ 09-11 完成**(`report20260911-2.md`)。
+   兩檔同步,並多清了稽核未點名的同類洩漏:結果頁節點、`resultText`、`lastShotInfo`、
+   `lastResultBtn` 停用(B 原本可按「📋 檢測結果」讀到 A 的實拍影像與可複製判定文字)。
+   ⚠ **驗 demo 前必須先清 Service Worker 與 caches**,否則驗到的是舊碼 ——
+   repo 的 `sw.js` 未蓋章,快取名恆定為 `mcode-shell-__STAMP__`。細節見報告。
+   ⚠ **8765 測試台的 docroot 就是 `~/m-code-site`(線上同一份)**,照字面在 8765 驗
+   等於先發佈再驗證;09-11 改用臨時埠 8799 直接服務 repo,驗過才上線。
 2. **A-02 / A-03 比對誠實化** —— 誠實下限是「沒有預期值輸入就不傳 `expectedGtin`」
    (核心明文支援 → 欄位 undefined → CSV 空字串)。或把功能做完:加預期 GTIN 輸入欄。
 3. **A-01 + A-10 一起修** —— 兩條同源,都是「本張閘門」在說謊,且都在快門後路徑、資訊現成:

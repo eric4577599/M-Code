@@ -855,8 +855,18 @@ function doLogin() {
   const s = { user: u, tier: acc.tier };
   saveSession(s); enterApp(s);
 }
+// 登出:清 session 之外,**必須一併清掉這台機器上屬於上一個人的資料**(稽核 A-12)。
+// 共用機台是常態:A(PAID)檢驗 20 箱 → 登出 → B(FREE)登入,若不清,
+// B 看到的清單仍是 A 的 20 筆(含縮圖、解碼字串、等級)、表頭仍是 A 的客戶與工單號,
+// 且可直接匯出 Excel / PDF 帶走。與登入層「並非真正的身分驗證」那段揭露無關 ——
+// 那段講的是「有人可以假裝成 admin」,這裡是登出沒清資料,後端驗證再完美也一樣殘留。
+// 與 `demo/mobile.html` 的 doLogout 同步:兩檔的帳密與 tier 是權威表,清資料的範圍也必須一致。
 function doLogout() {
   clearSessionStore(); currentTier = null;
+  clearList(); // 掃描清單(含縮圖與解碼字串)——A-12 的主體
+  // 表頭三欄會被寫進 PDF / Excel 報告與 CSV,屬同一批殘留資料
+  ["f-customer", "f-product", "f-workorder"].forEach((id) => { $(id).value = ""; });
+  $("resultText").value = ""; // 判定後可複製文字框:整段可直接被下一個人複製帶走
   $("loginUser").value = ""; $("loginPass").value = ""; $("loginErr").textContent = "";
   document.querySelector('[data-page=capture]').click(); // 回到預設頁,再由登入層蓋住
   $("loginOverlay").classList.remove("hidden");

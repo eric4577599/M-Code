@@ -89,4 +89,15 @@ npm run build       # tsc → dist/(demo 依賴,必跑)
 - 部署只 `git pull` 不 rsync 到 `~/m-code-site` = 線上不會變(2026-07-21 就是這樣卡了 26 個 commit 沒上線)。
 - web server 必須 `--bind ::`(雙協議),只綁 IPv4 會讓 cloudflared 拿到 **502**;對外 **1033** 則是 cloudflared 沒在跑。
 - `*.sh` / `*.plist` 由 `.gitattributes` 固定 LF,不可改成 CRLF(shebang 會壞)。
+- **驗 demo 改動之前,必須先清 Service Worker 與 caches**(2026-09-11 踩到)。
+  repo 內的 `sw.js` 的 `VERSION` 是未蓋章的 `__STAMP__`,直接用本機伺服器服務 repo 時
+  快取名恆定為 `mcode-shell-__STAMP__`;加上 PWA 是 cache-first 且**刻意不自動更新**,
+  瀏覽器會持續餵舊 HTML,**連 `fetch(cache:"no-store")` 都被 SW 攔截回舊版**。
+  後果是「驗到舊碼卻以為修法無效」。做法:`getRegistrations()` 逐個 `unregister()`
+  + `caches.keys()` 逐個 `delete()` → 帶 query string 重載 →
+  **先斷言載入的原始碼確實含新符號,才開始操作**。這一步不能省,否則沒有判準說測的是哪一版。
+- **「在本機 8765 測試台驗證」這條 DoD 有一個陷阱:8765 的 docroot 就是 `~/m-code-site`,
+  與線上同一份** —— 照字面做等於**先發佈再驗證**,順序是反的。
+  要在上線前驗,另起一個臨時埠直接服務 repo(例:`python3 -m http.server 8799 --bind 127.0.0.1`),
+  驗過再走 build → rsync → stamp 三步。
 - 楞痕(washboard)與白平衡屬歷史誤判熱區:白平衡為**建議燈,不鎖快門**,不要改回硬閘門。
