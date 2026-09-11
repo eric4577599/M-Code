@@ -13,6 +13,7 @@ import type {
   ProcessStage,
   ErpConnection,
 } from "../domain/types.js";
+import { LETTER_NOMINAL_SCORE } from "../domain/scale.js";
 
 // ─── Transport abstraction (injected — no real I/O in core) ──────────────────
 export type HttpMethod = "GET" | "POST";
@@ -130,6 +131,22 @@ export class ErpHttpError extends Error {
   }
 }
 
+/**
+ * 回應格式錯(A-09)。輸入:HTTP 狀態碼與原始 body;輸出:一個可與一般
+ * ErpHttpError 區分的永久性錯誤。
+ * 邏輯:狀態碼是 2xx 但 body 不符合約定格式(例如反向代理攔截回一頁 HTML)
+ * 屬設定錯誤,重試一萬次也不會好,因此必須收斂成 FAILED 而非留在佇列重送。
+ * 以繼承實作,既有 `err instanceof ErpHttpError` 判斷仍成立,故 syncOne 的
+ * 分支順序必須先判 malformed。
+ */
+export class ErpMalformedResponseError extends ErpHttpError {
+  constructor(status: number, body: unknown) {
+    super(status, body);
+    this.name = "ErpMalformedResponseError";
+    this.message = `ERP HTTP ${status} malformed response`;
+  }
+}
+
 interface CachedToken {
   accessToken: string;
   /** Absolute epoch-ms at which the token can no longer be used. */
@@ -151,6 +168,45 @@ function isOAuthTokenResponse(value: unknown): value is OAuthTokenResponse {
     typeof (value as OAuthTokenResponse).access_token === "string" &&
     typeof (value as OAuthTokenResponse).expires_in === "number"
   );
+}
+
+/** 允收字母的單一事實來源:直接取自 scale.ts 的 LETTER_NOMINAL_SCORE,避免手抄漂移。 */
+const GRADE_LETTERS: ReadonlySet<string> = new Set(Object.keys(LETTER_NOMINAL_SCORE));
+
+/** 符號別允許值;與 domain/types.ts 的 Symbology union 對齊(型別層由下方 satisfies 保證)。 */
+const SYMBOLOGIES: ReadonlySet<string> = new Set([
+  "ITF14",
+  "GS1_128",
+  "CODE128",
+  "QR",
+  "DATAMATRIX",
+] satisfies Symbology[]);
+
+/**
+ * WorkOrder 回應的型別守衛(A-07)。輸入:任意值;輸出:是否為合法 WorkOrder。
+ * 邏輯:逐欄驗型別與允許值 —— id/customer 為字串、symbology 在允許集合內、
+ * expectedGtin 缺席或字串、acceptance 為物件且 requiredGrade 為大小寫敏感的
+ * A|B|C|D|F、xDimSpecMm 與 quietZoneMinX 為有限數。
+ * 為何要驗:requiredGrade 一旦是 'c' / 'B+' / null,下游 evaluateAcceptance 會
+ * 算出 pass=false 配 margin>0,打破「margin ≥ 0 ⟺ pass」不變量,讓預警數字說謊。
+ */
+export function isWorkOrder(value: unknown): value is WorkOrder {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const wo = value as Record<string, unknown>;
+  if (typeof wo["id"] !== "string") return false;
+  if (typeof wo["customer"] !== "string") return false;
+  if (typeof wo["symbology"] !== "string" || !SYMBOLOGIES.has(wo["symbology"])) return false;
+  if (wo["expectedGtin"] !== undefined && typeof wo["expectedGtin"] !== "string") return false;
+
+  const acc = wo["acceptance"];
+  if (typeof acc !== "object" || acc === null || Array.isArray(acc)) return false;
+  const a = acc as Record<string, unknown>;
+  if (typeof a["requiredGrade"] !== "string" || !GRADE_LETTERS.has(a["requiredGrade"])) {
+    return false;
+  }
+  if (!Number.isFinite(a["xDimSpecMm"])) return false;
+  if (!Number.isFinite(a["quietZoneMinX"])) return false;
+  return true;
 }
 
 export class ErpClient {
@@ -186,8 +242,12 @@ export class ErpClient {
       body: form,
     });
 
-    if (res.status < 200 || res.status >= 300 || !isOAuthTokenResponse(res.body)) {
+    if (res.status < 200 || res.status >= 300) {
       throw new ErpHttpError(res.status, res.body);
+    }
+    // 2xx 但格式錯 → 永久性設定錯誤,擲可區分的 malformed 錯誤(A-09)。
+    if (!isOAuthTokenResponse(res.body)) {
+      throw new ErpMalformedResponseError(res.status, res.body);
     }
 
     this.cached = {
@@ -223,7 +283,12 @@ export class ErpClient {
       this.invalidateTokenOn401(res.status);
       throw new ErpHttpError(res.status, res.body);
     }
-    return res.body as WorkOrder;
+    // 先狀態碼、後格式:body 不合格時帶回實際狀態與原始 body 供除錯,
+    // 不回半個物件、不就地補欄位(A-07)。
+    if (!isWorkOrder(res.body)) {
+      throw new ErpHttpError(res.status, res.body);
+    }
+    return res.body;
   }
 
   /**
@@ -267,12 +332,18 @@ export class ErpClient {
    *   其餘 4xx → FAILED(客戶端錯誤,不重試);5xx/網路錯誤 → QUEUED。
    * - getToken() 擲出的 4xx(如 client_secret 錯)屬永久性憑證錯誤 → FAILED,
    *   避免整個佇列無限期滯留重送。
+   * - getToken() 擲出的 ErpMalformedResponseError(2xx 但 body 非 OAuth 格式)同屬
+   *   永久性設定錯誤 → FAILED。因其繼承 ErpHttpError,必須排在 4xx 判斷之前。
    */
   private async syncOne(item: QueuedInspection): Promise<QueueItemResult> {
     let res: TransportResponse;
     try {
       res = await this.postInspection(item.body, item.id);
     } catch (err) {
+      if (err instanceof ErpMalformedResponseError) {
+        // 回應格式錯(如 200 + 一頁 HTML):設定問題,重送無用 → FAILED。
+        return { id: item.id, outcome: "FAILED", reason: err.message };
+      }
       if (err instanceof ErpHttpError && err.status >= 400 && err.status < 500) {
         // 取 token 就 4xx:憑證/請求本身錯,重試也不會好 → FAILED。
         return { id: item.id, outcome: "FAILED", reason: err.message };

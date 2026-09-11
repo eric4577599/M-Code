@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-08-24T20:22+0800
+> 最後更新:2026-09-11T20:05+0800
 
 ## Current Task
 
@@ -21,7 +21,15 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 唯一的例外是 A-10,它會改變閘門實際嚴格度,修完前後的紀錄不可互比。
 
 **08-24 已處理掉半條**:A-13 的驗法進了專案 `CLAUDE.md` 的「已知的坑」
-(`grep -c __STAMP__` 必須為 0,且說明為何不可比 hash)。**剩下的十二條半一條未動。**
+(`grep -c __STAMP__` 必須為 0,且說明為何不可比 hash)。
+
+**09-11 修掉 src/ 側四條**:A-07 / A-09 / A-04 / A-11,走 `pm-rd-tester` workflow 1 輪 PASS,
+測試 521→554(+33),三道閘門主 session 親自重跑 + 18 項獨立重演(不用 workflow 的測試)全過。
+報告 `report20260911-1.md`、規格 `spec20260911-1.md`。**尚未 push。**
+
+**剩下八條半,全部在 demo 層**(A-10 / A-01 / A-02/03 / A-05 / A-06 / A-08 / A-12 + A-13 的另外半條)——
+`typecheck` 只掃 `src/`、demo 無自動化測試,**workflow 的 Tester 層驗不到**,
+故 09-11 那輪刻意不納入。要動這批得改用「build 後在本機 8765 測試台實際操作驗證」的 DoD。
 
 ## Done
 
@@ -45,17 +53,17 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 | # | 嚴重度 | 一句話 |
 |---|---|---|
 | A-10 | 🔴 | **閘門量錯對象**:`gate.ts` 定義是 ROI,`measureQuality` 量全幀。失焦條碼配銳利印刷背景,全幀 30247 → 對焦 OK、ROI 58 → 應 FAIL |
-| A-07 | 🔴 | `getWorkOrder` 裸 cast → ERP 回髒 `requiredGrade` 時 `pass=false` 卻 `margin=+3.60`,**汙染預警與趨勢** |
+| ✅ A-07 | 🔴 | `getWorkOrder` 裸 cast → ERP 回髒 `requiredGrade` 時 `pass=false` 卻 `margin=+3.60`,**汙染預警與趨勢** |
 | A-02/03 | 🟠 | `expectedDataMatch` 拿解碼結果跟自己比,恆 `true`。mobile 潛伏(未存)、`index.html` 今天就顯示「比對符合」 |
 | A-01 | 🟠 | 「本張閘門 全部 OK」含從未量過的項;**2D 的 `pxm` 從來不寫入**,解析度恆綠 |
 | A-12 | 🟠 | `doLogout` 不清 `scans` 與表頭三欄 → 共用手機跨使用者殘留,新使用者可整批匯出 |
 | A-06 | 🟡 | 結果頁可同時顯示 F 級與全 A 參數;`explainGrade` 修了「是哪一項」沒修「顯示什麼數字」 |
 | A-05 | 🟡 | 付費文案承諾六項,mobile 實作約一項半;「尺寸量測」在實機**結構性不可得** |
 | A-08 | 🟡 | QR/DM 允收門檻寫死在 `mobile.html:487` 的 fallback,不受 §6.1 治理、無守門測試 |
-| A-09 | 🟡 | token 端點回「200+格式錯」→ 佇列永遠 QUEUED(與註解宣稱的收斂目標相反) |
+| ✅ A-09 | 🟡 | token 端點回「200+格式錯」→ 佇列永遠 QUEUED(與註解宣稱的收斂目標相反) |
 | A-13 | 🟡 | 「忘記蓋章」無偵測,且**未蓋章的 sw.js 與 repo hash 一致** → 驗證慣用法對這支檔案方向相反 |
-| A-04 | 🔵 | `measurement.ts` 守衛用 `<=0`,NaN/Infinity 穿透,但註解宣稱擋住了 |
-| A-11 | 🔵 | `SCANLINE_SPREAD_HINT` 零測試覆蓋(它是 A-06 唯一的緩解機制) |
+| ✅ A-04 | 🔵 | `measurement.ts` 守衛用 `<=0`,NaN/Infinity 穿透,但註解宣稱擋住了 |
+| ✅ A-11 | 🔵 | `SCANLINE_SPREAD_HINT` 零測試覆蓋(它是 A-06 唯一的緩解機制) |
 
 ## Next Step
 
@@ -122,8 +130,10 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
    `shotGate` 改吃 ROI(`:837` 已有 `pmRoi`)+ 改三態呈現(量過且 OK / 量過且非 OK / **未量測**)。
    ⚠ **A-10 會改變閘門實際嚴格度**(全幀→ROI 等於變嚴),依 §6.1 修前修後紀錄不可互比 ——
    **這是真實成本,要排進計畫而非當收尾**。
-4. **A-07 `isWorkOrder` 守衛** —— `src/` 唯一需要動的一條,比照 `isOAuthTokenResponse`,附測試。
-5. **收尾**:A-04(三處守衛換 `Number.isFinite`)、A-09(錯誤型別可區分)、A-11(補測試)。
+4. ~~**A-07 `isWorkOrder` 守衛**~~ —— **✅ 09-11 完成**(`report20260911-1.md`)。
+5. ~~**收尾**:A-04 / A-09 / A-11~~ —— **✅ 09-11 一併完成**。A-04 實作端全檔確認後從三處補到五處;
+   `csv.ts:formatNumber` 非有限值改回空字串(原為字面 `NaN`)。
+   **下一輪候選**:`washboard()` 的 `periodMm` 仍原樣穿透 NaN(非計算分支,出口端已由 CSV 空字串接住)。
 6. **需要決策不只是修**:A-05(文案對齊實作,或反之)、A-08(QR/DM 門檻要不要進 `policies.ts`)。
 7. **A-13 剩一半** —— 驗法已寫進專案 `CLAUDE.md`(08-24),但那只是「有人記得去驗」。
    真正的解仍是 `report20260807-1.md` D1 建議的 `deploy.sh`,讓

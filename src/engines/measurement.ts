@@ -24,10 +24,12 @@ export const WASHBOARD_AMP_RATIO_FLOOR = 0.08;
 
 /**
  * 每毫米像素數(C6)。輸入:已解析的比例尺;輸出:px/mm。
- * 退化輸入防護:resolvedPx 或 nominalMm ≤0 時回 0(與 quietZoneX 同慣例),
- * 避免 Infinity/NaN 流入下游量測與 CSV。
+ * 退化輸入防護:resolvedPx 或 nominalMm 不是有限數(NaN / ±Infinity)或 ≤0 時回 0
+ * (與 quietZoneX 同慣例、與 gate.ts 一律先驗 Number.isFinite 的標準對齊),
+ * 確實擋下 Infinity/NaN 流入下游量測與 CSV。
  */
 export function pxPerMm(scale: ScaleReference): number {
+  if (!Number.isFinite(scale.resolvedPx) || !Number.isFinite(scale.nominalMm)) return 0;
   if (scale.resolvedPx <= 0 || scale.nominalMm <= 0) return 0;
   return scale.resolvedPx / scale.nominalMm;
 }
@@ -46,6 +48,8 @@ export function gsd(scale: ScaleReference): number {
  * `narrowestElementPx` is the measured width of the narrowest bar or space.
  */
 export function xDimMm(narrowestElementPx: number, scale: ScaleReference): number {
+  // 退化輸入防護:像素寬非有限數時回 0,不讓 NaN/Infinity 乘進輸出。
+  if (!Number.isFinite(narrowestElementPx)) return 0;
   return narrowestElementPx * gsd(scale);
 }
 
@@ -57,21 +61,30 @@ export function barWidthGainMm(
   measuredBarWidthMm: number,
   nominalBarWidthMm: number,
 ): number {
+  // 退化輸入防護:任一輸入非有限數時回 0(同 pxPerMm 慣例)。
+  if (!Number.isFinite(measuredBarWidthMm) || !Number.isFinite(nominalBarWidthMm)) {
+    return 0;
+  }
   return measuredBarWidthMm - nominalBarWidthMm;
 }
 
 /**
  * Quiet zone expressed in X units: the side quiet-zone pixel width divided by
  * the X-dimension pixel width. Compared against AcceptancePolicy.quietZoneMinX
- * (ITF-14 ≈10). Guards against a zero/negative X width.
+ * (ITF-14 ≈10). 退化輸入防護:任一輸入非有限數(NaN / ±Infinity)或 X 寬 ≤0 時回 0。
  */
 export function quietZoneX(quietZonePixels: number, xDimPixels: number): number {
+  if (!Number.isFinite(quietZonePixels) || !Number.isFinite(xDimPixels)) return 0;
   if (xDimPixels <= 0) return 0;
   return quietZonePixels / xDimPixels;
 }
 
-/** 2D module edge length in mm: measured module pixel width scaled by GSD. */
+/**
+ * 2D module edge length in mm: measured module pixel width scaled by GSD.
+ * 退化輸入防護:modulePixels 非有限數時回 0(同 xDimMm)。
+ */
 export function moduleSizeMm(modulePixels: number, scale: ScaleReference): number {
+  if (!Number.isFinite(modulePixels)) return 0;
   return modulePixels * gsd(scale);
 }
 
