@@ -235,6 +235,19 @@
         <button class="shutter locked" id="shutter" disabled>● 校準中…</button>
         <p class="muted" id="gateNote"></p>
       </div>
+      <!-- 預期 GTIN:比對的**唯一**對照來源(稽核 A-03)。
+           為何放在拍攝頁而不是「輸出資訊（列印 / 匯出前填寫）」那張表單:
+           預期值是**按下檢驗的那一刻**就要拿去比的基準,補填救不回已經算完的判定;
+           客戶 / 品名 / 工單號則是輸出報告前才寫進表頭,補填不影響判定 —— 兩者不同類。
+           本欄位對所有 tier 一律可見可填:`src/domain/flags.ts` 沒有對應「預期值比對」的
+           旗標,不得自行發明;閘門只在既有的 CSV / ERP / 報告輸出處。 -->
+      <div class="card">
+        <h2>預期 GTIN（選填）</h2>
+        <div class="exportForm">
+          <div><label for="f-expected-gtin">預期 GTIN</label><input type="text" id="f-expected-gtin" placeholder="選填，例：14712345678907" /></div>
+        </div>
+        <p class="muted">留空 = 不做比對，結果顯示「未比對」。長度、校驗碼與 GTIN-14 正規化一律交給核心判斷，本欄不驗格式、不補零。</p>
+      </div>
       <div class="card demoOnly">
         <h2>情境（點選套用）</h2>
         <div class="scenarios" id="scenarios"></div>
@@ -389,7 +402,10 @@ const state = {
   symbology: "ITF14",
   profileId: SEED_SUBSTRATE_PROFILES[0].id,
   processStage: "OUTBOUND",
-  decoded: SAMPLE_DATA.ITF14, expected: SAMPLE_DATA.ITF14, canDecode: true,
+  // 只留 decoded(情境模擬要「掃到」的內容)。原本還有一個 expected,而它唯一的來源
+  // 就是 decoded —— 拿自己比自己,比對結果結構上恆為 true(稽核 A-03)。預期值改由
+  // 使用者在 #f-expected-gtin 填,每次檢驗現讀,不快取進 state(快取就會漏掉「清空後重拍」)。
+  decoded: SAMPLE_DATA.ITF14, canDecode: true,
   gate: { varLap:200, glare:0.5, wash:0.06, wb:3, picket:4, tilt:3, pxm:9, scaleRef:true },
   grade:{ rLight:0.82, rDark:0.18, edge:0.6, dec:0.3, def:0.2, bwr:0.03, fpd:0.05, gnu:0.1, uecUsed:2, uecTotal:10 },
 };
@@ -399,7 +415,18 @@ const profileOf = (id) => SEED_SUBSTRATE_PROFILES.find(p => p.id === id);
 const policyOf = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology)
   || { id:state.symbology.toLowerCase()+"-default", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
 
-function syncSymbol() { state.decoded = SAMPLE_DATA[state.symbology]; state.expected = state.decoded; renderHud(); }
+// 切換符號別:只同步情境要「掃到」的內容,**不得**碰 #f-expected-gtin ——
+// 那是使用者輸入的資料,不屬情境資料,被情境改寫就等於又把預期值接回解碼結果。
+function syncSymbol() { state.decoded = SAMPLE_DATA[state.symbology]; renderHud(); }
+
+// 讀「預期 GTIN」欄:輸入無;輸出去頭尾空白後的字串,沒填或只有空白時輸出空字串。
+const expectedGtinInput = () => $("f-expected-gtin").value.trim();
+
+// 比對標示:輸入 runDecode 回傳的 expectedDataMatch(true / false / undefined),
+// 輸出畫面文字。undefined = 使用者沒填預期 GTIN → 誠實顯示「未比對」,
+// 不可落回「符合」或「不符」—— 稽核 A-03 的根因就是硬造出一個恆真的比對結果。
+const MATCH_UNSET_TEXT = "未比對";
+const matchLabel = (m) => (m === undefined ? MATCH_UNSET_TEXT : m ? "比對符合" : "比對不符");
 
 // HUD symbol mock: 1D barcode or 2D matrix
 function renderHud() {
@@ -515,7 +542,11 @@ function runInspection() {
   const sym = state.symbology, profile = profileOf(state.profileId), policy = policyOf();
   const dim = sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined;
   const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null };
-  const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
+  // 未填時**不可**傳 expectedGtin: "" —— engines/decode.ts 判的是 `opts.expectedGtin !== undefined`,
+  // 空字串會被當成「有預期值」而算出 expectedDataMatch = false(把「沒比」誤報成「不符」)。
+  // 沒填就整個鍵都不要出現,讓 expectedDataMatch 維持 undefined,這是核心明文支援的誠實出口。
+  const exp = expectedGtinInput();
+  const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, exp ? { expectedGtin: exp } : {});
   const g = state.grade;
   const measurement = buildMeasurement({
     scaleRef:{ type:"CARD", nominalMm:26, resolvedPx:260 }, narrowestElementPx:11, quietZonePixels:110,
@@ -550,7 +581,7 @@ function renderResult() {
   $("noResult").style.display="none"; $("resultBody").style.display="block";
   const { decode, grade, measurement, diagnosis, acceptance, policy, session } = lastResult;
   $("decodeStatus").innerHTML = decode.decoded
-    ? `<span style="color:var(--ok)">✓ 成功</span> · ${session.symbology}${decode.dimension?" · "+esc(decode.dimension):""} · ${esc(decode.data)} · 比對${decode.expectedDataMatch?"符合":"不符"}`
+    ? `<span style="color:var(--ok)">✓ 成功</span> · ${session.symbology}${decode.dimension?" · "+esc(decode.dimension):""} · ${esc(decode.data)} · ${matchLabel(decode.expectedDataMatch)}`
     : `<span style="color:var(--fail)">✗ 不可讀</span>`;
   $("gradeLetter").textContent = grade.overall;
   $("circle").style.borderColor = GC[grade.overall]; $("gradeLetter").style.color = GC[grade.overall];
@@ -579,7 +610,7 @@ function renderResult() {
   const rl = [
     `製程環節：${stageLabelR}`,
     `符號別：${symLabelR}`,
-    `解碼：${decode.decoded ? "成功 · "+decode.data+"（比對"+(decode.expectedDataMatch?"符合":"不符")+"）" : "不可讀"}`,
+    `解碼：${decode.decoded ? "成功 · "+decode.data+"（"+matchLabel(decode.expectedDataMatch)+"）" : "不可讀"}`,
     `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
     `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policy.requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
     `分級參數：${grade.parameters.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
@@ -864,8 +895,9 @@ function doLogin() {
 function doLogout() {
   clearSessionStore(); currentTier = null;
   clearList(); // 掃描清單(含縮圖與解碼字串)——A-12 的主體
-  // 表頭三欄會被寫進 PDF / Excel 報告與 CSV,屬同一批殘留資料
-  ["f-customer", "f-product", "f-workorder"].forEach((id) => { $(id).value = ""; });
+  // 表頭三欄會被寫進 PDF / Excel 報告與 CSV,屬同一批殘留資料;
+  // 預期 GTIN 同樣是使用者輸入,留著會讓下一個人拿上一個人的工單基準做比對(誤判且不自知)。
+  ["f-customer", "f-product", "f-workorder", "f-expected-gtin"].forEach((id) => { $(id).value = ""; });
   $("resultText").value = ""; // 判定後可複製文字框:整段可直接被下一個人複製帶走
   $("loginUser").value = ""; $("loginPass").value = ""; $("loginErr").textContent = "";
   document.querySelector('[data-page=capture]').click(); // 回到預設頁,再由登入層蓋住

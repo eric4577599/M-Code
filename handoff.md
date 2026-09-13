@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-09-11T20:30+0800
+> 最後更新:2026-09-14T00:15+0800
 
 ## Current Task
 
@@ -30,7 +30,10 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 - **demo 層第一條**(A-12 登出不清資料):兩檔同步,瀏覽器實際操作驗證 + 對照組 + 回歸。
   報告 `report20260911-2.md`。
 
-**剩下七條半,全部在 demo 層**(A-10 / A-01 / A-02/03 / A-05 / A-06 / A-08 + A-13 的另外半條)——
+**09-14 修掉 demo 層第二條**(A-02/03):加預期 GTIN 輸入欄,比對三態。
+測試 554→584(+30),含突變驗證過的守門測試。報告 `report20260914-1.md`、規格 `spec20260914-1.md`。
+
+**剩下六條半,全部在 demo 層**(A-10 / A-01 / A-05 / A-06 / A-08 + A-13 的另外半條)——
 `typecheck` 只掃 `src/`、demo 無自動化測試,**workflow 的 Tester 層驗不到**,
 故 src/ 那輪刻意不納入。這批的 DoD 是瀏覽器實際操作驗證,**且驗之前必須先清 SW 與 caches**
 (見 B 線第 1 項的兩個 ⚠)。
@@ -60,7 +63,7 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
 |---|---|---|
 | A-10 | 🔴 | **閘門量錯對象**:`gate.ts` 定義是 ROI,`measureQuality` 量全幀。失焦條碼配銳利印刷背景,全幀 30247 → 對焦 OK、ROI 58 → 應 FAIL |
 | ✅ A-07 | 🔴 | `getWorkOrder` 裸 cast → ERP 回髒 `requiredGrade` 時 `pass=false` 卻 `margin=+3.60`,**汙染預警與趨勢** |
-| A-02/03 | 🟠 | `expectedDataMatch` 拿解碼結果跟自己比,恆 `true`。mobile 潛伏(未存)、`index.html` 今天就顯示「比對符合」 |
+| ✅ A-02/03 | 🟠 | `expectedDataMatch` 拿解碼結果跟自己比,恆 `true`。mobile 潛伏(未存)、`index.html` 今天就顯示「比對符合」 |
 | A-01 | 🟠 | 「本張閘門 全部 OK」含從未量過的項;**2D 的 `pxm` 從來不寫入**,解析度恆綠 |
 | ✅ A-12 | 🟠 | `doLogout` 不清 `scans` 與表頭三欄 → 共用手機跨使用者殘留,新使用者可整批匯出 |
 | A-06 | 🟡 | 結果頁可同時顯示 F 級與全 A 參數;`explainGrade` 修了「是哪一項」沒修「顯示什麼數字」 |
@@ -135,8 +138,12 @@ erp+csv+data / imgproc / mobile 狀態機 / PWA+部署鏈)全部打完。
    repo 的 `sw.js` 未蓋章,快取名恆定為 `mcode-shell-__STAMP__`。細節見報告。
    ⚠ **8765 測試台的 docroot 就是 `~/m-code-site`(線上同一份)**,照字面在 8765 驗
    等於先發佈再驗證;09-11 改用臨時埠 8799 直接服務 repo,驗過才上線。
-2. **A-02 / A-03 比對誠實化** —— 誠實下限是「沒有預期值輸入就不傳 `expectedGtin`」
-   (核心明文支援 → 欄位 undefined → CSV 空字串)。或把功能做完:加預期 GTIN 輸入欄。
+2. ~~**A-02 / A-03 比對誠實化**~~ —— **✅ 09-14 完成**(`report20260914-1.md`)。
+   Eric 選「把功能做成真的」:兩檔加 `f-expected-gtin` 輸入欄,比對三態
+   (符合 / 不符 / 未比對)。守門測試 `tests/expected-gtin-sync.test.ts` 30 支,
+   **已用兩次突變證明它抓得到回歸**。
+   ⚠ `expectedMatch` 只進 `scans`,**尚未進 CSV / PDF / Excel** —— 接上時
+   `null`(未比對)必須輸出空字串,不得輸出 `false`。
 3. **A-01 + A-10 一起修** —— 兩條同源,都是「本張閘門」在說謊,且都在快門後路徑、資訊現成:
    `shotGate` 改吃 ROI(`:837` 已有 `pmRoi`)+ 改三態呈現(量過且 OK / 量過且非 OK / **未量測**)。
    ⚠ **A-10 會改變閘門實際嚴格度**(全幀→ROI 等於變嚴),依 §6.1 修前修後紀錄不可互比 ——

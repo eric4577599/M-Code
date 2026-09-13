@@ -310,6 +310,16 @@
     </div>
     <div class="profSel"><select id="profile"></select></div>
 
+    <!-- 預期 GTIN:比對的**唯一**對照來源(稽核 A-02)。
+         為何放在拍攝 view 而不是 #v-list 的表頭三欄旁:快門按下的那一刻就要拿它去比,
+         放清單頁的話使用者會掃完 20 箱才填,而那 20 次比對早已用「未填」算完並存進 scans ——
+         等於做出一個永遠顯示「未比對」的欄位。客戶 / 品名 / 工單號是「輸出報告前填寫」,
+         補填不影響已完成的判定,性質不同,不可同處。
+         本欄位對所有 tier 一律可見可填:flags.ts 沒有對應「預期值比對」的旗標,不得自行發明。 -->
+    <div class="profSel">
+      <div class="fld" style="margin-bottom:0"><label for="f-expected-gtin">預期 GTIN</label><input type="text" id="f-expected-gtin" placeholder="選填，例：14712345678907"></div>
+    </div>
+
     <div class="hud">
       <span class="stateTag" id="stateTag">SCANNING</span>
       <div class="frame" id="frame">
@@ -362,7 +372,10 @@
       <div class="margin" id="margin"></div>
       <div class="shotRead" id="shotRead" hidden></div>
       <div class="sampNote" id="sampNote" hidden></div>
-      <div class="decodedBox"><span class="lbl">辨識文字（解碼結果）</span><div class="val" id="decodedText">–</div></div>
+      <div class="decodedBox"><span class="lbl">辨識文字（解碼結果）</span><div class="val" id="decodedText">–</div>
+        <!-- 與「預期 GTIN」欄的比對結果三態:比對符合 / 比對不符 / 未比對(沒填預期值)。
+             解碼失敗時整行留空 —— 沒讀到東西就沒有「比對」這件事可談。 -->
+        <div class="val" id="matchText" style="margin-top:4px;color:#475569"></div></div>
       <div class="whyBox" id="whyBox" hidden></div>
       <div class="params" id="params"></div>
       <div class="resultTextWrap">
@@ -477,7 +490,10 @@ const SAMPLE_DATA = {
 
 const state = {
   symbology:"AUTO", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
-  decoded:SAMPLE_DATA.ITF14, expected:SAMPLE_DATA.ITF14, canDecode:true,
+  // 只留 decoded(情境模擬要「掃到」的內容)。原本還有一個 expected,而它唯一的來源
+  // 就是 decoded / zx.text —— 拿自己比自己,比對結果結構上恆為 true(稽核 A-02)。
+  // 預期值改由使用者在 #f-expected-gtin 填,每次檢驗現讀,不快取進 state。
+  decoded:SAMPLE_DATA.ITF14, canDecode:true,
   captureMode:"auto", // 取幀模式:auto = 先試 L1 照片解析度;instant = 直接用當下預覽幀
   // L2 移除後(§3.16)兩者在 iOS 上等價 —— L1 在 WebKit 不存在,兩條路都取預覽幀
   gate:{ varLap:210, glare:0.4, wash:0.06, wb:2, picket:3, tilt:2, pxm:9, scaleRef:true },
@@ -487,11 +503,27 @@ const profileOf = () => SEED_SUBSTRATE_PROFILES.find(p => p.id === state.profile
 const policyOf  = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology)
   || { id:state.symbology.toLowerCase()+"-default", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
 
+// 切換符號別:只同步情境要「掃到」的內容,**不得**碰 #f-expected-gtin ——
+// 那是使用者輸入的資料,不屬情境資料,被情境改寫就等於又把預期值接回解碼結果。
 function onSymChange() {
   state.decoded = SAMPLE_DATA[state.symbology] ?? ""; // AUTO 無對應樣本字串,退回空字串
-  state.expected = state.decoded;
   renderHud();
 }
+
+// 讀「預期 GTIN」欄:輸入無;輸出去頭尾空白後的字串,沒填或只有空白時輸出空字串。
+const expectedGtinInput = () => $("f-expected-gtin").value.trim();
+
+// 比對標示:輸入 runDecode 回傳的 expectedDataMatch(true / false / undefined),
+// 輸出畫面文字。undefined = 使用者沒填預期 GTIN → 誠實顯示「未比對」,
+// 不可落回「符合」或「不符」—— 稽核 A-02 的根因就是硬造出一個恆真的比對結果。
+const MATCH_UNSET_TEXT = "未比對";
+const matchLabel = (m) => (m === undefined ? MATCH_UNSET_TEXT : m ? "比對符合" : "比對不符");
+
+// 這一次檢驗當下使用者填的預期 GTIN(沒填 = 空字串)。
+// 為何要另存而不在 saveScan 裡重讀輸入框:saveScan 在 present* 之後才跑,
+// 那時讀到的是「存檔那一刻」的值,使用者中途改了欄位就會與 decode.expectedDataMatch
+// 這個已經算完的結論對不起來 —— 存進清單的兩欄必須出自同一個瞬間。
+let lastExpectedGtin = "";
 
 // segmented controls
 function seg(el, items, key, after) {
@@ -923,7 +955,12 @@ function inspectReal(photo) {
     applyTilt(null);
   }
   const decoder = { decode: () => (zx ? { symbology: sym, data: zx.text } : null) };
-  const decode = runDecode(decoder, { declaredSymbology: sym, handle: {} }, { expectedGtin: zx ? zx.text : state.expected });
+  // 未填時**不可**傳 expectedGtin: "" —— engines/decode.ts 判的是 `opts.expectedGtin !== undefined`,
+  // 空字串會被當成「有預期值」而算出 expectedDataMatch = false(把「沒比」誤報成「不符」)。
+  // 沒填就整個鍵都不要出現,讓 expectedDataMatch 維持 undefined,這是核心明文支援的誠實出口。
+  const exp = expectedGtinInput();
+  lastExpectedGtin = exp;
+  const decode = runDecode(decoder, { declaredSymbology: sym, handle: {} }, exp ? { expectedGtin: exp } : {});
   // ── 快門後閘門讀數(稽核裁示 D5③ · IMG-01)──────────────────────────────
   // 八項閘門過去從未對「實際被分級的那張影像」跑過一次:inspectReal 把真實的
   // picket / tilt / px-per-module 寫進 state.gate 之後,inspect() 的 finally 立刻用
@@ -1002,10 +1039,14 @@ function inspectReal(photo) {
 // 模擬檢驗(無相機):沿用示範情境設定的 gate/grade 模擬值
 function inspectSim() {
   const sym = resolveSym(state.symbology), g = state.grade; // 無相機 + AUTO 時收斂成具體類型
-  if (state.symbology !== sym) { state.symbology = sym; state.decoded = state.decoded || SAMPLE_DATA[sym]; state.expected = state.decoded; render(); }
+  if (state.symbology !== sym) { state.symbology = sym; state.decoded = state.decoded || SAMPLE_DATA[sym]; render(); }
   const dim = sym==="QR" ? "v3 (29×29)" : sym==="DATAMATRIX" ? "16×16" : undefined;
   const decoder = { decode:() => state.canDecode ? { symbology:sym, data:state.decoded, dimension:dim } : null };
-  const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, { expectedGtin:state.expected });
+  // 示範模式與真實解碼走**同一條**取值與傳參規則:不得另立「模擬時直接給 true」的分支,
+  // 否則示範畫面又會教出「比對永遠符合」這個錯誤心智模型。
+  const exp = expectedGtinInput();
+  lastExpectedGtin = exp;
+  const decode = runDecode(decoder, { declaredSymbology:sym, handle:{} }, exp ? { expectedGtin: exp } : {});
   const photometric = { rLight:g.rLight, rDark:g.rDark, rDarkMin:g.rDark, edgeContrasts:[g.edge] };
   // 1D: N scanlines averaged. 2D: single param set, min-takes-overall (per core lib C7.3).
   const grade = is2D(sym)
@@ -1142,6 +1183,8 @@ function presentUnmeasurable(decode, meas, img, geom) {
     ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${esc(decode.data)}`
     : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
   $("decodedText").textContent = decode.decoded ? decode.data : "（不可讀，無辨識文字）";
+  // 比對三態如實顯示;解碼失敗時不附加任何比對文字(沒讀到就沒有比對可談)。
+  $("matchText").textContent = decode.decoded ? matchLabel(decode.expectedDataMatch) : "";
   // 示範模式下同樣可能不可量測(例如「不可讀」情境)—— 兩個標記並存,不互相取代
   $("simTag").hidden = !meas.simulated;
   if (meas.simulated) $("simTag").textContent = "⚠ " + SIMULATED_LABEL;
@@ -1165,7 +1208,7 @@ function presentUnmeasurable(decode, meas, img, geom) {
   $("resultText").value = [
     `製程環節：${stageLabelOf(state.processStage)}`,
     `符號別：${symLabelR}`,
-    `解碼：${decode.decoded ? "成功 · " + decode.data : "不可讀（綜合崩壞）"}`,
+    `解碼：${decode.decoded ? "成功 · " + decode.data + "（" + matchLabel(decode.expectedDataMatch) + "）" : "不可讀（綜合崩壞）"}`,
     `判定：${meas.label}`,
     ...(meas.hint ? [`建議：${meas.hint}`] : []),
     ...(lastShotInfo && lastShotInfo.staleShot ? [`取幀告警：${lastShotInfo.staleShot}`] : []),
@@ -1200,6 +1243,8 @@ function presentResult(decode, grade, acceptance, img, geom, meas, why) {
     ? `<span style="color:var(--ok)">✓ 解碼成功</span> · ${esc(decode.data)}${decode.dimension?" · "+esc(decode.dimension):""}`
     : `<span style="color:var(--fail)">✗ 不可讀（綜合崩壞）</span>`;
   $("decodedText").textContent = decode.decoded ? decode.data : "（不可讀，無辨識文字）";
+  // 比對三態如實顯示;解碼失敗時不附加任何比對文字(沒讀到就沒有比對可談)。
+  $("matchText").textContent = decode.decoded ? matchLabel(decode.expectedDataMatch) : "";
   $("letter").textContent = grade.overall;
   $("circle").style.borderColor = GC[grade.overall]; $("letter").style.color = GC[grade.overall];
   const v = $("verdict");
@@ -1224,7 +1269,7 @@ function presentResult(decode, grade, acceptance, img, geom, meas, why) {
     ...(simulated ? [`※ ${SIMULATED_LABEL}`] : []),
     // 取幀告警排在等級之前:這一行成立時,下面那個字母量的是延遲期間糊掉的影像
     ...(lastShotInfo && lastShotInfo.staleShot ? [`※ 取幀告警：${lastShotInfo.staleShot}`] : []),
-    `解碼：${decode.decoded ? "成功 · "+decode.data : "不可讀（綜合崩壞）"}`,
+    `解碼：${decode.decoded ? "成功 · "+decode.data+"（"+matchLabel(decode.expectedDataMatch)+"）" : "不可讀（綜合崩壞）"}`,
     `參考等級：${grade.overall}（相對值，非 ISO 合規證書）`,
     ...(geom ? [`幾何量測：${geom.rectify}；透視傾角 ${geom.tilt.deg === null ? "—" : geom.tilt.deg.toFixed(1) + "°"}（${TILT_SOURCE_LABEL[geom.tilt.source]}）`] : []),
     `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policyOf().requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
@@ -1903,6 +1948,13 @@ function saveScan(decode, grade, acceptance, img, flags, why) {
     n: scans.length+1, ts: new Date(), symbology: state.symbology,
     symLabel: (SYMS.find(([v])=>v===state.symbology)||[,state.symbology])[1],
     data: decode.decoded ? decode.data : "(不可讀)", decoded: decode.decoded,
+    // 預期值比對:**存結論不存重算所需的原料**(沿用下方 why 註解所立的原則)。
+    // expectedMatch 為 null = 使用者沒填預期值 = 未比對,與「不符」是兩件事;
+    // 未來接 CSV 的 expected_match 欄時,null 必須輸出空字串,不得輸出 false。
+    // lastExpectedGtin 本身就保證是字串(沒填時為 ""),故不寫 `|| ""` 這種空值回退 ——
+    // 「expectedGtin 後面接空值回退」正是本輪要根除的樣式,連長得像都不留。
+    expectedGtin: lastExpectedGtin,
+    expectedMatch: decode.expectedDataMatch ?? null,
     grade: grade ? grade.overall : null, pass: acceptance ? acceptance.pass : null,
     reqGrade: policyOf().requiredGrade,
     margin: acceptance ? acceptance.marginScore : null, img: img || captureImage(),
@@ -2170,6 +2222,7 @@ function clearResultView() {
     const el = $(id); if (el) el.textContent = "";
   });
   $("decodedText").textContent = "–";
+  $("matchText").textContent = ""; // 比對結論同屬上一個人的資料
   $("letter").textContent = "–";
   $("resultText").value = "";
   $("shotImg").removeAttribute("src"); // 實拍影像:移除 src 而非設空字串,避免瀏覽器對空 src 再發一次請求
@@ -2187,8 +2240,10 @@ function doLogout() {
   clearSessionStore(); currentTier = null;
   stopCamera(); // 釋放相機並停即時量測,避免登出後鏡頭仍開、背景每 500ms 續算
   clearList(); // 掃描清單(含縮圖與解碼字串)——A-12 的主體
-  // 表頭三欄會被寫進 PDF / Excel 報告與 CSV,屬同一批殘留資料
-  ["f-customer", "f-product", "f-workorder"].forEach((id) => { $(id).value = ""; });
+  // 表頭三欄會被寫進 PDF / Excel 報告與 CSV,屬同一批殘留資料;
+  // 預期 GTIN 同樣是使用者輸入,留著會讓下一個人拿上一個人的工單基準做比對(誤判且不自知)。
+  ["f-customer", "f-product", "f-workorder", "f-expected-gtin"].forEach((id) => { $(id).value = ""; });
+  lastExpectedGtin = ""; // 連同快照一起清,避免下一筆掃描沿用上一個人的預期值
   lastShotInfo = null; // 上一個人最後一次快門的取幀資訊(請求值 / 實拿值 / 告警)
   clearResultView();
   $("lastResultBtn").disabled = true; // 沒有結果可看了,關掉入口
