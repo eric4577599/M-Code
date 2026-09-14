@@ -2291,3 +2291,51 @@ export function barBandExtent(gray, w, h, y, x0, x1) {
   if (rows < BAR_BAND.minRows) return null;
   return { y0, y1, rows, refTransitions: ref };
 }
+
+// ── 本張閘門的三態敘述(稽核 A-01,規格 spec20260914-a10a01-v1 §2.2)────────
+// 由來:舊寫法只列非 OK 項,全綠就寫死「全部 OK」,於是「真的量過且通過」與
+//   「因為承接放行假值而恆綠」在報告上完全無法區分。最強的一支是解析度 ——
+//   state.gate.pxm 的唯一寫入點在 1D 的 if (g1.modulePx) 內,2D 從不寫入,讀到的
+//   永遠是 resetPreviewGeometry() 的硬寫值 9 ⇒ 9 >= 8 ⇒ 解析度每一張都 OK。
+//   同一份 PDF 上一行誠實地不印 px/module,下一行卻隱含斷言解析度通過。
+//   「未量測」必須是**第三態**,在字面上讀得出來,不得被計入 OK 也不得講成非 OK。
+/**
+ * 把一組閘門檢查結果整理成單行的三態敘述(純函式)。輸入:
+ *   - checks:gate.report.checks 形狀的陣列,元素為 { key, status },
+ *             status ∈ {"OK","WARN","FAIL"}。
+ *   - measured:{ [key]: boolean },某項在這張照片上是否真的量過。
+ *             **鍵不存在視為已量測** —— 日後 gate.ts 新增檢查項時會落入 OK / 非 OK
+ *             兩態,而不是被靜默算成「未量測」而從報告上消失。
+ *   - labels:{ [key]: string } 檢查項的中文標籤(呼叫端傳 CHECK_LABEL;
+ *             純函式不自帶 UI 字典,才測得起來也才不會兩地各寫一份而漂移)。
+ * 輸出:單行字串,供結果頁與 PDF 直接顯示,例如
+ *   「未過 對焦 FAIL、眩光 WARN · 未量測 解析度、透視 · 已量測通過 3 項」。
+ * 邏輯:排除 scaleRef(沿用現況,比例尺卡不納入本張閘門敘述)→ 依
+ *   未量測 / 非 OK / OK 分三組 → 以「非 OK、未量測、OK」的順序輸出,
+ *   組間以 · 串接、組內以 、串接。全數已量測且 OK 時輸出「已量測通過 N 項」,
+ *   **永不輸出「全部 OK」字樣**;全部未量測時只輸出未量測那一段,不得回傳空字串。
+ */
+export function summarizeShotGate(input) {
+  const o = input || {};
+  const list = Array.isArray(o.checks) ? o.checks : [];
+  const measured = o.measured || {};
+  const labels = o.labels || {};
+  const nameOf = (key) => labels[key] || key;
+
+  const bad = [], unmeasured = [];
+  let okCount = 0;
+  for (const c of list) {
+    if (!c || c.key === "scaleRef") continue;          // scaleRef 沿用現況:不納入敘述
+    if (measured[c.key] === false) { unmeasured.push(nameOf(c.key)); continue; }
+    if (c.status !== "OK") bad.push(`${nameOf(c.key)} ${c.status}`);
+    else okCount++;
+  }
+
+  const parts = [];
+  if (bad.length) parts.push("未過 " + bad.join("、"));
+  if (unmeasured.length) parts.push("未量測 " + unmeasured.join("、"));
+  // okCount 為 0 時不輸出「已量測通過 0 項」—— 那一句只會讓人以為量過卻全掛
+  if (okCount > 0) parts.push(`已量測通過 ${okCount} 項`);
+  // 理論上不會走到(checks 為空):寧可輸出保守字樣,也不要回傳空字串讓報告該欄憑空消失
+  return parts.length ? parts.join(" · ") : "未量測";
+}

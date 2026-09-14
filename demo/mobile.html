@@ -454,6 +454,7 @@ import {
   explainGrade,
   chooseCaptureFrame, FRAME_CHOICE,
   barBandExtent,
+  summarizeShotGate,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -724,6 +725,22 @@ function roiGrayOf(photo, roi) {
   return { gray: toGray(img.data, fit.w, fit.h), w: fit.w, h: fit.h, scale: fit.scale, ...axes };
 }
 
+// ROI 裁切影像(稽核 A-10,規格 spec20260914-a10a01-v1 §2.1)。
+// 輸入:photo(快門照 canvas)、roi(全解析度座標的 {x0,y0,x1,y1},即 roiFull);
+// 輸出:一張只含該 ROI 區域的 canvas,寬高為 ROI 的實際寬高(夾回畫布範圍、保底 1×1)。
+// 邏輯:座標夾回沿用既有純函式 scaleRoi(k=1),本函式只留 canvas I/O ——
+//   drawImage 原尺寸搬運,**不在這裡做任何縮放**:measureQuality 內部自己會縮到 320 寬,
+//   先縮一次等於多一道重採樣、改變取樣鏈,量出來的 varLap 就不再適用同一組凍結門檻。
+// 為什麼要有具名函式:demo 層沒有執行期測試,守門測試只能讀原始碼;有具名函式才能把
+//   「本張閘門吃的是 ROI」釘成可斷言的結構,而不是一串認不出來的 inline 參數。
+function roiCanvasOf(photo, roi) {
+  const r = scaleRoi(roi, 1, photo.width, photo.height);
+  const rw = r.x1 - r.x0, rh = r.y1 - r.y0;
+  const c = document.createElement("canvas"); c.width = rw; c.height = rh;
+  c.getContext("2d").drawImage(photo, r.x0, r.y0, rw, rh, 0, 0, rw, rh);
+  return c;
+}
+
 // 階段 ④ 接線(規格 §3.3):把 ZXing 的「降取樣版」定位點換算到 ROI 灰階座標系,
 // 再走 rectifyQuad 的完整管線。輸入:zx 解碼結果、kx/ky 降取樣→全解析度倍率、
 //   rg roiGrayOf 的輸出;輸出:rectifyQuad 的結果物件(退回時 ok=false 並帶原因)。
@@ -795,7 +812,13 @@ function inspectReal(photo) {
   // 延遲多久都不影響結論正確性 —— 判的就是被分級的那張。
   // 來源取 small 不取 photo:measureQuality 反正要縮到 320,從 4032 直縮多做一次大圖
   // 重採樣沒有意義;small 已是 ≤DECODE_MAX_W 的等比縮圖,兩者縮到 320 的結果實務上等價。
-  const shotQ = measureQuality(small, small.width, small.height);
+  //
+  // 2026-09-14(稽核 A-10)起這個全幀讀數**只供取幀新鮮度**使用,更名為 shotQFull:
+  //   新鮮度問的是「預覽到快門之間有沒有劣化」—— 相對比較,兩邊必須同尺度(都是全幀),
+  //   而 2026-08-06 已實證 varLap 比值在靜止圖上就會擺動 1%–137%,基底一換就會開始誤報。
+  //   本張閘門問的是另一個問題:「這張照片的條碼區域拍得好不好」—— 絕對判定,必須量 ROI。
+  //   同一支 measureQuality,不同取樣對象,兩者不可共用一個讀數(見下方 shotQRoi)。
+  const shotQFull = measureQuality(small, small.width, small.height);
   let _smallGray;
   const smallGray = () => (_smallGray !== undefined ? _smallGray : (_smallGray = grayOfCanvas(small)));
   // 降取樣版 → 全解析度的座標放大倍率。x/y 分開推導:small 的高度經過 Math.round,
@@ -837,6 +860,18 @@ function inspectReal(photo) {
   const roiFull = scaleRoi(
     { x0: roiSmall.x0 * kx, y0: roiSmall.y0 * ky, x1: roiSmall.x1 * kx, y1: roiSmall.y1 * ky },
     1, photo.width, photo.height);
+  // **本張閘門專用的光度讀數**(稽核 A-10)。src/engines/gate.ts:30 的定義白紙黑字是
+  //   「Laplacian variance over the ROI」,而舊寫法量的是整張降取樣照片 —— 分母是整個畫面,
+  //   使用者站遠一點就能任意稀釋:條碼佔 9% 畫面時,失焦條碼配銳利印刷背景全幀量到 30247
+  //   (對焦 OK),ROI 只有 58(對焦 FAIL);條碼整片被眩光打白,ROI 眩光 100% 卻因全幀
+  //   佔比 1%–4% 被判 OK/WARN。這不是門檻調校問題,是量錯對象,故**一個門檻都沒動**,
+  //   只把同一支 measureQuality 改餵 ROI 裁切影像。
+  // 取 roiFull(未矯正)而非矯正後的正射影像:與 pmRoi 的光度基底一致 ——
+  //   光度基底的分流理由(稽核裁示 D3 · QUAD-04 / IMG-07)不因本輪而改變。
+  // 成本:每次快門多跑一次 measureQuality(320 寬縮圖 + 一次 Laplacian),
+  //   相對於同一路徑上的解碼與 4M 像素 ROI 量測可忽略。
+  const shotQRoi = measureQuality(roiCanvasOf(photo, roiFull),
+    roiFull.x1 - roiFull.x0, roiFull.y1 - roiFull.y0);
   const rg = roiGrayOf(photo, roiFull);
   // 取樣密度標籤(規格 §6.1):ROI 面積超過 MAX_ROI_PIXELS 時量測其實是量在縮過的
   // 影像上(例如解碼失敗走中央 70% ROI,4032×3024 的 70% 約 5.97M > 4M),
@@ -890,6 +925,10 @@ function inspectReal(photo) {
   const photometric = { rLight: pm.rLight, rDark: pm.rDark, rDarkMin: pm.rDarkMin, edgeContrasts: pm.edgeContrasts };
   let grade;
   let scanlineCount = null; // 1D 實際取得的可用掃描線數(2D 維持 null,可量測性判定不看它)
+  // 本張是否真的量到 px/module(稽核 A-01)。唯一設真處在下方 1D 的 if (g1.modulePx) 內,
+  // 故 2D 恆 false ⇒ 解析度在本張閘門呈現為「未量測」,不再因 state.gate.pxm 仍是
+  // resetPreviewGeometry 的放行假值 9(9 >= 8)而被算成 OK。
+  let pxmMeasured = false;
   const scanlineScores = [], scanlineLimiters = []; // 逐條總分與限制項代號(1D 才填,供等級成因用)
   if (is2D(sym)) {
     // 2D:GNU 由 finder 幾何、FPD 由暗模組反射發散 proxy;UEC 無 RS 解碼資訊,誠實省略
@@ -943,6 +982,7 @@ function inspectReal(photo) {
     // 寫進 lastShotInfo → 跟著 shot 進 scans 與 PDF 明細,規格 §5.2 的實機驗收才拿得到。
     if (g1.modulePx) {
       state.gate.pxm = g1.modulePx;
+      pxmMeasured = true;   // 走到這裡才是「這張照片真的量到 px/module」
       // 次像素量測後 modulePx 是浮點數(正是失效 B 的修正點)—— 報告顯示取兩位小數,
       // 但**寫進閘門的是未截斷的原值**:截斷回整數等於把剛修好的東西再弄壞一次。
       if (lastShotInfo) lastShotInfo.pxPerModule = +g1.modulePx.toFixed(2);
@@ -974,8 +1014,10 @@ function inspectReal(photo) {
   // 2026-08-06 修正:光度四項(對焦 / 眩光 / 楞痕 / 白平衡)過去讀的是 state.gate,
   //   而那是**快門前 ≤500ms 的預覽殘值** —— 這一段的原意是「講得出這張照片的拍攝品質」,
   //   卻從未量過這張照片。快門延遲(L1 takePhoto 200–800ms、L2 重新協商最多 500ms)
-  //   期間的位移與重新對焦因此完全隱形。改吃 shotQ(量在被分析的影像上)。
+  //   期間的位移與重新對焦因此完全隱形。改吃快門照自己的讀數(量在被分析的影像上)。
   //   幾何三項(印向 / 透視 / 解析度)本來就已是這張照片的實測值,維持不動。
+  // 2026-09-14 修正(稽核 A-10):光度四項再往前一步 —— 本張閘門改量 ROI(shotQRoi),
+  //   取幀新鮮度仍留在全幀(shotQFull)。gateOn 被兩邊共用,故光度以外的輸入必然一致。
   // gateOn 讓兩組閘門只在光度四項上有差別,其餘輸入完全相同 —— 對照才乾淨。
   const gateOn = (q) => evaluateGate({
     symbolDetected: !!zx, varLap: q.varLap, glareRatio: q.glare / 100,
@@ -984,7 +1026,13 @@ function inspectReal(photo) {
     picketAngleDeg: state.gate.picket, perspectiveTiltDeg: state.gate.tilt,
     gsdMmPerPx: null, pxPerModule: state.gate.pxm,
     fluteType: (profileOf() || {}).fluteType });
-  const shotGate = gateOn(shotQ);
+  // 兩組快門後閘門(稽核 A-10 · 規格 §1.3 方案 b):輸入除了光度四項以外完全相同。
+  //   shotGateFull —— 量在全幀,**只給取幀新鮮度**當對照組(與預覽同尺度,2026-08-06
+  //     建立的判準因此行為一字不變,不引入任何新的失準來源)。
+  //   shotGateRoi  —— 量在 ROI,**只給「本張閘門」報告**。
+  // 兩者不可對調:拿 ROI 去比全幀就是「條碼區域 vs 整張畫面」在比,新鮮度會無差別誤報。
+  const shotGateFull = gateOn(shotQFull);
+  const shotGateRoi = gateOn(shotQRoi);
   const previewGate = gateOn(previewQ);
   const okOf = (g, key) => {
     const c = g.report.checks.find((x) => x.key === key);
@@ -994,16 +1042,28 @@ function inspectReal(photo) {
   // **不改分級、不動門檻**(沿裁示 D5 的先例):它只是把「預覽是好的、照片卻不是」
   // 這個組合講出來,讓使用者知道該重拍,而不是拿一張延遲期間糊掉的照片去讀等級。
   const fresh = assessShotFreshness({
-    previewFocusOk: okOf(previewGate, "focus"), shotFocusOk: okOf(shotGate, "focus"),
-    previewGlareOk: okOf(previewGate, "glare"), shotGlareOk: okOf(shotGate, "glare"),
-    previewVarLap: previewQ.varLap, shotVarLap: shotQ.varLap,
+    previewFocusOk: okOf(previewGate, "focus"), shotFocusOk: okOf(shotGateFull, "focus"),
+    previewGlareOk: okOf(previewGate, "glare"), shotGlareOk: okOf(shotGateFull, "glare"),
+    previewVarLap: previewQ.varLap, shotVarLap: shotQFull.varLap,
     latencyMs: lastShotInfo ? lastShotInfo.latencyMs : null });
   if (lastShotInfo) {
-    // 只留「非 OK」的項:全 OK 時報告不必多一行雜訊,有問題時才具名列出
-    const bad = shotGate.report.checks.filter((c) => c.status !== "OK" && c.key !== "scaleRef");
-    lastShotInfo.shotGate = bad.length
-      ? bad.map((c) => `${CHECK_LABEL[c.key] || c.key} ${c.status}`).join("、")
-      : "全部 OK";
+    // 三態敘述(稽核 A-01):量過且 OK / 量過且非 OK / **未量測**。
+    // 判準全用現成資訊,不新增任何量測:
+    //   resolution —— 本張是否真的量到 px/module(2D 恆 false;1D 掃描線全滅時亦 false)
+    //   perspective —— 四角/單應矩陣是否算得出傾角(多數 1D 不可得 → 未量測)
+    //   picket —— 是否解碼成功(state.gate.picket 唯二寫入點都在 if (zx) 內)
+    // 光度四項不列進 measured:本輪起它們恆為「已量測」(量在這張照片的 ROI 上),
+    // 而 summarizeShotGate 把未列的鍵視為已量測 —— 日後新增檢查項不會靜默變成未量測。
+    const measured = {
+      resolution: pxmMeasured,
+      perspective: tilt.source !== "none",
+      picket: !!zx,
+    };
+    lastShotInfo.shotGate = summarizeShotGate({
+      checks: shotGateRoi.report.checks, measured, labels: CHECK_LABEL });
+    // 版本標記(規格 §5):量測對象與敘述語意都變了,新舊紀錄的這一欄不可互比 ——
+    // 有這一欄的是新語意(量 ROI、三態),沒有的是舊語意(量全幀、含未量測項的「全部 OK」)。
+    lastShotInfo.shotGateBase = "ROI(裁切後)";
     if (fresh.note) lastShotInfo.shotTiming = fresh.note;
     if (fresh.stale) lastShotInfo.staleShot = fresh.label;
   }
@@ -2036,6 +2096,9 @@ function shotSummary(shot) {
   if (shot.elements) parts.push("元素數 " + esc(shot.elements));
   if (typeof shot.bwrModules === "number") parts.push("BWR " + esc(shot.bwrModules) + " 模組");
   if (shot.shotGate) parts.push("本張閘門 " + esc(shot.shotGate));
+  // 閘門量測基底(2026-09-14 · 規格 §5):沒有這一欄,新舊報告在紙上長得一樣卻不可互比 ——
+  // 舊的量全幀且把未量測項算進「全部 OK」,新的量 ROI 且把未量測獨立列出。
+  if (shot.shotGateBase) parts.push("閘門基底 " + esc(shot.shotGateBase));
   if (typeof shot.wb === "number") parts.push("白平衡Δ(預覽) " + esc(shot.wb) + "%");
   // 2026-08-06 新增:快門延遲與取幀新鮮度。前者是實測毫秒數(規格 §5.2 實機驗收要記,
   // 過去完全沒有量過);後者只在「預覽是好的、照片卻不是」時才出現,是那張照片不可

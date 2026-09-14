@@ -57,6 +57,7 @@ import {
   roi1DMetrology,
   GEOMETRY_APERTURE_X,
   assessShotFreshness,
+  summarizeShotGate,
   explainGrade,
   chooseCaptureFrame,
   barBandExtent,
@@ -2905,5 +2906,111 @@ describe("barBandExtent — 量出 1D 條帶的縱向範圍", () => {
       (y >= 48 && y < 52 ? (Math.floor(x / 4) % 2 === 0 ? 30 : 230) : 230));
     const r = barBandExtent(thin, W, H, 50, 10, W - 10);
     if (r) expect(r.rows).toBeGreaterThanOrEqual(BAR_BAND.minRows);
+  });
+});
+
+// ── 本張閘門三態敘述(稽核 A-01,規格 docs/spec20260914-a10a01-v1.md §2.2)──────
+// 守的是「未量測」不得被算成 OK、也不得被講成非 OK。最強的一支是解析度:
+// 2D 從不寫入 state.gate.pxm,讀到的永遠是放行假值 9 ⇒ 9 >= 8 ⇒ 舊寫法每一張都印 OK。
+describe("summarizeShotGate 本張閘門三態敘述", () => {
+  const LABELS = {
+    focus: "對焦", glare: "眩光", washboard: "楞痕透印", whiteBalance: "白平衡",
+    picket: "印向直立", perspective: "透視", resolution: "解析度", scaleRef: "比例尺卡",
+  };
+  const checks = (m: Record<string, string>) =>
+    Object.entries(m).map(([key, status]) => ({ key, status }));
+  const allOk = () => checks({
+    focus: "OK", glare: "OK", washboard: "OK", whiteBalance: "OK",
+    picket: "OK", perspective: "OK", resolution: "OK",
+  });
+
+  it("全數已量測且 OK → 只講「已量測通過 N 項」,不得出現「全部 OK」或「未量測」", () => {
+    const out = summarizeShotGate({ checks: allOk(), measured: {}, labels: LABELS });
+    expect(out).toBe("已量測通過 7 項");
+    expect(out).not.toContain("全部 OK");
+    expect(out).not.toContain("未量測");
+  });
+
+  it("scaleRef 不納入敘述(沿用現況),也不計入通過項數", () => {
+    const withRef = [...allOk(), { key: "scaleRef", status: "FAIL" }];
+    const out = summarizeShotGate({ checks: withRef, measured: {}, labels: LABELS });
+    expect(out).toBe("已量測通過 7 項");
+    expect(out).not.toContain("比例尺卡");
+  });
+
+  it("未量測項具名出現在「未量測」段,且不被計入通過項數", () => {
+    const out = summarizeShotGate({
+      checks: allOk(),
+      measured: { resolution: false, perspective: false },
+      labels: LABELS,
+    });
+    expect(out).toBe("未量測 透視、解析度 · 已量測通過 5 項");
+    // 未量測的兩項既不在 OK 計數內,也不得被講成非 OK
+    expect(out).not.toContain("未過");
+  });
+
+  it("非 OK 段具名列出項目與其 status,順序為 非 OK → 未量測 → OK", () => {
+    const out = summarizeShotGate({
+      checks: checks({
+        focus: "FAIL", glare: "WARN", washboard: "OK", whiteBalance: "OK",
+        picket: "OK", perspective: "OK", resolution: "OK",
+      }),
+      measured: { resolution: false },
+      labels: LABELS,
+    });
+    expect(out).toBe("未過 對焦 FAIL、眩光 WARN · 未量測 解析度 · 已量測通過 4 項");
+  });
+
+  it("2D 路徑:resolution 未量測時,不論 status 是否為 OK 都呈現為未量測", () => {
+    for (const status of ["OK", "WARN", "FAIL"]) {
+      const out = summarizeShotGate({
+        checks: checks({ focus: "OK", glare: "OK", resolution: status }),
+        measured: { resolution: false },
+        labels: LABELS,
+      });
+      expect(out).toContain("未量測");
+      expect(out).toContain("解析度");
+      expect(out).toBe("未量測 解析度 · 已量測通過 2 項");
+      // status 為 OK 時尤其要守:舊寫法會把它算進「全部 OK」
+      expect(out).not.toContain("全部 OK");
+    }
+  });
+
+  it("全部項目都未量測 → 只輸出未量測段,不得為空字串、不得出現「已量測通過 0 項」", () => {
+    const out = summarizeShotGate({
+      checks: checks({ picket: "OK", perspective: "OK", resolution: "OK" }),
+      measured: { picket: false, perspective: false, resolution: false },
+      labels: LABELS,
+    });
+    expect(out).toBe("未量測 印向直立、透視、解析度");
+    expect(out).not.toContain("已量測通過");
+  });
+
+  it("measured 未列的鍵視為已量測(E9:日後新增檢查項不會靜默變成未量測)", () => {
+    const out = summarizeShotGate({
+      checks: checks({ focus: "OK", brandNewCheck: "WARN" }),
+      measured: { resolution: false },
+      labels: LABELS,
+    });
+    // 沒有標籤就退回 key 本身,而且落入非 OK 態而不是憑空消失
+    expect(out).toBe("未過 brandNewCheck WARN · 已量測通過 1 項");
+  });
+
+  it("輸出永不含「全部 OK」字樣(AC-7 行為面)", () => {
+    const cases = [
+      { checks: allOk(), measured: {} },
+      { checks: allOk(), measured: { resolution: false } },
+      { checks: [], measured: {} },
+      { checks: checks({ focus: "FAIL" }), measured: {} },
+    ];
+    for (const c of cases) {
+      expect(summarizeShotGate({ ...c, labels: LABELS })).not.toContain("全部 OK");
+    }
+  });
+
+  it("輸入退化(checks 為空 / 參數缺漏)不丟例外,也不回傳空字串", () => {
+    expect(summarizeShotGate({ checks: [], measured: {}, labels: LABELS })).toBe("未量測");
+    expect(summarizeShotGate({})).toBe("未量測");
+    expect(summarizeShotGate()).toBe("未量測");
   });
 });
