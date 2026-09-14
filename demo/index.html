@@ -412,8 +412,18 @@ const state = {
 let lastResult = null;
 
 const profileOf = (id) => SEED_SUBSTRATE_PROFILES.find(p => p.id === id);
-const policyOf = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology)
-  || { id:state.symbology.toLowerCase()+"-default", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
+// 允收 policy 取用(稽核 A-08)。**門檻只能來自 src/data/policies.ts** ——
+// 它受規格 §6.1 的門檻凍結治理、有守門測試、改動看得到。
+// 這裡的 fallback 不是「預設門檻」,是**缺漏告警**:走到它就代表 policies.ts 少了一個
+// 符號別,而那個符號別的允收標準正靜悄悄地由這一行 HTML 決定。
+// (AUTO 例外 —— 那是「還沒掃到」的顯示狀態,掃描當下一定已由 resolveSym 收斂。)
+const policyOf = () => {
+  const p = SEED_ACCEPTANCE_POLICIES.find(x => x.symbology === state.symbology);
+  if (p) return p;
+  if (state.symbology !== "AUTO")
+    console.error(`找不到 ${state.symbology} 的允收 policy —— 請補進 src/data/policies.ts,不要在此處決定門檻`);
+  return { id:"ungoverned-fallback", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
+};
 
 // 切換符號別:只同步情境要「掃到」的內容,**不得**碰 #f-expected-gtin ——
 // 那是使用者輸入的資料,不屬情境資料,被情境改寫就等於又把預期值接回解碼結果。

@@ -384,7 +384,10 @@
         <label>判定後內容（可複製）</label>
         <textarea id="resultText" readonly rows="7"></textarea>
       </div>
-      <div class="upsell" id="upsellBox"><b>升級付費版可解鎖</b>完整參數報告 · 尺寸量測（X寬/BWR/Quiet Zone）· 印刷掉級診斷 · CSV 匯出 · ERP 回寫 · 趨勢監控</div>
+      <!-- 內容由 renderUpsell() 依 isEnabled 生成(稽核 A-05)——
+           文案寫死在這裡就會與實作漂開,而且直接牴觸專案 CLAUDE.md
+           「不要在 HTML 裡寫死 tier 判斷或文案」。 -->
+      <div class="upsell" id="upsellBox"></div>
       <button class="reBtn" id="reBtn">↻ 再拍一張</button>
     </div>
   </div>
@@ -503,8 +506,18 @@ const state = {
   grade:{ rLight:0.84, rDark:0.16, edge:0.62, dec:0.25, def:0.18, fpd:0.05, gnu:0.1, uecUsed:2, uecTotal:10 },
 };
 const profileOf = () => SEED_SUBSTRATE_PROFILES.find(p => p.id === state.profileId);
-const policyOf  = () => SEED_ACCEPTANCE_POLICIES.find(p => p.symbology === state.symbology)
-  || { id:state.symbology.toLowerCase()+"-default", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
+// 允收 policy 取用(稽核 A-08)。**門檻只能來自 src/data/policies.ts** ——
+// 它受規格 §6.1 的門檻凍結治理、有守門測試、改動看得到。
+// 這裡的 fallback 不是「預設門檻」,是**缺漏告警**:走到它就代表 policies.ts 少了一個
+// 符號別,而那個符號別的允收標準正靜悄悄地由這一行 HTML 決定。
+// (AUTO 例外 —— 那是「還沒掃到」的顯示狀態,掃描當下一定已由 resolveSym 收斂。)
+const policyOf = () => {
+  const p = SEED_ACCEPTANCE_POLICIES.find(x => x.symbology === state.symbology);
+  if (p) return p;
+  if (state.symbology !== "AUTO")
+    console.error(`找不到 ${state.symbology} 的允收 policy —— 請補進 src/data/policies.ts,不要在此處決定門檻`);
+  return { id:"ungoverned-fallback", symbology:state.symbology, requiredGrade:"C", xDimSpecMm:0, quietZoneMinX:0 };
+};
 
 // 切換符號別:只同步情境要「掃到」的內容,**不得**碰 #f-expected-gtin ——
 // 那是使用者輸入的資料,不屬情境資料,被情境改寫就等於又把預期值接回解碼結果。
@@ -1296,9 +1309,11 @@ function presentResult(decode, grade, acceptance, img, geom, meas, why) {
   $("symBadge").textContent = "偵測類型：" + symLabelR;
   // 還原「不可量測」路徑可能隱藏過的區塊(同一個結果頁兩種用途,不還原會殘留)
   $("unmeasBox").hidden = true;
-  for (const id of ["circle", "verdict", "margin", "params", "upsellBox"]) {
+  for (const id of ["circle", "verdict", "margin", "params"]) {
     const el = $(id); if (el) el.style.display = "";
   }
+  // upsell 的顯隱由 tier 決定,不可在這裡一律還原成顯示 —— 那會讓付費版也看到升級提示
+  renderUpsell();
   // 示範模式標記(稽核裁示 D5② · IMG-03):等級照出,但每一處都要看得出不是實拍。
   const simulated = !!(meas && meas.simulated);
   $("simTag").hidden = !simulated;
@@ -2282,10 +2297,38 @@ function clearSessionStore() { try { sessionStorage.removeItem(SESSION_KEY); } c
 
 // 依 currentTier 套用分級呈現:設定入口(僅 ADVANCED)、升級提示、清單付費提示的顯隱。
 // 結果頁參數的鎖定/解鎖在 presentResult 內即時依 isEnabled 判定。
+// 付費版在**這個部署形態(手機單機)**真的交付得了的功能(稽核 A-05)。
+// 這不是 C10.1 的 tier 矩陣 —— 那是 flags.ts 的事;這裡回答的是另一個問題:
+// 「這一頁按下去之後,使用者實際拿得到什麼」。兩者混為一談就會承諾交付不了的東西。
+const MOBILE_PAID_FEATURES = [
+  { flag: "full_parameters", label: "完整參數報告" },
+  { flag: "csv_export",      label: "清單留存與 PDF / Excel 報告" },
+];
+// 規格上屬付費版、但手機單機**交付不了**的項目。列出來並說明去哪裡拿,
+// 不放進「升級可解鎖」那句承諾裡。
+// ⚠ 尺寸量測是**結構性不可得**,不是還沒做:initCamera 無條件把 scaleRef 壓成 false,
+//   沒有實體尺寸基準就沒有毫米可換算。把它寫進承諾等於賣一個交付不了的功能。
+const MOBILE_ELSEWHERE = [
+  { label: "尺寸量測（X寬/BWR/Quiet Zone）", why: "需實體尺寸基準（比例尺卡），手機單機取像換算不出毫米" },
+  { label: "印刷掉級診斷 · ERP 回寫 · 趨勢監控", why: "桌面版功能" },
+];
+// 升級提示(稽核 A-05)。輸入:無(讀 currentTier);輸出:無(直接改 DOM)。
+// 只列目前 tier 還沒解鎖、**而且這一頁真的做得到**的項目;全部已解鎖就整塊收起來。
+function renderUpsell() {
+  const box = $("upsellBox"); if (!box) return;
+  const tier = currentTier || "FREE";
+  const locked = MOBILE_PAID_FEATURES.filter((f) => !isEnabled(tier, f.flag));
+  // 收起來時一併清空內容:留著字串等於畫面上看不到、但 DOM 裡仍寫著一句付費文案
+  if (!locked.length) { box.style.display = "none"; box.innerHTML = ""; return; }
+  box.style.display = "";
+  box.innerHTML = `<b>升級付費版可解鎖</b>${esc(locked.map((f) => f.label).join(" · "))}`
+    + `<div style="margin-top:6px;font-size:11px;opacity:.85">`
+    + MOBILE_ELSEWHERE.map((x) => `${esc(x.label)} — ${esc(x.why)}`).join("<br>")
+    + `</div>`;
+}
 function applyTier() {
   $("settingsBtn").style.display = currentTier === "ADVANCED" ? "" : "none";
-  // full_parameters 解鎖 → 隱藏「升級付費版可解鎖完整參數」upsell
-  $("upsellBox").style.display = isEnabled(currentTier, "full_parameters") ? "none" : "";
+  renderUpsell();
   // csv_export 解鎖 → 隱藏清單頁付費 tierNote
   $("listTierNote").style.display = isEnabled(currentTier, "csv_export") ? "none" : "";
 }
