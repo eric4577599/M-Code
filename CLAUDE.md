@@ -61,7 +61,12 @@ npm run build       # tsc → dist/(demo 依賴,必跑)
 ### 資料庫與重要路徑
 
 - 無資料庫(離線佇列與儲存由前端 host 提供)。
-- 線上 docroot 是 **`~/m-code-site`**,不是 repo 本身。**上線是三步,缺一不可**:
+- 線上 docroot 是 **`~/m-code-site`**,不是 repo 本身。**上線一律跑腳本,不要手打三步**:
+  ```bash
+  ./deploy/deploy.sh              # typecheck+test 閘門 → build → rsync → stamp → 驗證
+  ./deploy/deploy.sh --dry-run    # 只看 rsync 會改什麼,不上線(也不蓋章)
+  ```
+  它做的就是下面這三步,綁在一起是因為**漏掉任一步都沒有症狀**:
   ```bash
   npm run build
   rsync -a --delete --exclude node_modules --exclude .git ./ ~/m-code-site/
