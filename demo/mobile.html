@@ -201,6 +201,8 @@
   .decodedBox .lbl { font-size:11px; color:#64748b; display:block; margin-bottom:2px; }
   .decodedBox .val { font:14px/1.5 ui-monospace,monospace; color:#0f172a; word-break:break-all; }
   .params { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin:14px 0 4px; }
+  /* 參數取值口徑註記(稽核 A-06):chips 是逐條最差,沒有這一行讀的人會以為是「唯一一組」 */
+  .paramsNote { flex-basis:100%; text-align:center; color:#64748b; font-size:11px; margin-top:2px; }
   /* 結果畫面:掃描後偵測到的符號類型標籤 */
   .symBadge { display:inline-block; background:#0f172a; color:#7dd3fc; border-radius:8px; padding:4px 10px; font:600 12px ui-monospace,monospace; margin-bottom:8px; }
   .pchip { border:1px solid #e2e8f0; border-radius:8px; padding:5px 9px; font-size:12px; }
@@ -929,7 +931,8 @@ function inspectReal(photo) {
   // 故 2D 恆 false ⇒ 解析度在本張閘門呈現為「未量測」,不再因 state.gate.pxm 仍是
   // resetPreviewGeometry 的放行假值 9(9 >= 8)而被算成 OK。
   let pxmMeasured = false;
-  const scanlineScores = [], scanlineLimiters = []; // 逐條總分與限制項代號(1D 才填,供等級成因用)
+  // 逐條總分、限制項代號與參數(1D 才填,供等級成因與參數聚合用)
+  const scanlineScores = [], scanlineLimiters = [], scanlineParameters = [];
   if (is2D(sym)) {
     // 2D:GNU 由 finder 幾何、FPD 由暗模組反射發散 proxy;UEC 無 RS 解碼資訊,誠實省略
     const q = zx ? quadGeometry(zx.points) : { gridDeviation: 0.5, picketAngleDeg: 0, tiltDeg: 0 };
@@ -964,6 +967,9 @@ function inspectReal(photo) {
       let lo = Infinity, code = "";
       for (const pp of one.parameters) if (pp.score < lo) { lo = pp.score; code = pp.code; }
       scanlineLimiters.push(code);
+      // 稽核 A-06:參數本身也要逐條留著 —— 呈現端原本渲染的是第 1 條,
+      // 於是出現過「參考等級 F」配「全 A 參數」的自相矛盾頁面。
+      scanlineParameters.push(one.parameters);
     }
     if (lastShotInfo) {
       lastShotInfo.metrology = g1.kind === "twoWidth" ? "雙寬(窄/寬判別)" : "模組型(E2SE)";
@@ -1092,7 +1098,7 @@ function inspectReal(photo) {
   const acceptance = evaluateAcceptance(grade, policyOf());
   // 成因判斷交給 imgproc.js 的純函式(demo/*.html 無自動化測試可覆蓋)
   const why = explainGrade({ is2D: is2D(sym), overallScore: grade.overallScore,
-    parameters: grade.parameters, scanlineScores, scanlineLimiters });
+    parameters: grade.parameters, scanlineScores, scanlineLimiters, scanlineParameters });
   presentResult(decode, grade, acceptance, img, geom, meas, why);
 }
 
@@ -1212,7 +1218,11 @@ function renderWhy(why) {
   const head = why.lines > 1 ? "最常拖低等級的項目" : "拖低等級的項目";
   const items = why.limiting.slice(0, 3).map((x) => {
     const times = why.lines > 1 && x.count ? `（${x.count}/${why.lines} 條掃描線）` : "";
-    const sc = typeof x.score === "number" ? `${x.letter} ${x.score.toFixed(2)}` : "—";
+    // 稽核 A-06:x.score 是**各條裡最差的那一條**(不是第 1 條);逐條有落差時附上範圍,
+    // 否則「9/10 條拖低等級」旁邊印一個 A 3.99,括號裡的次數與分數互相打臉。
+    const sc = typeof x.score === "number"
+      ? (x.varies ? `${x.letter} ${x.score.toFixed(2)}–${x.bestScore.toFixed(2)}` : `${x.letter} ${x.score.toFixed(2)}`)
+      : "—";
     return `<div class="item">· <b>${esc(x.name)}（${esc(x.code)} ${esc(sc)}）</b>${esc(times)}<br>${esc(x.why)}</div>`;
   }).join("");
   const spread = why.spread !== null && why.spread !== undefined
@@ -1314,13 +1324,24 @@ function presentResult(decode, grade, acceptance, img, geom, meas, why) {
   // 參數呈現(C10 full_parameters):光度參數一律顯示;幾何參數在 full_parameters
   // 解鎖(PAID/ADVANCED)時比照 pchip 露出字母+代號+分數,未解鎖(FREE)維持鎖定樣式。
   const fullParams = isEnabled(currentTier, "full_parameters");
-  $("params").innerHTML = grade.parameters.map(p => {
+  // 稽核 A-06:渲染的是 explainGrade 聚合後的參數(各條取最差),不是 GradeResult.parameters
+  // (那依設計只有第 1 條)。1D 總分是「每條取最差再平均」,拿第 1 條配總等級會出現
+  // 「F 級 + 全 A 參數」這種每個數字單看都對、合起來自相矛盾的一頁。
+  const shownParams = (why && why.params && why.params.length) ? why.params : grade.parameters;
+  // 註記的條件是「參數**真的**聚合自多條」,不是「這張有多條掃描線」——
+  // 用 why.lines 判斷會在退化情況(有逐條總分、沒逐條參數)下印出一行說謊的註記:
+  // 顯示的是第 1 條,旁邊卻寫著「取 10 條中最差」。對照組實測過這一幕。
+  const paramLines = (shownParams[0] && shownParams[0].lines) || 1;
+  const multiLine = paramLines > 1;
+  $("params").innerHTML = shownParams.map(p => {
+    const range = (p.varies && fullParams) ? `–${p.bestScore.toFixed(2)}` : "";
     if (p.kind === "PHOTOMETRIC")
       return `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code}</span>`;
     return fullParams
-      ? `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code} <small style="color:#64748b">${p.score.toFixed(2)}</small></span>`
+      ? `<span class="pchip"><b style="color:${GC[p.letter]}">${p.letter}</b>${p.code} <small style="color:#64748b">${p.score.toFixed(2)}${range}</small></span>`
       : `<span class="pchip locked">🔒 ${p.code}</span>`;
-  }).join("");
+  }).join("")
+    + (multiLine ? `<div class="paramsNote">參數取 ${paramLines} 條掃描線中最差的一條${fullParams ? "；範圍為逐條最差–最好" : ""}</div>` : "");
   // 判定後內容依 tier 分流:full_parameters 解鎖(PAID/ADVANCED)顯示完整參數
   // 報告(全參數字母+分數);FREE 維持基本參數 + 升級提示文案。
   $("resultText").value = [
@@ -1334,10 +1355,10 @@ function presentResult(decode, grade, acceptance, img, geom, meas, why) {
     ...(geom ? [`幾何量測：${geom.rectify}；透視傾角 ${geom.tilt.deg === null ? "—" : geom.tilt.deg.toFixed(1) + "°"}（${TILT_SOURCE_LABEL[geom.tilt.source]}）`] : []),
     `判定：${acceptance.pass?"通過":"未通過"}（門檻 ≥ ${policyOf().requiredGrade}，margin ${acceptance.marginScore.toFixed(2)}）`,
     ...(fullParams ? [
-      `完整參數報告（付費版）：${grade.parameters.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
+      `完整參數報告（付費版${multiLine?"·取 "+paramLines+" 條掃描線最差":""}）：${shownParams.map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)}${p.varies?"–"+p.bestScore.toFixed(2):""})`).join(" / ")}`,
     ] : [
-      `基本參數（免費版·光度）：${grade.parameters.filter(p=>p.kind==="PHOTOMETRIC").map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
-      `完整參數報告（幾何 ${grade.parameters.filter(p=>p.kind!=="PHOTOMETRIC").map(p=>p.code).join("/") || "DEC/DEF/FPD/GNU"} 等）：付費版解鎖`,
+      `基本參數（免費版·光度）：${shownParams.filter(p=>p.kind==="PHOTOMETRIC").map(p=>`${p.code} ${p.letter}(${p.score.toFixed(2)})`).join(" / ")}`,
+      `完整參數報告（幾何 ${shownParams.filter(p=>p.kind!=="PHOTOMETRIC").map(p=>p.code).join("/") || "DEC/DEF/FPD/GNU"} 等）：付費版解鎖`,
     ]),
   ].join("\n");
   saveScan(decode, grade, acceptance, img, { measurable: true, reason: "", hint: "", simulated }, why);
@@ -2018,7 +2039,13 @@ function saveScan(decode, grade, acceptance, img, flags, why) {
     grade: grade ? grade.overall : null, pass: acceptance ? acceptance.pass : null,
     reqGrade: policyOf().requiredGrade,
     margin: acceptance ? acceptance.marginScore : null, img: img || captureImage(),
-    params: grade ? grade.parameters.map(p=>({ letter:p.letter, code:p.code, label:p.label, score:p.score })) : [],
+    // 稽核 A-06:存的是聚合後的參數(各條最差 + 逐條範圍),不是第 1 條 ——
+    // PDF 明細與結果頁必須講同一組數字,否則矛盾只是從畫面搬到紙上。
+    params: grade ? (why && why.params && why.params.length ? why.params : grade.parameters)
+      .map(p=>({ letter:p.letter, code:p.code, label:p.label, score:p.score,
+                 bestScore: p.bestScore ?? p.score, varies: !!p.varies })) : [],
+    // 參數取自幾條掃描線(1D>1、2D 與示範為 1);PDF 要標,不然讀的人不知道那是最差值
+    paramLines: grade ? ((why && why.params && why.params[0] && why.params[0].lines) || 1) : 1,
     // 等級成因(規格 §3.8):存進紀錄才進得了 PDF。**存結論不存重算所需的原料** ——
     // 等級與其成因都是那一刻的量測結果,日後不該被重新推導(引擎改版會讓歷史紀錄
     // 整批靜默改變,見架構文件)。
@@ -2149,7 +2176,8 @@ function exportPdf() {
       ${whySummary(s.why)}
       ${s.shot ? `<p style="margin:0 0 8px;font-size:12px;color:#475569"><b>取幀：</b>${shotSummary(s.shot)}</p>` : ""}
       <table class="rpt"><tr><th>級</th><th>參數</th><th>分數</th></tr>
-        ${s.params.map(p=>`<tr><td>${p.letter}</td><td>${p.label} (${p.code})</td><td>${p.score.toFixed(2)}</td></tr>`).join("")}</table></div></div></div>`).join("");
+        ${s.params.map(p=>`<tr><td>${p.letter}</td><td>${p.label} (${p.code})</td><td>${p.score.toFixed(2)}${p.varies?`<span style="color:#64748b"> – ${p.bestScore.toFixed(2)}</span>`:""}</td></tr>`).join("")}
+        ${s.paramLines > 1 ? `<tr><td colspan="3" style="color:#64748b">參數取 ${s.paramLines} 條掃描線中最差的一條；第二欄數字為逐條最差–最好</td></tr>` : ""}</table></div></div></div>`).join("");
   $("printReport").innerHTML = page1 + details;
   window.print();
 }

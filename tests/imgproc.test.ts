@@ -59,6 +59,7 @@ import {
   assessShotFreshness,
   summarizeShotGate,
   explainGrade,
+  aggregateParameters,
   chooseCaptureFrame,
   barBandExtent,
   BAR_BAND,
@@ -2765,6 +2766,50 @@ describe("explainGrade — 等級成因說明", () => {
     expect(r.limiting[0].why).toContain("墨量增益");
   });
 
+  // ── 稽核 A-06:參數顯示的是「各條最差」,不是第 1 條 ────────────────────
+  // 重演稽核當時的畫面:參考等級 F(0.38),而參數 chips 全是 A —— 每個數字單看都對,
+  // 合起來自相矛盾。原因是 GradeResult.parameters 依設計只回報第 1 條掃描線。
+  it("A-06 重演:第 1 條全綠、其餘九條爛 → 限制項不得報成第 1 條的 A", () => {
+    const good = [P("SC", 4, "A"), P("DEF", 3.99, "A")];
+    const bad = [P("SC", 4, "A"), P("DEF", 0.3, "F")];
+    const r = explainGrade({
+      is2D: false, overallScore: 0.38,
+      parameters: good,                                   // ← 第 1 條(核心庫的代表值)
+      scanlineParameters: [good, ...Array(9).fill(bad)],
+      scanlineScores: [3.99, ...Array(9).fill(0.3)],
+      scanlineLimiters: Array(10).fill("DEF"),
+    });
+    const def = r.limiting[0];
+    expect(def.code).toBe("DEF");
+    expect(def.count).toBe(10);
+    // 修好之前這裡是 "A" / 3.99 —— 配上「10/10 條掃描線」自相矛盾
+    expect(def.letter).toBe("F");
+    expect(def.score).toBeCloseTo(0.3, 6);
+    expect(def.varies).toBe(true);
+    expect(def.bestScore).toBeCloseTo(3.99, 6);
+  });
+
+  it("A-06:params 是聚合後的清單,順序沿用第 1 條,且不再是全 A", () => {
+    const good = [P("SC", 4, "A"), P("DEF", 3.99, "A")];
+    const bad = [P("SC", 4, "A"), P("DEF", 0.3, "F")];
+    const r = explainGrade({ is2D: false, overallScore: 0.38, parameters: good,
+      scanlineParameters: [good, ...Array(9).fill(bad)],
+      scanlineScores: [3.99, ...Array(9).fill(0.3)],
+      scanlineLimiters: Array(10).fill("DEF") });
+    expect(r.params.map((x: { code: string }) => x.code)).toEqual(["SC", "DEF"]);
+    expect(r.params.map((x: { letter: string }) => x.letter)).toEqual(["A", "F"]);
+    // F 級不可能配一整排 A:總分是「每條取最差再平均」,取最差必然有一項與總分同向
+    expect(r.params.some((x: { letter: string }) => x.letter !== "A")).toBe(true);
+  });
+
+  it("A-06:沒有逐條參數時原樣回報(2D 與示範模式不受影響)", () => {
+    const ps = [P("SC", 3.2), P("MOD", 1.5, "D")];
+    const r = explainGrade({ is2D: true, overallScore: 1.5, parameters: ps });
+    expect(r.params.map((x: { code: string; score: number }) => [x.code, x.score]))
+      .toEqual([["SC", 3.2], ["MOD", 1.5]]);
+    expect(r.params.every((x: { varies: boolean }) => x.varies === false)).toBe(true);
+  });
+
   it("成因文案不得暗示 ISO 合規或直接斷言不合格(定位護欄)", () => {
     for (const v of Object.values(PARAM_CAUSE) as { name: string; why: string }[]) {
       for (const bad of ["ISO", "合規", "不合格", "認證", "證書"]) {
@@ -3012,5 +3057,61 @@ describe("summarizeShotGate 本張閘門三態敘述", () => {
     expect(summarizeShotGate({ checks: [], measured: {}, labels: LABELS })).toBe("未量測");
     expect(summarizeShotGate({})).toBe("未量測");
     expect(summarizeShotGate()).toBe("未量測");
+  });
+});
+
+// ── 逐條參數聚合(稽核 A-06)────────────────────────────────────────────────
+// 取「各條最差」而不是平均,是這支函式唯一重要的設計決定 —— 見下面那支「平均修不掉」。
+describe("aggregateParameters — 逐條參數聚合", () => {
+  const P = (code: string, score: number, letter = "B") =>
+    ({ code, letter, score, label: code, kind: "PHOTOMETRIC" });
+
+  it("取各條最差,並保留最好的那條當範圍", () => {
+    const r = aggregateParameters([
+      [P("SC", 4, "A"), P("DEC", 2.0, "C")],
+      [P("SC", 1.0, "F"), P("DEC", 3.0, "B")],
+      [P("SC", 2.5, "C"), P("DEC", 2.5, "C")],
+    ], []);
+    expect(r[0]).toMatchObject({ code: "SC", score: 1.0, letter: "F", bestScore: 4, varies: true, lines: 3 });
+    expect(r[1]).toMatchObject({ code: "DEC", score: 2.0, bestScore: 3.0, varies: true, lines: 3 });
+  });
+
+  it("每條各壞一項時,平均會全部維持 A —— 這就是不能用平均的原因", () => {
+    // 10 條、10 個參數,每條剛好一個(且各條不同)參數掉到 0:每條的最差 = 0 ⇒ 總分 F,
+    // 但每個參數的**平均**都是 (9×4+0)/10 = 3.6(A 區間)。用平均呈現,矛盾原封不動。
+    const codes = ["SC", "MOD", "RMIN", "DEC", "DEF", "EC", "PCS", "QZ", "GNU", "UEC"];
+    const lines = Array.from({ length: 10 }, (_, i) =>
+      codes.map((c, j) => P(c, j === i ? 0 : 4, j === i ? "F" : "A")));
+    const r = aggregateParameters(lines, []);
+    expect(r.every((x: { letter: string }) => x.letter === "F")).toBe(true);
+    const mean = (c: string) => lines.reduce((a, ps) => a + ps.find((p) => p.code === c)!.score, 0) / 10;
+    expect(mean("SC")).toBeCloseTo(3.6, 6); // ← 平均值確實是 A 區間,故意在這裡釘住
+  });
+
+  it("只有一條時 varies 為 false,不憑空生出範圍", () => {
+    const r = aggregateParameters([[P("SC", 2.5)]], []);
+    expect(r[0]).toMatchObject({ score: 2.5, bestScore: 2.5, varies: false, lines: 1 });
+  });
+
+  it("沒有逐條資料就原樣回報 fallback(2D / 示範模式)", () => {
+    const r = aggregateParameters(undefined, [P("SC", 3.2), P("MOD", 1.5, "D")]);
+    expect(r.map((x: { code: string; score: number }) => [x.code, x.score])).toEqual([["SC", 3.2], ["MOD", 1.5]]);
+    expect(r.every((x: { lines: number }) => x.lines === 0)).toBe(true);
+  });
+
+  it("同字母但分數有差仍算 varies(顯示範圍才誠實)", () => {
+    const r = aggregateParameters([[P("SC", 2.0, "C")], [P("SC", 2.9, "C")]], []);
+    expect(r[0].letter).toBe("C");
+    expect(r[0].varies).toBe(true);
+  });
+
+  it("差距在 0.005 以內視為沒有差異(浮點雜訊不該變成範圍)", () => {
+    const r = aggregateParameters([[P("SC", 2.0)], [P("SC", 2.004)]], []);
+    expect(r[0].varies).toBe(false);
+  });
+
+  it("空輸入不丟例外", () => {
+    expect(aggregateParameters([], [])).toEqual([]);
+    expect(aggregateParameters(undefined, undefined)).toEqual([]);
   });
 });

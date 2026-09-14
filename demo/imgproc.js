@@ -2103,14 +2103,74 @@ export const GRADE_RULE = Object.freeze({
 export const SCANLINE_SPREAD_HINT = 1.0;
 
 /**
+ * 逐條掃描線的參數聚合(純函式 · 稽核 A-06)。輸入:
+ *   - scanlineParameters:各掃描線的 GradeResult.parameters 陣列(1D);空或未給時退回 fallback
+ *   - fallback:沒有逐條資料時要呈現的參數陣列(2D 或示範模式)
+ * 輸出:[{ code, label, kind, letter, score, bestLetter, bestScore, lines, varies }]
+ *   - letter / score 是**各條裡最差的那一條**,不是第 1 條
+ *   - bestLetter / bestScore 是最好的那一條;varies = 兩者不同(需要顯示範圍)
+ *   - 順序沿用第一條掃描線(= 呈現端原本的順序),不重排
+ *
+ * 由來(稽核 A-06):`GradeResult.parameters` 依設計只回報**第 1 條**掃描線,
+ * 而 1D 總分是「每條取最差再平均」。呈現端直接渲染第 1 條 ⇒ 結果頁出現過
+ * 「參考等級 F(0.38)」配上「A SC / A MOD / A Rmin / A DEC / A DEF」全綠參數 ——
+ * 每個數字單看都對,合起來是自相矛盾的一頁。
+ *
+ * 為什麼取**最差**而不是平均:平均修不掉那個矛盾。十條掃描線各有一個不同參數掛掉時,
+ * 每個參數的平均都還在 A,總分卻是 F,矛盾原封不動。取最差則必然有一項與總分同向 ——
+ * 因為每條的總分就是它自己最差的那一項。
+ */
+export function aggregateParameters(scanlineParameters, fallback) {
+  const lines = Array.isArray(scanlineParameters)
+    ? scanlineParameters.filter((ps) => Array.isArray(ps) && ps.length) : [];
+  const base = Array.isArray(fallback) ? fallback : [];
+  if (lines.length < 2) {
+    // 單條(或沒有逐條資料):沒有東西可聚合,原樣回報,varies 恆 false
+    const one = lines.length === 1 ? lines[0] : base;
+    return one.map((p) => ({
+      code: p.code, label: p.label, kind: p.kind,
+      letter: p.letter, score: p.score,
+      bestLetter: p.letter, bestScore: p.score,
+      lines: lines.length === 1 ? 1 : 0, varies: false,
+    }));
+  }
+  const order = lines[0].map((p) => p.code);
+  const seen = new Map();
+  for (const ps of lines) {
+    for (const p of ps) {
+      const cur = seen.get(p.code);
+      if (!cur) { seen.set(p.code, { worst: p, best: p, n: 1 }); continue; }
+      if (p.score < cur.worst.score) cur.worst = p;
+      if (p.score > cur.best.score) cur.best = p;
+      cur.n += 1;
+    }
+  }
+  return order.map((code) => {
+    const s = seen.get(code);
+    return {
+      code, label: s.worst.label, kind: s.worst.kind,
+      letter: s.worst.letter, score: s.worst.score,
+      bestLetter: s.best.letter, bestScore: s.best.score,
+      lines: s.n,
+      // 用分數比而不是字母比:同字母不同分數仍是「逐條有差異」,顯示範圍才誠實
+      varies: s.best.score - s.worst.score > 0.005,
+    };
+  });
+}
+
+/**
  * 等級成因說明(純函式)。輸入:
  *   - is2D:是否為 2D 符號別
  *   - overallScore:總分
  *   - parameters:GradeResult.parameters(1D 時是第 1 條掃描線的)
  *   - scanlineScores:各掃描線的總分陣列(1D 才有;沒有就傳空陣列或省略)
  *   - scanlineLimiters:各掃描線各自的限制項代號陣列(1D 才有,與上面同長)
- * 輸出:{ rule, limiting, spread, spreadHint, lines }
- *   - limiting:[{ code, name, why, letter, score, count }],已依「成為限制項的次數」排序
+ *   - scanlineParameters:各掃描線的參數陣列(1D 才有,與上面同長)—— 稽核 A-06
+ * 輸出:{ rule, limiting, params, spread, spreadHint, lines }
+ *   - limiting:[{ code, name, why, letter, score, bestScore, varies, count }],
+ *     已依「成為限制項的次數」排序;letter / score 取**各條最差**(見 aggregateParameters)
+ *   - params:聚合後的參數清單,呈現端的參數 chips 與完整參數報告一律用它,
+ *     不要再直接渲染 GradeResult.parameters(那是第 1 條)
  *   - spread:逐條總分的最大最小差(級);掃描線少於 2 條時為 null
  *   - lines:掃描線條數
  * 呼叫端只負責顯示,不得自行推導成因。
@@ -2121,31 +2181,40 @@ export function explainGrade(input) {
   const scores = Array.isArray(o.scanlineScores) ? o.scanlineScores.filter(
     (v) => typeof v === "number" && Number.isFinite(v)) : [];
   const limiters = Array.isArray(o.scanlineLimiters) ? o.scanlineLimiters : [];
-  const byCode = new Map(params.map((p) => [p.code, p]));
+  // 稽核 A-06:letter / score 一律取自聚合結果(各條最差),不再拿第 1 條的值。
+  // 舊寫法 `new Map(params.map(...))` 會讓「DEF 9/10 條拖低等級」配上第 1 條的
+  // 「A 3.99」—— 括號裡的次數與括號裡的分數互相打臉。
+  const stats = aggregateParameters(o.scanlineParameters, params);
+  const byCode = new Map(stats.map((p) => [p.code, p]));
+
+  /** 由聚合結果取一項的呈現欄位;找不到該代號時以空字串 / null 表示「沒有數字可講」。 */
+  const cell = (code, count) => {
+    const p = byCode.get(code);
+    return {
+      code, count,
+      letter: p ? p.letter : "",
+      score: p ? p.score : null,
+      bestScore: p ? p.bestScore : null,
+      varies: p ? p.varies : false,
+    };
+  };
 
   let limiting = [];
-  if (o.is2D) {
-    // 2D:總分就是最小值,取所有等於最小值的參數(可能不只一項)
+  if (o.is2D || !limiters.length) {
+    // 2D:總分就是最小值,取所有等於最小值的參數(可能不只一項)。
+    // 1D 但沒有逐條資料時走同一條路 —— 退化成「單一參數集的最差項」,
+    // 由呼叫端據 lines 判斷該怎麼講。
     let lo = Infinity;
-    for (const p of params) if (p.score < lo) lo = p.score;
-    limiting = params.filter((p) => Number.isFinite(lo) && p.score === lo)
-      .map((p) => ({ code: p.code, letter: p.letter, score: p.score, count: 1 }));
-  } else if (limiters.length) {
+    for (const p of stats) if (p.score < lo) lo = p.score;
+    limiting = stats.filter((p) => Number.isFinite(lo) && p.score === lo)
+      .map((p) => cell(p.code, 1));
+  } else {
     // 1D:統計「成為該條限制項」的次數。次數多的排前面,同次數時分數低的排前面。
     const n = new Map();
     for (const c of limiters) if (c) n.set(c, (n.get(c) || 0) + 1);
     limiting = [...n.entries()]
-      .map(([code, count]) => {
-        const p = byCode.get(code);
-        return { code, count, letter: p ? p.letter : "", score: p ? p.score : null };
-      })
+      .map(([code, count]) => cell(code, count))
       .sort((a, b) => (b.count - a.count) || ((a.score ?? 9) - (b.score ?? 9)));
-  } else {
-    // 沒有逐條資料就退化成「第 1 條的最差項」,並由呼叫端據 lines 判斷該怎麼講
-    let lo = Infinity;
-    for (const p of params) if (p.score < lo) lo = p.score;
-    limiting = params.filter((p) => Number.isFinite(lo) && p.score === lo)
-      .map((p) => ({ code: p.code, letter: p.letter, score: p.score, count: 1 }));
   }
 
   limiting = limiting.map((x) => ({
@@ -2158,6 +2227,8 @@ export function explainGrade(input) {
   return {
     rule: o.is2D ? GRADE_RULE.twoD : GRADE_RULE.oneD,
     limiting,
+    // 呈現端的參數 chips 與完整參數報告一律吃這個,不要再渲染 GradeResult.parameters
+    params: stats,
     spread,
     // 離散度大 = 同一個符號在不同掃描線上量到差很多,通常是拍攝條件不穩(手震/反光/傾斜),
     // 不是印刷不均 —— 措辭要指向「重拍」而不是「這批印壞了」。
