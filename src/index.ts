@@ -18,6 +18,7 @@ export * from "./engines/acceptance.js"; // acceptance evaluation
 // ERP / export (C9)
 export * from "./erp/client.js";
 export * from "./export/csv.js";
+export * from "./export/shotlog.js"; // 拍照條件 log / 錯誤檔(純函式)
 
 // Seed reference data (C8 rules, C3.2 profiles/policies, D3 flutes)
 export * from "./data/rules.js";

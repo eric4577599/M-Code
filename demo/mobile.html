@@ -28,6 +28,7 @@
 <link rel="modulepreload" href="../dist/engines/measurement.js" />
 <link rel="modulepreload" href="../dist/erp/client.js" />
 <link rel="modulepreload" href="../dist/export/csv.js" />
+<link rel="modulepreload" href="../dist/export/shotlog.js" />
 <link rel="manifest" href="./manifest.webmanifest" />
 <meta name="theme-color" content="#0b1220" />
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
@@ -42,6 +43,15 @@
    **刻意寫成傳統 script 並放在模組之前**:會壞的是模組,錯誤出口不能跟它同生共死。 */
 (function () {
   var shown = false;
+  // 錯誤檔(設計說明 §5):模組還沒載入完的錯誤先排隊,模組起來後由它領走。
+  // 這裡任何一步失敗都不可影響下面的橫幅 —— 所以包 try/catch。
+  window.__mcodeErrQueue = [];
+  function enqueue(kind, message, stack, where) {
+    try {
+      var rec = { kind: kind, message: message, stack: stack || "", where: where || "" };
+      if (window.__mcodeLogError) window.__mcodeLogError(rec); else window.__mcodeErrQueue.push(rec);
+    } catch (_) {}
+  }
   function showFatal(msg) {
     if (shown) return; shown = true;
     var d = document.createElement("div");
@@ -55,10 +65,12 @@
   window.__mcodeFatal = showFatal;
   window.addEventListener("error", function (e) {
     var where = e.filename ? (" @" + String(e.filename).split("/").pop() + ":" + e.lineno) : "";
+    enqueue("error", e.message || "未知錯誤", e.error && e.error.stack, where);
     showFatal((e.message || "未知錯誤") + where);
   });
   window.addEventListener("unhandledrejection", function (e) {
     var r = e.reason;
+    enqueue("unhandledrejection", (r && r.message) || String(r), r && r.stack, "");
     showFatal("未處理的非同步錯誤：" + ((r && r.message) || String(r)));
   });
 })();
@@ -270,6 +282,11 @@
   .iconBtn { background:#334155; color:#cbd5e1; border:0; border-radius:999px; font-size:12px; font-weight:600; padding:4px 10px; margin-left:6px; cursor:pointer; }
 
   /* 設定頁(admin/ADVANCED 專用,目前空白 placeholder) */
+  .labelBox { margin-top:12px; border:1px dashed #cbd5e1; border-radius:12px; padding:10px 12px; }
+  .labelBox .row { display:flex; gap:8px; margin-top:6px; }
+  .lblBtn { flex:1; padding:9px; border:1px solid #cbd5e1; border-radius:10px; background:#fff; font-size:13px; }
+  .lblBtn.on { background:#0f172a; color:#fff; border-color:#0f172a; }
+  .labelBox .note { font-size:11px; color:#64748b; }
   .setBlock { border:1px solid #e2e8f0; border-radius:12px; padding:14px; margin-bottom:12px; }
   .setBlock h3 { font-size:14px; margin:0 0 6px; color:#0f172a; }
   .setBlock .empty { font-size:12px; color:#94a3b8; margin:0; }
@@ -387,6 +404,16 @@
            文案寫死在這裡就會與實作漂開,而且直接牴觸專案 CLAUDE.md
            「不要在 HTML 裡寫死 tier 判斷或文案」。 -->
       <div class="upsell" id="upsellBox"></div>
+      <!-- 人工判定(選填):誤判率 = 系統判 NG 而實物為良品的占比,需要這一欄當對照。
+           示範模式的模擬結果不顯示(不進記錄)。 -->
+      <div class="labelBox" id="labelBox" style="display:none">
+        <div style="font-size:12px;font-weight:600">人工判定（選填）</div>
+        <div class="row">
+          <button class="lblBtn" id="labelGood" type="button">良品</button>
+          <button class="lblBtn" id="labelBad" type="button">不良</button>
+        </div>
+        <div class="note" id="labelNote"></div>
+      </div>
       <button class="reBtn" id="reBtn">↻ 再拍一張</button>
     </div>
   </div>
@@ -412,6 +439,13 @@
   <div class="view" id="v-settings">
     <div class="listView">
       <button class="back" id="settingsBack">‹ 返回拍攝</button>
+      <div class="setBlock"><h3>拍照條件記錄</h3>
+        <p class="empty" id="logStatus">讀取中…</p>
+        <p class="empty" style="margin-top:6px">只記條件與結果，不存照片、不存帳號。複製後可貼到試算表或交給開發端分析。</p>
+        <button class="lblBtn" id="logCopyBtn" type="button" style="margin-top:8px;width:100%">複製記錄（JSONL）</button>
+        <p class="empty" id="logCopyNote" style="margin-top:6px"></p>
+        <textarea id="logText" readonly rows="6" style="display:none;width:100%;margin-top:6px;font-size:11px"></textarea>
+      </div>
       <div class="setBlock"><h3>付費版（PAID）功能定義</h3><p class="empty">目前保持空白 · 待設定</p></div>
       <div class="setBlock"><h3>進階版（ADVANCED）功能定義</h3><p class="empty">目前保持空白 · 待設定</p></div>
       <p style="font-size:11px;color:#64748b;margin-top:10px">此頁僅系統管理者（admin / ADVANCED）可見，供日後定義各版功能範圍。目前不含任何設定控制項。</p>
@@ -445,6 +479,8 @@ import {
   evaluateGate, runDecode, buildGradeResult, evaluateAcceptance,
   SEED_SUBSTRATE_PROFILES, SEED_ACCEPTANCE_POLICIES,
   isEnabled,
+  buildShotRecord, buildErrorRecord, appendWithCap, withHumanLabel, toJSONL, makeSessionId,
+  SHOT_LOG_MAX, ERROR_LOG_MAX,
 } from "../dist/index.js";
 import {
   toGray, varianceOfLaplacian, glareRatio, grayWorldWbDeviation, washboardAmpRatio,
@@ -466,6 +502,186 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
 // 檔名清理:移除檔案系統不允許的字元,輸出可安全當下載檔名的字串
 const safeFileName = (s) => String(s).replace(/[\\/:*?"<>|]/g, "_");
+// （拍照條件 log 區塊刻意放在模組最前面：模組中段才丟例外時，排隊的錯誤仍領得走。）
+// ══ 拍照條件 log 與錯誤檔(設計說明 docs/design20261104-1.md §5)════════════════
+// 只記「條件與結果」,不存影像、不存帳號(白名單組裝在 src/export/shotlog.ts)。
+// 儲存:IndexedDB(shots / errors 兩個 store),記憶體鏡像一份供上限淘汰與匯出。
+// **記錄本身的任何失敗都不得影響檢驗**(§3.12 的教訓:新增的失敗路徑不可鎖死既有流程)——
+// 所有進入點都包 try/catch,失敗只提示一次。
+const LOG_SESSION = makeSessionId(Math.random); // 每次開頁一組隨機碼,不含帳號與時間
+let logShotSeq = 0, logErrSeq = 0, lastLogShotId = null, logWarned = false, logDbP = null;
+const logMem = { shots: [], errors: [] };
+
+// 只提示一次:記錄寫不進去不是使用者能處理的事,反覆跳出只會干擾檢驗。
+function logWarnOnce(why) {
+  if (logWarned) return; logWarned = true;
+  console.warn("[log] " + why);
+  try { setCamStatus("⚠ 記錄功能無法寫入（不影響檢驗）：" + why, "warn"); } catch (_) {}
+  updateLogStatus();
+}
+function openLogDb() {
+  if (logDbP) return logDbP;
+  logDbP = new Promise((resolve) => {
+    try {
+      if (!window.indexedDB) { resolve(null); return; }
+      const rq = indexedDB.open("mcode-log", 1);
+      rq.onupgradeneeded = () => {
+        const db = rq.result;
+        db.createObjectStore("shots", { keyPath: "id" });
+        db.createObjectStore("errors", { keyPath: "id" });
+      };
+      rq.onsuccess = () => resolve(rq.result);
+      rq.onerror = () => resolve(null);
+      rq.onblocked = () => resolve(null);
+    } catch (e) { resolve(null); }
+  });
+  return logDbP;
+}
+// 寫入一筆並刪除被淘汰的舊筆。fire-and-forget:呼叫端不等、不依賴結果。
+function logPersist(store, rec, evicted) {
+  openLogDb().then((db) => {
+    if (!db) { logWarnOnce("此瀏覽器無法使用儲存（可能是私密瀏覽）"); return; }
+    try {
+      const tx = db.transaction(store, "readwrite");
+      const os = tx.objectStore(store);
+      if (rec) os.put(rec);
+      for (const ev of (evicted || [])) os.delete(ev.id);
+      tx.onerror = tx.onabort = () => logWarnOnce("儲存空間不足或被瀏覽器拒絕");
+    } catch (e) { logWarnOnce("寫入失敗（" + ((e && e.name) || e) + "）"); }
+  }).catch(() => logWarnOnce("寫入失敗"));
+}
+// 啟動時把既有紀錄讀進來,與本次開頁已累積的合併後再套上限。
+function logLoad() {
+  return openLogDb().then((db) => {
+    if (!db) return;
+    const getAll = (store) => new Promise((res) => {
+      try {
+        const rq = db.transaction(store).objectStore(store).getAll();
+        rq.onsuccess = () => res(rq.result || []); rq.onerror = () => res([]);
+      } catch (e) { res([]); }
+    });
+    return Promise.all([getAll("shots"), getAll("errors")]).then(([ds, de]) => {
+      const merge = (mem, disk, max, store) => {
+        const byId = new Map();
+        for (const r of disk) byId.set(r.id, r);
+        for (const r of mem) byId.set(r.id, r);
+        const all = [...byId.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+        const over = Math.max(0, all.length - max);
+        if (over) logPersist(store, null, all.slice(0, over));
+        return all.slice(over);
+      };
+      logMem.shots = merge(logMem.shots, ds, SHOT_LOG_MAX, "shots");
+      logMem.errors = merge(logMem.errors, de, ERROR_LOG_MAX, "errors");
+      updateLogStatus(); refreshLabelUi();
+    });
+  }).catch(() => {});
+}
+// 錯誤檔進入點。raw 可以是 { kind, message, stack, where }(內嵌出口排隊來的),
+// 也可以是任何被丟出來的東西 —— buildErrorRecord 對怪輸入不丟例外。
+function logErrorRec(raw) {
+  try {
+    const rec = buildErrorRecord({
+      ts: Date.now(), build: window.__mcodeVersion || "", sessionId: LOG_SESSION, seq: ++logErrSeq,
+      kind: raw && raw.kind, message: raw && raw.message, stack: raw && raw.stack,
+      where: raw && raw.where, lastShotId: lastLogShotId,
+    }, Date.now());
+    const r = appendWithCap(logMem.errors, rec, ERROR_LOG_MAX);
+    logMem.errors = r.list;
+    logPersist("errors", rec, r.evicted);
+    updateLogStatus();
+  } catch (e) { console.warn("[log] 組錯誤紀錄失敗", e); }
+}
+function logError(kind, err, where) {
+  logErrorRec({ kind, message: err, stack: err && err.stack, where });
+}
+window.__mcodeLogError = logErrorRec;
+// 排隊的錯誤(模組載入前發生的)領走
+try { (window.__mcodeErrQueue || []).forEach(logErrorRec); window.__mcodeErrQueue = []; } catch (_) {}
+
+// 一張檢驗結果 → 一筆拍照條件紀錄。entry 是剛 push 進 scans 的那一筆。
+// 取不到的欄位一律不補假值(2D 的 pxPerModule 沒有實測就不記 9;傾角沒有來源標籤就不記)。
+function logShot(grade, acceptance, entry) {
+  try {
+    const s = lastShotInfo || {};
+    const wh = /(\d+)\s*×\s*(\d+)/.exec(s.analysis || "");
+    let facing = "";
+    try { facing = (camTrack && camTrack.getSettings && camTrack.getSettings().facingMode) || ""; } catch (_) {}
+    // 傾角只有在來源不是「未量測」時才記數值(未量測時 state.gate.tilt 是還原的 0°)
+    const hasTilt = !!s.tiltSource && s.tiltSource.indexOf("未量測") < 0;
+    const rec = buildShotRecord({
+      ts: Date.now(), build: window.__mcodeVersion || "", sessionId: LOG_SESSION, seq: ++logShotSeq,
+      device: { userAgent: navigator.userAgent, facing,
+        devicePixelRatio: window.devicePixelRatio,
+        orientation: (screen.orientation && screen.orientation.type) || "" },
+      camera: { path: s.path || "", requested: s.requested || "", granted: s.settings || "",
+        analysisWidth: wh ? Number(wh[1]) : null, frameSource: s.path || "" },
+      timing: { shutterDelayMs: s.latencyMs,
+        // 挑幀與取幀時序的文字留痕(沿用結果頁 / PDF 的同一批字串,不另外發明欄位)
+        candidates: { frameCompare: s.frameCompare, frameFallback: s.frameFallback,
+          shotTiming: s.shotTiming, shotGate: s.shotGate, staleShot: s.staleShot,
+          roiSample: s.roiSample, roiScale: s.roiScale, rectify: s.rectify } },
+      gate: s.gateChecks || [],
+      geometry: { symbology: state.symbology, pxPerModule: s.pxPerModule,
+        tiltDeg: hasTilt ? state.gate.tilt : null, tiltSource: s.tiltSource || "",
+        rectified: typeof s.rectified === "boolean" ? s.rectified : undefined },
+      result: { overall: grade ? grade.overall : null, overallScore: grade ? grade.overallScore : null,
+        parameters: (entry.params || []).map((p) => ({ code: p.code, letter: p.letter, score: p.score })),
+        measurable: entry.measurable, unmeasReason: entry.unmeasReason,
+        pass: acceptance ? acceptance.pass : null, requiredGrade: entry.reqGrade },
+    }, Date.now());
+    const r = appendWithCap(logMem.shots, rec, SHOT_LOG_MAX);
+    logMem.shots = r.list; lastLogShotId = rec.id;
+    logPersist("shots", rec, r.evicted);
+    updateLogStatus();
+  } catch (e) { console.warn("[log] 組拍照紀錄失敗", e); }
+}
+// 人工判定標註(誤判率的原料)。再按一次同一顆 = 取消標註。
+function setHumanLabel(label) {
+  try {
+    const rec = lastLogShotId ? logMem.shots.find((r) => r.id === lastLogShotId) : null;
+    if (!rec) return;
+    const next = rec.humanLabel === label ? null : label;
+    logMem.shots = withHumanLabel(logMem.shots, rec.id, next);
+    logPersist("shots", logMem.shots.find((r) => r.id === rec.id), []);
+    refreshLabelUi();
+  } catch (e) { console.warn("[log] 標註失敗", e); }
+}
+function refreshLabelUi() {
+  const box = $("labelBox"); if (!box) return;
+  const rec = lastLogShotId ? logMem.shots.find((r) => r.id === lastLogShotId) : null;
+  box.style.display = rec ? "" : "none";
+  if (!rec) return;
+  $("labelGood").classList.toggle("on", rec.humanLabel === "good");
+  $("labelBad").classList.toggle("on", rec.humanLabel === "bad");
+  $("labelNote").textContent = rec.humanLabel === "good" ? "已標註：良品"
+    : rec.humanLabel === "bad" ? "已標註：不良" : "選填：依現場實物判斷這箱是良品還是不良";
+}
+function updateLogStatus() {
+  const el = $("logStatus"); if (!el) return;
+  el.textContent = `拍照紀錄 ${logMem.shots.length} 筆 · 錯誤紀錄 ${logMem.errors.length} 筆`
+    + (logWarned ? " · ⚠ 此瀏覽器無法持久儲存，重新整理後會消失" : "");
+}
+function logExportText() {
+  return toJSONL([
+    ...logMem.shots.map((r) => ({ type: "shot", ...r })),
+    ...logMem.errors.map((r) => ({ type: "error", ...r })),
+  ]);
+}
+// 複製到剪貼簿;被拒時退回「顯示文字框讓使用者自己全選複製」。
+async function copyLog() {
+  const txt = logExportText();
+  const note = $("logCopyNote"), box = $("logText");
+  if (!txt) { note.textContent = "目前沒有任何紀錄可複製。"; return; }
+  try {
+    await navigator.clipboard.writeText(txt);
+    note.textContent = `已複製 ${logMem.shots.length} 筆拍照、${logMem.errors.length} 筆錯誤（JSONL，一行一筆）。`;
+    box.style.display = "none";
+  } catch (e) {
+    box.value = txt; box.style.display = ""; box.focus(); box.select();
+    note.textContent = "瀏覽器不允許自動複製，請在下方文字框全選後手動複製。";
+  }
+}
+
 const GC = { A:"#1f9d55", B:"#65a30d", C:"#d97706", D:"#dc2626", F:"#991b1b" };
 // 品質燈號標籤。比例尺卡(scaleRef)僅用於絕對毫米尺寸量測、相對品質篩檢不需要,
 // 故不列入面板(引擎仍計算 scaleRef,但它本就不鎖快門,隱藏不影響閘門邏輯)。
@@ -674,7 +890,7 @@ async function inspect() {
     // 取幀前最後一道複驗(稽核 COMPAT-01):事件可能還沒送到,或該平台根本不送。
     // 凍結幀走完整條檢驗會產出一份看起來完全正常、卻與現場無關的報告 —— 寧可擋下。
     const fault = cameraFaultNow();
-    if (fault) { camFault = camFault || fault; setCamStatus("⚠ " + fault, "warn"); return; }
+    if (fault) { camFault = camFault || fault; setCamStatus("⚠ " + fault, "warn"); logError("camera", fault, "inspect"); return; }
     let photo = null;
     // 快門延遲實測(2026-08-06):按下到取幀完成之間到底過了多久,過去沒有任何一處量過,
     // 「似乎有延遲」始終停在猜測。t0 取在取幀之前、複驗之後,量到的就是取幀本身的成本。
@@ -687,15 +903,20 @@ async function inspect() {
       photo = await capturePhoto();
     } catch (e) {
       console.warn("capturePhoto 失敗", e); // 保留現場,實機才有得除錯
+      logError("camera", e, "capturePhoto");
       photo = null;
     }
-    if (!photo) { console.warn("取幀失敗：L1 與預覽幀都沒取到畫面"); setCamStatus("取幀失敗，請重試", "warn"); return; }
+    if (!photo) {
+      console.warn("取幀失敗：L1 與預覽幀都沒取到畫面"); setCamStatus("取幀失敗，請重試", "warn");
+      logError("camera", "取幀失敗：L1 與預覽幀都沒取到畫面", "inspect"); return;
+    }
     // 寫在 recordShot 之後 —— lastShotInfo 由該函式建立,提前寫會被整個蓋掉
     if (lastShotInfo) lastShotInfo.latencyMs = Math.round(clock() - t0);
     try {
       inspectReal(photo);
     } catch (e) {
       console.warn("inspectReal 失敗", e);
+      logError("error", e, "inspectReal");
       setCamStatus("影像分析失敗，請重試", "warn");
     }
   } finally {
@@ -907,7 +1128,7 @@ function inspectReal(photo) {
   // 採不採用由純函式 rectifyPlan 決定,本檔不自行判斷 —— demo/*.html 無自動化測試可覆蓋。
   const { rect, geo } = rectifyRoi(zx, kx, ky, rg, photo);
   const plan = rectifyPlan(rect);
-  if (lastShotInfo) lastShotInfo.rectify = plan.note;
+  if (lastShotInfo) { lastShotInfo.rectify = plan.note; lastShotInfo.rectified = !!plan.useRectified; }
   // 量測全部在「已裁好的 ROI 灰階」(或其正射版)上做,故 ROI 座標退化為原點到全幅
   const gray = plan.useRectified ? rect.gray : rg.gray;
   const gw = plan.useRectified ? rect.w : rg.w;
@@ -1093,6 +1314,12 @@ function inspectReal(photo) {
     // 版本標記(規格 §5):量測對象與敘述語意都變了,新舊紀錄的這一欄不可互比 ——
     // 有這一欄的是新語意(量 ROI、三態),沒有的是舊語意(量全幀、含未量測項的「全部 OK」)。
     lastShotInfo.shotGateBase = "ROI(裁切後)";
+    // 給拍照條件 log 用:未量測的項目不記數值 —— state.gate 對它們留的是預設值
+    // (例如 pxm 恆為 9,稽核 A-01),記進 log 就成了假讀數。語意與 summarizeShotGate 一致:
+    // measured[key] === false 才算未量測,鍵不存在視為已量測。
+    lastShotInfo.gateChecks = shotGateRoi.report.checks.map((c) => (measured[c.key] === false
+      ? { key: c.key, status: "UNMEASURED", value: null }
+      : { key: c.key, status: c.status, value: c.value }));
     if (fresh.note) lastShotInfo.shotTiming = fresh.note;
     if (fresh.stale) lastShotInfo.staleShot = fresh.label;
   }
@@ -1606,6 +1833,7 @@ async function initCamera(userGesture) {
       ? "相機沒有回應（8 秒）— 多半是被其他分頁佔用：iOS 同時只給一個分頁用相機。請關掉其他分頁後點畫面重試"
       : (map[e.name] || ("相機開啟失敗："+e.name));
     setCamStatus(msg + (userGesture?"":" ·點畫面重試"), "warn");
+    logError("camera", msg, "initCamera");
   } finally {
     // 一定要放在 finally:成功、逾時、被拒、被作廢四條路徑都得把旗標放掉,
     // 少放一條就再也開不起來(比原本的重入更難查,因為它完全沒有症狀可看)。
@@ -1625,7 +1853,7 @@ function watchTrackHealth(track) {
     // 只處理「當下這條」track 的事件:換相機或登出後舊 track 的遲到事件不得覆寫新狀態
     if (track !== camTrack) return;
     camFault = msg;
-    if (msg) setCamStatus("⚠ " + msg, "warn");
+    if (msg) { setCamStatus("⚠ " + msg, "warn"); logError("camera", msg, "track"); }
     recompute();
   };
   track.addEventListener("ended", () => mark("相機串流已中斷（被其他 App 取用或系統關閉）— 請點畫面重新開啟"));
@@ -2120,6 +2348,13 @@ function saveScan(decode, grade, acceptance, img, flags, why) {
     profileName: (profileOf()||{}).name || "",
     stage: state.processStage, stageLabel: stageLabelOf(state.processStage),
   });
+  // 拍照條件 log:示範模式的模擬結果不是實拍,不進記錄(否則會汙染誤判率);
+  // 記錄的任何失敗都不可讓 saveScan 與結果頁跟著壞。
+  try {
+    if (!f.simulated) logShot(grade, acceptance, scans[scans.length - 1]);
+    else lastLogShotId = null;
+    refreshLabelUi();
+  } catch (e) { console.warn("[log] 掛鉤失敗", e); }
   updateBadge(); renderList();
 }
 function updateBadge() { const b=$("listBadge"); b.textContent=`清單 ${scans.length}`; b.classList.toggle("zero", scans.length===0); }
@@ -2325,6 +2560,10 @@ $("shutter").onclick = () => {
 };
 $("back").onclick = () => show("capture");
 $("reBtn").onclick = () => show("capture");
+$("labelGood").onclick = () => setHumanLabel("good");
+$("labelBad").onclick = () => setHumanLabel("bad");
+$("logCopyBtn").onclick = copyLog;
+logLoad(); // 讀入既有記錄(fire-and-forget;失敗只影響記錄本身)
 // 拍攝頁快速鍵:操作說明開手冊分頁;檢測結果回最近一次結果頁(無結果時停用)
 $("manualBtn").onclick = () => window.open("manual.html", "_blank");
 $("lastResultBtn").onclick = () => show("result");
@@ -2404,6 +2643,7 @@ function doLogin() {
 // 其中 `shotImg` 是實拍影像、`resultText` 是可整段複製的判定文字,兩者都是
 // 「換一個人登入就能直接讀走」的資料。按鈕停用只擋得住入口,擋不住殘留本身。
 function clearResultView() {
+  lastLogShotId = null; refreshLabelUi(); // 標註只屬於「剛拍的那一張」,結果頁清掉就不可再標
   ["decode", "verdict", "margin", "params", "decodedText"].forEach((id) => {
     const el = $(id); if (el) el.textContent = "";
   });
