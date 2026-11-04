@@ -88,6 +88,10 @@ npm run build       # tsc → dist/(demo 依賴,必跑)
 - **改 `demo/*.html` 沒有自動化測試可覆蓋** → DoD 改為「build 後在本機 8765 測試台實際操作驗證」,並在報告寫明驗了什麼。改 `src/` 仍照通則要附 vitest。
 - **帳密與 tier 是兩檔同步的權威表**,`demo/index.html` 與 `demo/mobile.html` 必須一致:`admin/admin → PAID`、`demo/demo → FREE`。功能是否解鎖一律走 `src/domain/flags.ts` 的 `isEnabled(tier, feature)`,不要在 HTML 裡寫死 tier 判斷或文案。
 
+### context 超過 70%(2026-10-29 Eric 定)
+
+狀態列 ctx 超過 70% 時:停下新工作 → 寫/更新 `handoff.md`(Next Step 逐字寫清空後的後續命令)→ 執行 `python3 "/Volumes/G70Pro/cusor pool/M-Agent/clear_seat.py" request M-Code` 通知 M-Agent,由它用 osascript 送 `/clear` → 清空後讀 handoff 的 Next Step 接著做。不依賴 auto-compact。細節見 `M-Agent/docs/rule20261029-context-70.md`。
+
 ### 已知的坑
 
 - `dist/` 在 `.gitignore` 內但 demo 執行期依賴它 → **改完 `src/` 沒 `npm run build`,demo 頁會空白或 import 失敗**;部署端 `git pull` 後也要重跑 build。
