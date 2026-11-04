@@ -49,6 +49,7 @@ const SHELL = [
   "../dist/erp/client.js",
   "../dist/export/csv.js",
   "../dist/export/shotlog.js",
+  "../dist/export/ngrate.js",
 ];
 
 self.addEventListener("install", (e) => {

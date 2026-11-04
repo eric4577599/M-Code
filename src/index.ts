@@ -19,6 +19,7 @@ export * from "./engines/acceptance.js"; // acceptance evaluation
 export * from "./erp/client.js";
 export * from "./export/csv.js";
 export * from "./export/shotlog.js"; // 拍照條件 log / 錯誤檔(純函式)
+export * from "./export/ngrate.js"; // 誤判率指標(純函式,參數化)
 
 // Seed reference data (C8 rules, C3.2 profiles/policies, D3 flutes)
 export * from "./data/rules.js";
