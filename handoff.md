@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-09-14T23:10+0800
+> 最後更新:2026-11-05T00:30+0800
 
 ## Current Task
 
@@ -21,6 +21,15 @@
 不要再手打三步(A-13)。
 
 > git 與上線狀態一律現查,本檔不記快照:`git log origin/main..HEAD --oneline` / `git status --short`。
+
+## 2026-11-04 新增(先看這裡)
+
+- **已實作未上線**:拍照條件 log + 錯誤檔(目標 C)、ITF-14 直印瓦楞 policy 選填欄位(目標 B)。報告 `report20261104-2.md`,設計 `design20261104-1.md`,測試方案 `testplan20261104-1.md`(27/46 通過,13 阻擋)。
+- **卡住的事**:目標 A(分級帶往 ISO 15416/15415 對齊)與目標 B 的數值,都在等 Eric 從 Surface Pro Laptop Studio 提供 ISO 原文 / GS1 一般規格。**沒有原文不改分級帶、不填數值。**
+- **Eric 裁示**:定位維持相對代理值(`isRelative` 恆 true、無合規文案),但程式邏輯往 ISO 分級帶靠;direct-print policy 欄位可加。
+- `docs/inbox/` 還有兩件未處理:誤判率指標(20261026)、context 70% 條文(20261029,未經 Eric 在對話中確認前不改 CLAUDE.md)。
+- 外部對照網頁(私人 Artifact):https://claude.ai/artifact/A3zHgHhAXjaPiJgaGsNp6T ;同主題之後只更新這個網址。
+- **清空後第一件事**:`git status --short` 與 `git log origin/main..HEAD --oneline` 現查;`npx vitest run --reporter=dot | tail -3`。
 
 ## Done
 
