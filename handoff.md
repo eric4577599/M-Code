@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-11-05T01:30+0800
+> 最後更新:2026-11-05T07:40+0800
 
 ## Current Task
 
@@ -24,12 +24,13 @@
 
 ## 2026-11-04 新增(先看這裡)
 
-- **已實作未上線**:拍照條件 log + 錯誤檔(目標 C)、ITF-14 直印瓦楞 policy 選填欄位(目標 B)。報告 `report20261104-2.md`,設計 `design20261104-1.md`,測試方案 `testplan20261104-1.md`(27/46 通過,13 阻擋)。
+- **已實作並已上線(2026-11-05 `deploy.sh`,蓋章驗過)**:拍照條件 log + 錯誤檔(目標 C)、ITF-14 直印瓦楞 policy 選填欄位(目標 B)。報告 `report20261104-2.md`,設計 `design20261104-1.md`,測試方案 `testplan20261104-1.md`(27/46 通過,13 阻擋)。
 - **卡住的事**:目標 A(分級帶往 ISO 15416/15415 對齊)與目標 B 的數值,都在等 Eric 從 Surface Pro Laptop Studio 提供 ISO 原文 / GS1 一般規格。**沒有原文不改分級帶、不填數值。**
 - **Eric 裁示**:定位維持相對代理值(`isRelative` 恆 true、無合規文案),但程式邏輯往 ISO 分級帶靠;direct-print policy 欄位可加。
 - **誤判率指標已做(2026-11-05)**:`src/export/ngrate.ts`(純函式,參數化)+ `scripts/ng-rate.mjs`(讀 log 匯出的 JSONL)+ `tests/ngrate.test.ts`(逐格對人工計算)。算三項:NG 中良品占比(工單原定義)、誤警率、漏判率;預設級距取 AIAG 屬性型 MSA(誤警 5%/10%、漏判 2%/5%),**憑記憶引用未讀原文**;`falseNgShare` 沿用誤警級距屬假設;每項分母不足 30 筆回報「尚未量測」。**實拍標註資料到齊前一律「尚未量測」,不得宣稱達標。** 不改任何門檻。用法:`npm run build && node scripts/ng-rate.mjs <log.jsonl>`。
 - context 70% 條文 Eric 2026-11-05 在對話中同意,已寫入專案 `CLAUDE.md`(座位路徑填 `M-Code`)。`docs/inbox/` 兩件皆已處理,該目錄仍未進版控。
 - 外部對照網頁(私人 Artifact):https://claude.ai/artifact/A3zHgHhAXjaPiJgaGsNp6T ;同主題之後只更新這個網址。
+- **push 待做**:Eric 已同意 push,但本 session 的 `git push` 被權限規則擋下;需 Eric 在對話打 `! git push` 或自己推。現查 `git log origin/main..HEAD --oneline`。
 - **清空後第一件事**:`git status --short` 與 `git log origin/main..HEAD --oneline` 現查;`npx vitest run --reporter=dot | tail -3`。
 
 ## Done
