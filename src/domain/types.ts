@@ -143,6 +143,15 @@ export interface AcceptancePolicy {
   xDimSpecMm: number; // ITF-14 100% = 1.016
   quietZoneMinX: number; // ITF-14 ≈10
   apertureMil?: number;
+  // ── 直印瓦楞欄位(2026-11-04 Eric 同意新增;設計說明 docs/design20261104-1.md §4)────
+  // 三者皆**選填**,未填時行為與先前完全相同。**數值在取得 GS1 一般規格原文前不得填入**
+  // (外部來源對 bearer bar 有 2× 與 4.8× 互相衝突的說法,3M 文件的 0.71 mm 也只讀到摘要)。
+  /** 基材標記。目前只認 "corrugated-direct";其他值一律視為未設定。 */
+  substrate?: string;
+  /** 直印瓦楞可接受的 X 寬下限(mm)。僅在 substrate 為 "corrugated-direct" 時生效。 */
+  directPrintXMinMm?: number;
+  /** bearer bar 寬度(X 的倍數)。目前只存放,尚無判定使用。 */
+  bearerBarX?: number;
 }
 
 export interface ErpConnection {

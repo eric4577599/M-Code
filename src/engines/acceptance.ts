@@ -28,3 +28,29 @@ export function evaluateAcceptance(
     marginScore: grade.overallScore - letterToBandCut(policy.requiredGrade),
   };
 }
+
+/** X 寬下限判定結果。N/A = policy 沒有可用的下限,不做判定。 */
+export type DirectPrintXVerdict = "OK" | "BELOW" | "N/A";
+
+/**
+ * 直印瓦楞的 X 寬下限判定(設計說明 §4)。
+ * 輸入:policy 與量到的 X 寬(mm);輸出 OK / BELOW / N/A。
+ *
+ * 只有同時滿足才判定,其餘一律 N/A(不丟例外、不靜默採用壞值):
+ *   - policy.substrate === "corrugated-direct"
+ *   - policy.directPrintXMinMm 是有限且 > 0 的數字
+ * 量測值不是有限正數時回 N/A —— 量不到不能當作「達標」也不能當作「不足」。
+ * 等於下限算 OK(下限是「可接受的最小值」)。
+ */
+export function checkDirectPrintXDim(
+  policy: AcceptancePolicy,
+  measuredXMm: number | null | undefined,
+): DirectPrintXVerdict {
+  if (policy.substrate !== "corrugated-direct") return "N/A";
+  const floor = policy.directPrintXMinMm;
+  if (typeof floor !== "number" || !Number.isFinite(floor) || floor <= 0) return "N/A";
+  if (typeof measuredXMm !== "number" || !Number.isFinite(measuredXMm) || measuredXMm <= 0) {
+    return "N/A";
+  }
+  return measuredXMm >= floor ? "OK" : "BELOW";
+}
