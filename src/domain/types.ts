@@ -144,14 +144,21 @@ export interface AcceptancePolicy {
   quietZoneMinX: number; // ITF-14 ≈10
   apertureMil?: number;
   // ── 直印瓦楞欄位(2026-11-04 Eric 同意新增;設計說明 docs/design20261104-1.md §4)────
-  // 三者皆**選填**,未填時行為與先前完全相同。**數值在取得 GS1 一般規格原文前不得填入**
-  // (外部來源對 bearer bar 有 2× 與 4.8× 互相衝突的說法,3M 文件的 0.71 mm 也只讀到摘要)。
+  // 皆**選填**,未填時行為與先前完全相同。數值出處 GS1 General Specifications Release 16.0
+  // (2026-11-05 Eric 取得原文並同意採用),見 `src/data/policies.ts` 的具名常數與
+  // `plateDirectPrintPolicy`。原文語意:這些規則**只針對需版(plate-based)製程**。
   /** 基材標記。目前只認 "corrugated-direct";其他值一律視為未設定。 */
   substrate?: string;
-  /** 直印瓦楞可接受的 X 寬下限(mm)。僅在 substrate 為 "corrugated-direct" 時生效。 */
+  /** 直印瓦楞可接受的 X 寬下限(mm)。僅在 substrate 為 "corrugated-direct" 時生效。
+   *  GS1:X < 0.635 mm 的 ITF-14「SHOULD NOT」以傳統(需版)製程直印瓦楞 —— 不適用數位/噴墨。 */
   directPrintXMinMm?: number;
-  /** bearer bar 寬度(X 的倍數)。目前只存放,尚無判定使用。 */
+  /** bearer bar 寬度,**無版製程**用:窄條寬的倍數(GS1 §5.3.2.4:至少 2 倍)。
+   *  目前只存放,尚無判定使用。需版製程是絕對值,見 bearerBarPlateMm —— 兩者是兩種製程各自的值,
+   *  不是互相衝突的說法。 */
   bearerBarX?: number;
+  /** bearer bar 厚度,**需版製程**用:固定毫米數(GS1 §5.3.2.4:4.83 mm,須包住含靜區的整個符號)。
+   *  這是絕對值,不是 X 的倍數,所以不能塞進 bearerBarX。目前只存放,尚無判定使用。 */
+  bearerBarPlateMm?: number;
 }
 
 export interface ErpConnection {

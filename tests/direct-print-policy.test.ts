@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { SEED_ACCEPTANCE_POLICIES } from "../src/data/policies.js";
+import {
+  SEED_ACCEPTANCE_POLICIES, plateDirectPrintPolicy, GS1_ITF14_PLATE_DIRECT_X_MIN_MM,
+  GS1_BEARER_BAR_PLATE_MM, GS1_BEARER_BAR_PLATELESS_MIN_X,
+} from "../src/data/policies.js";
 import { checkDirectPrintXDim, evaluateAcceptance } from "../src/engines/acceptance.js";
 import { buildGradeResult } from "../src/engines/grade.js";
 import type { AcceptancePolicy } from "../src/domain/types.js";
@@ -67,13 +70,47 @@ describe("T2-B5 substrate 未知值視為未設定", () => {
   });
 });
 
-describe("T2-B6 數值在取得 GS1 原文前不得填入", () => {
-  it("所有 seed policy 的三個新欄位皆未填", () => {
+describe("T2-B6 seed policy 不帶直印欄位;數值只存在具名常數(2026-11-05 取得 GS1 原文後)", () => {
+  it("所有 seed policy 的直印欄位皆未填 —— 行為與現行相同", () => {
     for (const p of SEED_ACCEPTANCE_POLICIES) {
       expect(p.substrate, `${p.id}.substrate`).toBeUndefined();
       expect(p.directPrintXMinMm, `${p.id}.directPrintXMinMm`).toBeUndefined();
       expect(p.bearerBarX, `${p.id}.bearerBarX`).toBeUndefined();
+      expect(p.bearerBarPlateMm, `${p.id}.bearerBarPlateMm`).toBeUndefined();
     }
+  });
+  it("三個 GS1 常數逐項對原文(Release 16.0:p.263 腳註、§5.3.2.4)", () => {
+    expect(GS1_ITF14_PLATE_DIRECT_X_MIN_MM).toBe(0.635);
+    expect(GS1_BEARER_BAR_PLATE_MM).toBe(4.83); // 需版:絕對毫米,不是 X 的倍數
+    expect(GS1_BEARER_BAR_PLATELESS_MIN_X).toBe(2); // 無版:窄條寬倍數
+  });
+});
+
+describe("T2-B8 plateDirectPrintPolicy(需版直印)", () => {
+  const itf = SEED_ACCEPTANCE_POLICIES.find((p) => p.symbology === "ITF14")!;
+  const p = plateDirectPrintPolicy(itf);
+  it("X 寬邊界:0.634 → BELOW、0.635 → OK、0.636 → OK", () => {
+    expect(checkDirectPrintXDim(p, 0.634)).toBe("BELOW");
+    expect(checkDirectPrintXDim(p, 0.635)).toBe("OK");
+    expect(checkDirectPrintXDim(p, 0.636)).toBe("OK");
+  });
+  it("量不到 → N/A(沿用既有語意)", () => {
+    expect(checkDirectPrintXDim(p, null)).toBe("N/A");
+  });
+  it("不改動 base;requiredGrade / X 寬規格 / 靜區一個字都不動(§6.1 凍結)", () => {
+    expect(itf.substrate).toBeUndefined();
+    expect(p.requiredGrade).toBe(itf.requiredGrade);
+    expect(p.xDimSpecMm).toBe(itf.xDimSpecMm);
+    expect(p.quietZoneMinX).toBe(itf.quietZoneMinX);
+    expect(p.bearerBarPlateMm).toBe(4.83);
+    expect(p.bearerBarX).toBeUndefined(); // 需版用絕對值,不填倍數
+  });
+  it("對等級判定沒有影響", () => {
+    const grade = buildGradeResult("ITF14", {
+      photometric: { rLight: 0.8, rDark: 0.1, rDarkMin: 0.05, edgeContrasts: [0.6, 0.65] },
+      geometric: { maxWidthDeviation: 0.1, tolerance: 0.5, maxElementReflectanceNonUniformity: 0.1 },
+    });
+    expect(evaluateAcceptance(grade, p)).toEqual(evaluateAcceptance(grade, itf));
   });
 });
 

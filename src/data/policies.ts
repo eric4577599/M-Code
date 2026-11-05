@@ -54,3 +54,30 @@ export const SEED_ACCEPTANCE_POLICIES: AcceptancePolicy[] = [
     quietZoneMinX: 0,
   },
 ];
+
+// ── 直印瓦楞(需版製程)的 GS1 數值 ─────────────────────────────────────────
+// 出處:GS1 General Specifications Release 16.0(2016-01)。**只適用需版(plate-based)製程**;
+// 數位/噴墨等無版直印不在這些規則內,不要對它們套用本 helper。
+// seed policy 本身**仍不填**這三個欄位(行為與現行相同);要用直印判定的呼叫端明確走
+// `plateDirectPrintPolicy`,由此可 grep 到所有使用者。
+/** X 寬下限(mm)。p.263 腳註:低於此值的 ITF-14 SHOULD NOT 以傳統(需版)製程直印瓦楞。 */
+export const GS1_ITF14_PLATE_DIRECT_X_MIN_MM = 0.635;
+/** 需版製程的 bearer bar 固定厚度(mm)。§5.3.2.4。 */
+export const GS1_BEARER_BAR_PLATE_MM = 4.83;
+/** 無版製程的 bearer bar 下限(窄條寬倍數)。§5.3.2.4。 */
+export const GS1_BEARER_BAR_PLATELESS_MIN_X = 2;
+
+/**
+ * 把一筆 policy 轉成「需版直印瓦楞」版本。輸入:base policy;輸出:新物件(不改動 base)。
+ * 只加直印欄位,**requiredGrade / xDimSpecMm / quietZoneMinX 一個字都不動**(§6.1 凍結)。
+ * GS1 對直印瓦楞另有較低的最低驗收(0.5/20/660)—— 那是門檻決策,未經 Eric 裁示與實拍對照,
+ * 這裡刻意不採用(見 docs/design20261105-1.md)。
+ */
+export function plateDirectPrintPolicy(base: AcceptancePolicy): AcceptancePolicy {
+  return {
+    ...base,
+    substrate: "corrugated-direct",
+    directPrintXMinMm: GS1_ITF14_PLATE_DIRECT_X_MIN_MM,
+    bearerBarPlateMm: GS1_BEARER_BAR_PLATE_MM,
+  };
+}
