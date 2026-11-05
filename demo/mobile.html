@@ -428,6 +428,7 @@
       <div class="fld"><label>品名</label><input type="text" id="f-product" placeholder="例：早餐脆片 500g 外箱"></div>
       <div class="fld"><label>工單號</label><input type="text" id="f-workorder" placeholder="例：WO-2406A-7741"></div>
       <div class="fld"><label>掃描總數</label><input type="text" id="f-total" readonly></div>
+      <div id="listPersistNote" hidden style="font-size:12px;color:#92400e;margin:6px 0"></div>
       <div id="listItems"></div>
       <button class="exBtn pdf" id="exportPdfBtn">🖨 輸出 PDF</button>
       <button class="exBtn xls" id="exportXlsBtn">⬇ 輸出 Excel</button>
@@ -496,6 +497,7 @@ import {
   chooseCaptureFrame, FRAME_CHOICE,
   barBandExtent,
   summarizeShotGate,
+  SCAN_STORE_KEY, restoreScans, persistScans,
 } from "./imgproc.js";
 
 const $ = (id) => document.getElementById(id);
@@ -2356,7 +2358,7 @@ function saveScan(decode, grade, acceptance, img, flags, why) {
     else lastLogShotId = null;
     refreshLabelUi();
   } catch (e) { console.warn("[log] 掛鉤失敗", e); }
-  updateBadge(); renderList();
+  updateBadge(); renderList(); persistList();
 }
 function updateBadge() { const b=$("listBadge"); b.textContent=`清單 ${scans.length}`; b.classList.toggle("zero", scans.length===0); }
 function renderList() {
@@ -2505,7 +2507,43 @@ function exportXls() {
   a.download=`檢驗報告_${safeFileName($("f-workorder").value.trim())||"export"}.xls`; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href), 1000); // 下載觸發後釋放物件 URL
 }
-function clearList() { if(!scans.length) return; scans.length=0; updateBadge(); renderList(); }
+function clearList() { if(!scans.length) return; scans.length=0; updateBadge(); renderList(); persistList(); }
+
+// ── 掃描清單持久化(稽核 C,2026-11-05 Eric 裁示 localStorage)──────────────────
+// 純邏輯在 imgproc.js(serializeScans / restoreScans / persistScans,有 vitest);此處只接線。
+// 與 A-12 的關係:存下來的資料帶擁有者帳號 —— 同帳號重整 / 重登才還原,換帳號登入即丟棄,
+// 登出即清除。否則修了「重整就消失」會讓 A-12 惡化成「永久殘留」。
+function sessionUser() { const s = loadSession(); return s && s.user; }
+function persistList() {
+  const u = sessionUser();
+  if (!currentTier || !u) return; // 未登入(含登出途中)不寫,避免把清掉的資料又寫回去
+  const header = { customer: $("f-customer").value, product: $("f-product").value,
+                   workorder: $("f-workorder").value, expectedGtin: $("f-expected-gtin").value };
+  let r;
+  try { r = persistScans(localStorage, u, scans, header); } catch (e) { r = { ok: false, dropped: true }; }
+  const note = $("listPersistNote");
+  note.hidden = r.ok && !r.dropped;
+  // 存不進去不可靜默:使用者以為有留,重整後才發現沒有,就是稽核 C 本來要解的事
+  if (!note.hidden) note.textContent = r.ok
+    ? "⚠ 儲存空間不足，已存結果但略去縮圖；請盡快匯出報告。"
+    : "⚠ 無法儲存清單，重新整理後會消失；請盡快匯出報告。";
+}
+function clearStoredList() { try { localStorage.removeItem(SCAN_STORE_KEY); } catch (e) {} }
+// 進 app 時還原。擁有者不符 / 壞資料 → 直接刪除(不留給下一個帳號)。
+function restoreList(user) {
+  let raw = null;
+  try { raw = localStorage.getItem(SCAN_STORE_KEY); } catch (e) { return; }
+  if (!raw) return;
+  const r = restoreScans(raw, user);
+  if (!r) { clearStoredList(); return; }
+  scans.length = 0; scans.push(...r.scans);
+  const h = r.header;
+  $("f-customer").value = h.customer || ""; $("f-product").value = h.product || "";
+  $("f-workorder").value = h.workorder || ""; $("f-expected-gtin").value = h.expectedGtin || "";
+  lastExpectedGtin = $("f-expected-gtin").value.trim();
+  updateBadge(); renderList();
+}
+["f-customer", "f-product", "f-workorder", "f-expected-gtin"].forEach((id) => $(id).addEventListener("input", persistList));
 
 // ── 燈箱:輸入清單索引,放大顯示該筆掃描原圖與摘要;點任意處關閉 ──
 function openLightbox(i) {
@@ -2630,6 +2668,7 @@ function enterApp(s) {
   $("loginErr").textContent = ""; $("loginPass").value = "";
   $("loginOverlay").classList.add("hidden");
   applyTier();
+  restoreList(s.user); // 稽核 C:同帳號還原清單與表頭;他人資料在此被丟棄
   initCamera(false); // 進入 app 才開相機(iOS 若要求手勢,點畫面時補試)
 }
 function doLogin() {
@@ -2665,6 +2704,7 @@ function clearResultView() {
 // 那段講的是「有人可以假裝成 admin」,這裡是登出沒清資料,後端驗證再完美也一樣殘留。
 function doLogout() {
   clearSessionStore(); currentTier = null;
+  clearStoredList(); // 稽核 C × A-12:登出連持久化的那份一起清
   stopCamera(); // 釋放相機並停即時量測,避免登出後鏡頭仍開、背景每 500ms 續算
   clearList(); // 掃描清單(含縮圖與解碼字串)——A-12 的主體
   // 表頭三欄會被寫進 PDF / Excel 報告與 CSV,屬同一批殘留資料;

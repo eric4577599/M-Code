@@ -2410,3 +2410,52 @@ export function summarizeShotGate(input) {
   // 理論上不會走到(checks 為空):寧可輸出保守字樣,也不要回傳空字串讓報告該欄憑空消失
   return parts.length ? parts.join(" · ") : "未量測";
 }
+
+// ─── 掃描清單持久化(稽核 C,2026-11-05 Eric 裁示用 localStorage)─────────────────
+// 與 A-12 是一體兩面:C 是「該留的沒留」,A-12 是「該清的沒清」。存下來之後,
+// 擁有者(user)必須跟著存,否則共用手機上 A 的清單會被 B 讀到。規則:
+//   ① 只有「同一個帳號」重新登入 / 重整才還原;② 換帳號登入 → 舊資料直接丟棄;③ 登出 → 清掉。
+export const SCAN_STORE_KEY = "mcode.scans.v1";
+export const SCAN_STORE_VERSION = 1;
+
+// 輸入:擁有者帳號、掃描陣列、表頭欄位;輸出:可 JSON.stringify 的物件。
+// ts(Date)轉 ISO 字串。其餘欄位原樣(JSON 會把 NaN/Infinity 變 null,屬可接受:存的是結論)。
+export function serializeScans(user, scans, header) {
+  return {
+    v: SCAN_STORE_VERSION, user: String(user), savedAt: new Date().toISOString(),
+    header: header || {},
+    scans: scans.map((s) => ({ ...s, ts: s.ts instanceof Date ? s.ts.toISOString() : s.ts })),
+  };
+}
+
+// 輸入:localStorage 讀出的原始字串、目前登入帳號;輸出:{ scans, header } 或 null。
+// 回 null 的情形:無資料 / 壞 JSON / 版本不符 / 擁有者不同 / 結構不對。
+// 呼叫端遇到 null 且存在原始字串時,應清掉它(擁有者不同的資料不可留著)。
+export function restoreScans(raw, user) {
+  if (!raw) return null;
+  let o;
+  try { o = JSON.parse(raw); } catch (e) { return null; }
+  if (!o || o.v !== SCAN_STORE_VERSION || o.user !== String(user) || !Array.isArray(o.scans)) return null;
+  const scans = [];
+  for (const s of o.scans) {
+    if (!s || typeof s !== "object") return null; // 結構壞掉就整批不信,不做部分還原
+    const ts = new Date(s.ts);
+    if (isNaN(ts.getTime())) return null;
+    scans.push({ ...s, ts });
+  }
+  return { scans, header: (o.header && typeof o.header === "object") ? o.header : {} };
+}
+
+// 輸入:同 serializeScans,外加 storage(含 setItem 的物件,注入以利測試)。
+// 輸出:{ ok, dropped }。配額爆掉時依序退讓:先丟縮圖(img)再試,仍失敗才回 ok=false。
+// dropped=true 代表已存但沒有縮圖,呼叫端要讓使用者看得到(不可靜默)。
+export function persistScans(storage, user, scans, header) {
+  const write = (list) => {
+    try { storage.setItem(SCAN_STORE_KEY, JSON.stringify(serializeScans(user, list, header))); return true; }
+    catch (e) { return false; }
+  };
+  if (write(scans)) return { ok: true, dropped: false };
+  const slim = scans.map((s) => ({ ...s, img: { type: "svg", data: "" } }));
+  if (write(slim)) return { ok: true, dropped: true };
+  return { ok: false, dropped: true };
+}
