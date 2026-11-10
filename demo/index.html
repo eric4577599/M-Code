@@ -219,6 +219,7 @@
     <div class="chiprow"><span class="lbl">製程環節</span><span id="chips-stage"></span></div>
     <div class="chiprow"><span class="lbl">工法 / 楞型</span><span id="chips-profile"></span></div>
     <div class="chiprow"><span class="lbl">符號別</span><span id="chips-symbology"></span></div>
+    <div class="chiprow" title="高標=現行門檻(預設);標準=GS1 規格表列的最低等級(目前僅 GS1-128 由 B 降為 C)。皆為相對代理值"><span class="lbl">允收標準</span><span id="chips-std"></span></div>
   </div>
   <div class="captureGrid">
     <div class="hud">
@@ -380,6 +381,7 @@ import {
   evaluateGate, runDecode, buildMeasurement, buildGradeResult,
   evaluateDiagnosis, evaluateAcceptance, toCsvRow,
   SEED_DIAGNOSIS_RULES, SEED_SUBSTRATE_PROFILES, SEED_ACCEPTANCE_POLICIES,
+  policyForProfile, ACCEPTANCE_PROFILES, DEFAULT_ACCEPTANCE_PROFILE,
   scoreToLetter, letterToNominalScore,
   isEnabled,
 } from "../dist/index.js";
@@ -400,7 +402,11 @@ const SAMPLE_DATA = {
   QR:"https://trace.acme/wo/2406A-7741", DATAMATRIX:"DM:LOT2406A-7741/S00231",
 };
 
+// 允收標準檔位(高標 / 標準),與 mobile.html 共用同一個 localStorage 鍵;預設高標。
+const STD_KEY = "mcode.acceptanceProfile";
+const loadStdProfile = () => { try { const v = localStorage.getItem(STD_KEY); return ACCEPTANCE_PROFILES.some(([id]) => id === v) ? v : DEFAULT_ACCEPTANCE_PROFILE; } catch (e) { return DEFAULT_ACCEPTANCE_PROFILE; } };
 const state = {
+  stdProfile: loadStdProfile(),
   symbology: "ITF14",
   profileId: SEED_SUBSTRATE_PROFILES[0].id,
   processStage: "OUTBOUND",
@@ -420,7 +426,7 @@ const profileOf = (id) => SEED_SUBSTRATE_PROFILES.find(p => p.id === id);
 // 符號別,而那個符號別的允收標準正靜悄悄地由這一行 HTML 決定。
 // (AUTO 例外 —— 那是「還沒掃到」的顯示狀態,掃描當下一定已由 resolveSym 收斂。)
 const policyOf = () => {
-  const p = SEED_ACCEPTANCE_POLICIES.find(x => x.symbology === state.symbology);
+  const p = policyForProfile(state.symbology, state.stdProfile);
   if (p) return p;
   if (state.symbology !== "AUTO")
     console.error(`找不到 ${state.symbology} 的允收 policy —— 請補進 src/data/policies.ts,不要在此處決定門檻`);
@@ -471,6 +477,7 @@ function renderChips() {
   $("chips-stage").innerHTML = chipHtml(STAGES, state.processStage);
   $("chips-profile").innerHTML = chipHtml(SEED_SUBSTRATE_PROFILES.map(p=>[p.id,p.name]), state.profileId);
   $("chips-symbology").innerHTML = chipHtml(SYMS, state.symbology);
+  $("chips-std").innerHTML = chipHtml(ACCEPTANCE_PROFILES, state.stdProfile);
 }
 function bindChips(containerId, key, after) {
   $(containerId).addEventListener("click", (e) => {
@@ -836,6 +843,7 @@ $("modeSwitch").addEventListener("click", () => {
 bindChips("chips-stage","processStage");
 bindChips("chips-profile","profileId");
 bindChips("chips-symbology","symbology", syncSymbol);
+bindChips("chips-std","stdProfile", () => { try { localStorage.setItem(STD_KEY, state.stdProfile); } catch (e) {} });
 $("trend-stage").addEventListener("click",(e)=>{ const c=e.target.closest(".chip"); if(c){ trendStage=c.dataset.v; renderTrend(); }});
 $("trend-profile").addEventListener("click",(e)=>{ const c=e.target.closest(".chip"); if(c){ trendProfileId=c.dataset.v; renderTrend(); }});
 // shutter & actions
