@@ -81,3 +81,44 @@ export function plateDirectPrintPolicy(base: AcceptancePolicy): AcceptancePolicy
     bearerBarPlateMm: GS1_BEARER_BAR_PLATE_MM,
   };
 }
+
+// ── 允收標準檔位:高標 / 標準(2026-11-10 Eric 指示「設高標、標準可切換」)──────────
+// 高標 = SEED_ACCEPTANCE_POLICIES 原樣(預設,§6.1 凍結的現行門檻,一個字母沒動)。
+// 標準 = 把 GS1 一般規格 Release 16(pdf p.263 驗收表)明列、且與高標不同的符號別降到該表等級:
+//   目前只有 GS1-128(高標 B → 標準 C,表列 1.5/10/660)。
+// **ITF-14 在標準檔位刻意不降到 D**:GS1 對直印瓦楞的 D 屬牛皮紙門檻決策(Eric 選 C,先蒐集實拍),
+// 未決前不採用(見 docs/design20261105-1.md)。QR / DM / Code128 GS1 表無對應列,維持原值。
+// 所有等級仍為相對代理值,檔位名稱不代表任何合規認證。
+export type AcceptanceProfileId = "high" | "standard";
+
+/** 兩個檔位的顯示名稱與預設檔位。 */
+export const ACCEPTANCE_PROFILES: ReadonlyArray<readonly [AcceptanceProfileId, string]> = [
+  ["high", "高標"],
+  ["standard", "標準"],
+];
+export const DEFAULT_ACCEPTANCE_PROFILE: AcceptanceProfileId = "high";
+
+/** 標準檔位相對高標的等級覆寫(只列有 GS1 表依據的符號別)。 */
+const STANDARD_GRADE_OVERRIDES: Readonly<Partial<Record<AcceptancePolicy["symbology"], AcceptancePolicy["requiredGrade"]>>> = {
+  GS1_128: "C",
+};
+
+/**
+ * 取某檔位的 policy 清單。輸入:檔位(未知值一律回高標);輸出:新陣列,不改動 seed。
+ * 標準檔位被覆寫的 policy 其 id 加 `-standard` 後綴,方便 log 區分。
+ */
+export function acceptancePoliciesFor(profile: AcceptanceProfileId | string | null | undefined): AcceptancePolicy[] {
+  if (profile !== "standard") return SEED_ACCEPTANCE_POLICIES.map((p) => ({ ...p }));
+  return SEED_ACCEPTANCE_POLICIES.map((p) => {
+    const g = STANDARD_GRADE_OVERRIDES[p.symbology];
+    return g && g !== p.requiredGrade ? { ...p, id: `${p.id}-standard`, requiredGrade: g } : { ...p };
+  });
+}
+
+/** 取某符號別在某檔位的 policy;找不到回 undefined(呼叫端負責缺漏告警)。 */
+export function policyForProfile(
+  symbology: AcceptancePolicy["symbology"],
+  profile: AcceptanceProfileId | string | null | undefined,
+): AcceptancePolicy | undefined {
+  return acceptancePoliciesFor(profile).find((p) => p.symbology === symbology);
+}

@@ -326,6 +326,7 @@
   <div class="view active" id="v-capture">
     <div class="selrow">
       <div class="seg" id="seg-stage"></div>
+      <div class="seg" id="seg-std" title="允收標準檔位:高標=現行門檻(預設);標準=GS1 規格表列的最低等級(目前僅 GS1-128 由 B 降為 C)。皆為相對代理值"></div>
     </div>
     <div class="profSel"><select id="profile"></select></div>
 
@@ -480,6 +481,7 @@
 import {
   evaluateGate, runDecode, buildGradeResult, evaluateAcceptance,
   SEED_SUBSTRATE_PROFILES, SEED_ACCEPTANCE_POLICIES,
+  policyForProfile, ACCEPTANCE_PROFILES, DEFAULT_ACCEPTANCE_PROFILE,
   isEnabled,
   buildShotRecord, buildErrorRecord, appendWithCap, withHumanLabel, toJSONL, makeSessionId,
   SHOT_LOG_MAX, ERROR_LOG_MAX,
@@ -725,7 +727,11 @@ const SAMPLE_DATA = {
   QR:"https://trace.acme/wo/2406A-7741", DATAMATRIX:"DM:LOT2406A-7741/S00231",
 };
 
+// 允收標準檔位(高標 / 標準)。預設高標;選擇存 localStorage,讀寫失敗不影響使用。
+const STD_KEY = "mcode.acceptanceProfile";
+const loadStdProfile = () => { try { const v = localStorage.getItem(STD_KEY); return ACCEPTANCE_PROFILES.some(([id]) => id === v) ? v : DEFAULT_ACCEPTANCE_PROFILE; } catch (e) { return DEFAULT_ACCEPTANCE_PROFILE; } };
 const state = {
+  stdProfile: loadStdProfile(),
   symbology:"AUTO", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
   // 只留 decoded(情境模擬要「掃到」的內容)。原本還有一個 expected,而它唯一的來源
   // 就是 decoded / zx.text —— 拿自己比自己,比對結果結構上恆為 true(稽核 A-02)。
@@ -743,7 +749,7 @@ const profileOf = () => SEED_SUBSTRATE_PROFILES.find(p => p.id === state.profile
 // 符號別,而那個符號別的允收標準正靜悄悄地由這一行 HTML 決定。
 // (AUTO 例外 —— 那是「還沒掃到」的顯示狀態,掃描當下一定已由 resolveSym 收斂。)
 const policyOf = () => {
-  const p = SEED_ACCEPTANCE_POLICIES.find(x => x.symbology === state.symbology);
+  const p = policyForProfile(state.symbology, state.stdProfile);
   if (p) return p;
   if (state.symbology !== "AUTO")
     console.error(`找不到 ${state.symbology} 的允收 policy —— 請補進 src/data/policies.ts,不要在此處決定門檻`);
@@ -772,12 +778,15 @@ function seg(el, items, key, after) {
 }
 function initSelectors() {
   seg($("seg-stage"), STAGES, "processStage");
+  seg($("seg-std"), ACCEPTANCE_PROFILES, "stdProfile", persistStdProfile);
   $("profile").innerHTML = SEED_SUBSTRATE_PROFILES.map(p => `<option value="${p.id}">${p.name}</option>`).join("");
   $("profile").value = state.profileId;
   $("profile").onchange = () => { state.profileId = $("profile").value; recompute(); };
 }
+function persistStdProfile() { try { localStorage.setItem(STD_KEY, state.stdProfile); } catch (e) {} }
 function render() {
   seg($("seg-stage"), STAGES, "processStage");
+  seg($("seg-std"), ACCEPTANCE_PROFILES, "stdProfile", persistStdProfile);
 }
 
 // HUD symbol mock: 1D bars or 2D matrix
