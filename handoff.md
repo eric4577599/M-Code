@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-11-05T19:00+0800
+> 最後更新:2026-11-10T10:00+0800
 
 ## Current Task
 
@@ -21,6 +21,17 @@
 不要再手打三步(A-13)。
 
 > git 與上線狀態一律現查,本檔不記快照:`git log origin/main..HEAD --oneline` / `git status --short`。
+
+## 2026-11-10 新增(先看這裡,蓋過下面 11-04 節中過時的待決項)
+
+- **允收標準檔位「高標 / 標準」已實作並上線**(`report20261110-1.md`):高標 = seed 原樣(預設,門檻未動);標準 = 只有 GS1-128 B→C(GS1 R16 pdf p.263)。**ITF-14 標準檔位仍 C、不降 D**(牛皮紙決策 Eric 選 C,等實拍)。API:`acceptancePoliciesFor` / `policyForProfile`(`src/data/policies.ts`);兩個 demo 頁都有切換,共用 localStorage 鍵 `mcode.acceptanceProfile`。**切換不改已顯示結果,要重拍。** 手機版實掃 GS1-128 的門檻顯示未驗(需相機)。
+- **GS1-128 高標 B 的出處已查**:規劃書 `master_v1.md:36,338` 的「客戶端常見要求」代表值,非 GS1 下限,不得對外說成 GS1 要求。
+- **實拍規格已寫**:`docs/spec20261108-1.md`(同份在 `M-Agent/docs/inbox/20261106-shotspec-M-Code.md`)。Eric 裁示:基材與機型用外部 CSV 以 shot `id` 對應;良/不良**目視**判定;各裝置分開累積。**尚缺:Eric 寫的「何謂不良」一頁文字標準、實拍資料本身。**
+- **Eric 11-06 裁示**:實拍可用其他裝置(不再綁 iPhone 14 Pro);桌面版 index.html 持久化**不用**;`docs/inbox/` **先不 commit**(Eric 尚未決定);Flexo 去重已做(本機 `Flexo project/` 已進垃圾桶,Drive `Flexo-project/` 為保留份)。
+- **Flexo 資料夾讀取已回覆**(`M-Agent/docs/inbox/20261109-reply-M-Code-flexo-folder.md`)。2014 GS1 Taiwan 簡報 p.31 旁證 ITF-14 X>0.635 → D。
+- **清空後第一件事**:`git status --short`、`git log origin/main..HEAD --oneline`(本節的 commit 尚未 push,等 Eric)、`npx vitest run --reporter=dot | tail -3`。
+- **等 Eric**:實拍資料與「不良」文字標準 → 標註基材後跑 `scripts/ng-rate.mjs` → 決定牛皮紙 A/B;是否 push;`docs/inbox/` 是否進版控;GS1-128 標準檔位是否該成為預設(目前不是)。
+- **工單 T-20261104-09**:11-04 已交;M-Agent 若要 11/7 再更新一版需確認範圍(我未重做)。
 
 ## 2026-11-04 新增(先看這裡)
 
