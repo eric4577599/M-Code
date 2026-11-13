@@ -27,7 +27,7 @@
 - **T-20261112-03 已交並歸檔**:實拍清單 `M-Agent/docs/inbox/20261112-photolist-M-Code.md`;拍法手冊 artifact https://claude.ai/artifact/2h9sZRZdVi2fcxMapZfQMv(之後只更新這個網址,內容與 `docs/spec20261108-1.md` §3 同步)。
 - **Eric 11-12 裁示**:光線分組(自然光 / 室內光)與傾斜 10° 小組**都保留**,仍屬 P2 選拍;P0 是牛皮紙直印良/不良各 ≥30。
 - **GS1-128 標準檔位維持非預設**(我的建議,Eric 說「依建議」)。
-- **仍等 Eric**:拍攝裝置 / 日期 / 地點 / 到場者(清單已列選項與推薦);「何謂不良」一頁文字標準;是否 push;`docs/inbox/` 是否進版控。實拍資料到手 → 標註基材 → `scripts/ng-rate.mjs` → 決定牛皮紙 A/B。
+- **仍等 Eric**:拍攝裝置 / 日期 / 地點 / 到場者(清單已列選項與推薦);「何謂不良」一頁文字標準;`docs/inbox/` 是否進版控。實拍資料到手 → 標註基材 → `scripts/ng-rate.mjs` → 決定牛皮紙 A/B。
 - 沒有可獨立往前做的項目,不要自行改門檻。現況一律現查(`git log origin/main..HEAD --oneline`、`npx vitest run --reporter=dot | tail -3`)。
 
 ## 2026-11-10 新增(蓋過下面 11-04 節中過時的待決項)
@@ -38,7 +38,7 @@
 - **Eric 11-06 裁示**:實拍可用其他裝置(不再綁 iPhone 14 Pro);桌面版 index.html 持久化**不用**;`docs/inbox/` **先不 commit**(Eric 尚未決定);Flexo 去重已做(本機 `Flexo project/` 已進垃圾桶,Drive `Flexo-project/` 為保留份)。
 - **Flexo 資料夾讀取已回覆**(`M-Agent/docs/inbox/20261109-reply-M-Code-flexo-folder.md`)。2014 GS1 Taiwan 簡報 p.31 旁證 ITF-14 X>0.635 → D。
 - **清空後第一件事**:`git status --short`、`git log origin/main..HEAD --oneline`(本節的 commit 尚未 push,等 Eric)、`npx vitest run --reporter=dot | tail -3`。
-- **等 Eric**:實拍資料與「不良」文字標準 → 標註基材後跑 `scripts/ng-rate.mjs` → 決定牛皮紙 A/B;是否 push;`docs/inbox/` 是否進版控;GS1-128 標準檔位是否該成為預設(目前不是)。
+- **等 Eric**:實拍資料與「不良」文字標準 → 標註基材後跑 `scripts/ng-rate.mjs` → 決定牛皮紙 A/B;`docs/inbox/` 是否進版控;GS1-128 標準檔位是否該成為預設(目前不是)。
 - **工單 T-20261104-09**:11-04 已交;M-Agent 若要 11/7 再更新一版需確認範圍(我未重做)。
 
 ## 2026-11-04 新增(先看這裡)
