@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-11-10T10:00+0800
+> 最後更新:2026-11-13
 
 ## Current Task
 
@@ -22,7 +22,15 @@
 
 > git 與上線狀態一律現查,本檔不記快照:`git log origin/main..HEAD --oneline` / `git status --short`。
 
-## 2026-11-10 新增(先看這裡,蓋過下面 11-04 節中過時的待決項)
+## 2026-11-13 新增(最新,先看這裡)
+
+- **T-20261112-03 已交並歸檔**:實拍清單 `M-Agent/docs/inbox/20261112-photolist-M-Code.md`;拍法手冊 artifact https://claude.ai/artifact/2h9sZRZdVi2fcxMapZfQMv(之後只更新這個網址,內容與 `docs/spec20261108-1.md` §3 同步)。
+- **Eric 11-12 裁示**:光線分組(自然光 / 室內光)與傾斜 10° 小組**都保留**,仍屬 P2 選拍;P0 是牛皮紙直印良/不良各 ≥30。
+- **GS1-128 標準檔位維持非預設**(我的建議,Eric 說「依建議」)。
+- **仍等 Eric**:拍攝裝置 / 日期 / 地點 / 到場者(清單已列選項與推薦);「何謂不良」一頁文字標準;是否 push;`docs/inbox/` 是否進版控。實拍資料到手 → 標註基材 → `scripts/ng-rate.mjs` → 決定牛皮紙 A/B。
+- 沒有可獨立往前做的項目,不要自行改門檻。現況一律現查(`git log origin/main..HEAD --oneline`、`npx vitest run --reporter=dot | tail -3`)。
+
+## 2026-11-10 新增(蓋過下面 11-04 節中過時的待決項)
 
 - **允收標準檔位「高標 / 標準」已實作並上線**(`report20261110-1.md`):高標 = seed 原樣(預設,門檻未動);標準 = 只有 GS1-128 B→C(GS1 R16 pdf p.263)。**ITF-14 標準檔位仍 C、不降 D**(牛皮紙決策 Eric 選 C,等實拍)。API:`acceptancePoliciesFor` / `policyForProfile`(`src/data/policies.ts`);兩個 demo 頁都有切換,共用 localStorage 鍵 `mcode.acceptanceProfile`。**切換不改已顯示結果,要重拍。** 手機版實掃 GS1-128 的門檻顯示未驗(需相機)。
 - **GS1-128 高標 B 的出處已查**:規劃書 `master_v1.md:36,338` 的「客戶端常見要求」代表值,非 GS1 下限,不得對外說成 GS1 要求。
