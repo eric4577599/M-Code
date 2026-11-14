@@ -1350,6 +1350,11 @@ function inspectReal(photo) {
     w: (roiSmall.x1 - roiSmall.x0) / w, h: (roiSmall.y1 - roiSmall.y0) / h,
   };
   const img = { type: "img", data: tc.toDataURL("image/jpeg", 0.7), roi: roiFrac };
+  // 結果頁專用的高解析證據圖(960 px、品質 0.85)。只給 renderShotPhoto 顯示,**不進 scans**:
+  // 清單縮圖維持 320 px,localStorage 容量(稽核 C)不受影響。small 最寬 DECODE_MAX_W,
+  // 故這張不會比解碼用的降取樣版更大,只是不再被縮到 320 又拉回螢幕寬而變糊。
+  shotViewData = drawToCanvas(small, small.width, small.height, Math.min(960, small.width))
+    .toDataURL("image/jpeg", 0.85);
   const geom = { rectify: plan.note, tilt };
   if (!meas.measurable || !grade) {
     // 量到的不是符號本體 → 不出等級、不出通過/未通過。過去這條路會拿畫面中央 70% 的
@@ -1375,6 +1380,9 @@ function presentIdentifyOnly(zx, small) {
   const decode = runDecode(decoder, { declaredSymbology: zx.sym, handle: {} }, exp ? { expectedGtin: exp } : {});
   const tc = drawToCanvas(small, small.width, small.height, 320);
   const img = { type: "img", data: tc.toDataURL("image/jpeg", 0.7) };
+  // 與上面主路徑同理:結果頁顯示用高解析證據圖,不進 scans(否則會殘留上一次快門的圖)
+  shotViewData = drawToCanvas(small, small.width, small.height, Math.min(960, small.width))
+    .toDataURL("image/jpeg", 0.85);
   const meas = { measurable: false, simulated: false,
     label: `僅辨識：${symLabelOf(zx.sym)} 不在品質分級範圍`,
     reason: "已正確解碼，但這種格式沒有對應的量測模型與允收門檻，因此不產出參考等級與判定，也不列入通過率統計。不需要重拍。",
@@ -1476,7 +1484,7 @@ function renderShotPhoto(img) {
   const has = img && img.type === "img" && img.data;
   box.hidden = !has; cap.hidden = !has;
   if (!has) { r.hidden = true; return; }
-  el.src = img.data;
+  el.src = shotViewData || img.data;
   if (img.roi) {
     r.hidden = false;
     r.style.left = (img.roi.x * 100).toFixed(2) + "%";
@@ -1685,6 +1693,7 @@ let camVideo = null;
 let camTrack = null;        // 目前預覽串流的 video track(能力偵測 / 回讀 settings 用)
 let camImageCapture = null; // ImageCapture 實例;不支援(iOS Safari)時維持 null
 let shotResolution = null;  // pickBestResolution 的結果 { width, height, source, tier };偵測失敗為 null
+let shotViewData = null;    // 本次結果頁顯示用的高解析證據圖(不存進 scans);每次快門覆寫
 let lastShotInfo = null;    // 最近一次快門的請求值 / getSettings 實拿值 / 分析影像寬(誠實回報用)
 // 相機串流故障訊息(null = 正常)。稽核 COMPAT-01:iOS Safari 切到其他 App / 接來電 /
 // 鎖屏,或 Android 其他 App 搶相機時,track 會 mute 或 ended,但畫面停在**最後一幀**。
