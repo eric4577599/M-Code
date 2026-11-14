@@ -2615,7 +2615,11 @@ renderCapMode();
 $("shutter").onclick = () => {
   inspect().catch((e) => { console.warn("inspect 失敗", e); setCamStatus("檢驗失敗，請重試", "warn"); });
 };
-$("back").onclick = () => show("capture");
+$("back").onclick = () => {
+  show("capture");
+  // 回取景頁時串流若已死就直接重開(這次點擊本身就是使用者手勢),不讓使用者面對黑畫面
+  if (camVideo && cameraStreamDead()) reopenCamera();
+};
 $("reBtn").onclick = () => show("capture");
 $("labelGood").onclick = () => setHumanLabel("good");
 $("labelBad").onclick = () => setHumanLabel("bad");
@@ -2758,7 +2762,20 @@ try {
   else $("loginOverlay").classList.remove("hidden");
 })();
 // 已登入且尚無相機時,點畫面補試開相機(iOS 手勢限制);未登入不啟動相機
-document.addEventListener("click", () => { if (currentTier && !camVideo) initCamera(true); });
+// 串流是否已死:track 結束或被系統暫停供幀。輸入:無;輸出:布林。
+// 2026-11-14 實機:拍完第二張回取景頁,畫面全黑、Safari 網址列相機圖示被劃掉。
+// 原因:提示字寫「請點畫面重新開啟」,但原本的點擊處理只在 !camVideo 時才開相機 ——
+// 串流死了而 camVideo 還在,點了完全沒反應,只能整頁重載。
+function cameraStreamDead() {
+  return !!(camTrack && (camTrack.readyState === "ended" || camTrack.muted));
+}
+// 重開相機(先還回舊串流再開新的)。必須在使用者手勢內呼叫,iOS 才肯給鏡頭。
+function reopenCamera() { stopCamera(); initCamera(true); }
+document.addEventListener("click", () => {
+  if (!currentTier) return;
+  if (!camVideo) initCamera(true);
+  else if (cameraStreamDead()) reopenCamera(); // 提示字承諾的「點畫面重新開啟」
+});
 
 // ── 離開頁面就把相機還回去(2026-08-06)──────────────────────────────────
 // 由來:實機「第二次拍照相機無影像」。**iOS Safari 同時只給一個分頁用相機**,
