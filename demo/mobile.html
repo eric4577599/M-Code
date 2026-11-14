@@ -1452,7 +1452,9 @@ function renderShotRead(shot) {
   const box = $("shotRead");
   if (!shot) { box.hidden = true; box.innerHTML = ""; return; }
   // 分析寬取自 "W×H" 字串的前段;px/module 只有 1D 量得出來,2D 與不可量測時留白
-  const aw = parseInt(String(shot.analysis || "").split("×")[0], 10);
+  // 取長邊比對 1920:手機直拿時串流是 1080×1920(長邊已達標),只看前段(寬)會誤報「低於請求」。
+  const aDims = String(shot.analysis || "").split("×").map((x) => parseInt(x, 10));
+  const aw = aDims.length === 2 && aDims.every(Number.isFinite) ? Math.max(aDims[0], aDims[1]) : NaN;
   const pxm = typeof shot.pxPerModule === "number" ? shot.pxPerModule : null;
   const ms = typeof shot.latencyMs === "number" ? shot.latencyMs : null;
   const cell = (k, v, cls, note) =>
