@@ -499,6 +499,7 @@ import {
   chooseCaptureFrame, FRAME_CHOICE,
   barBandExtent,
   summarizeShotGate,
+  isBlackFrame, stepBlackWatch,
   SCAN_STORE_KEY, restoreScans, persistScans,
 } from "./imgproc.js";
 
@@ -1968,6 +1969,19 @@ function measureQuality(src, srcW, srcH) {
     wash: +washboardAmpRatio(gray, w, h).toFixed(3),
   };
 }
+// 預覽黑幀監看(2026-11-15):判準與狀態機在 imgproc.js(isBlackFrame / stepBlackWatch,有測試)。
+// 這裡只負責取樣與接線。blackWatch 刻意**不**由 stopCamera 清掉 —— 自動重開本身就會呼叫
+// stopCamera,清掉就永遠數不到 maxReopens,黑畫面會無限重開。只有「看到非黑幀」才歸零。
+let blackWatch = { since: null, attempts: 0 };
+const BLACK_FAULT = "預覽持續全黑 — 請確認鏡頭未被遮住,或點畫面重新開啟相機";
+const blackProbe = document.createElement("canvas"); blackProbe.width = 32; blackProbe.height = 18;
+function previewIsBlack(v) {
+  try {
+    const c = blackProbe.getContext("2d", { willReadFrequently: true });
+    c.drawImage(v, 0, 0, 32, 18);
+    return isBlackFrame(c.getImageData(0, 0, 32, 18).data);
+  } catch (e) { return false; }
+}
 function measureFrame() {
   // 檢驗期間整段停量:取幀與分析進行中的畫面不是穩定的量測對象,而 inspect() 的 finally
   // recompute 會直接吃到這批讀數,可能讓快門在檢驗剛結束時無故 LOCKED(要等下一個 tick
@@ -1980,11 +1994,29 @@ function measureFrame() {
   // 順手叫醒(這條路每 500ms 跑一次,所以就算 show() 那次沒叫醒也會自癒),
   // 但這一輪不更新任何讀數:寧可讓燈號停在原地,也不要拿凍結幀刷新它。
   if (v.paused || v.readyState < 2) { resumePreview(); return; }
+  // 黑幀偵測:track 仍 live、沒有 mute,但畫面是全 0(實機事故,重整頁面才好)。
+  // 連續全黑滿 holdMs → 自動重開相機;重開 maxReopens 次仍黑 → 放棄並請使用者處理。
+  // 黑幀期間**仍照常量測**(varLap≈0 → 對焦 FAIL → 快門鎖死),不拿舊讀數讓快門維持可按。
+  const black = previewIsBlack(v);
+  const bw = stepBlackWatch(blackWatch, black, Date.now());
+  blackWatch = bw.watch;
+  if (bw.action === "reopen") {
+    logError("camera", "預覽持續全黑,自動重開相機", "blackframe");
+    setCamStatus("預覽全黑,正在重開相機…", "warn");
+    stopCamera(); initCamera(false);
+    return;
+  }
+  if (bw.action === "giveup" && !camFault) {
+    camFault = BLACK_FAULT;
+    setCamStatus("⚠ " + camFault, "warn");
+    logError("camera", "預覽持續全黑,自動重開仍無效", "blackframe");
+    recompute();
+  }
   // 故障旗標自癒(同一次事故的另一半):camFault 原本只進不出 —— 除了登出與 unmute
   // 事件,沒有任何路徑清得掉它,於是**一次瞬間抖動就讓快門永久鎖死**。
   // 故障應該由「當下可觀測的狀態」決定,不是被某一刻的一次失敗鎖死。
   // 走到這一行代表:video 在播、有可用的當前幀。再確認 track 自己也還活著就放行。
-  if (camFault && camTrack && camTrack.readyState === "live" && !camTrack.muted && v.videoWidth > 0) {
+  if (camFault && !black && camTrack && camTrack.readyState === "live" && !camTrack.muted && v.videoWidth > 0) {
     camFault = null;
     setCamStatus("● 相機已恢復 · 對準條碼後按快門檢驗", "ok");
   }
@@ -2620,7 +2652,7 @@ $("shutter").onclick = () => {
 $("back").onclick = () => {
   show("capture");
   // 回取景頁時串流若已死就直接重開(這次點擊本身就是使用者手勢),不讓使用者面對黑畫面
-  if (camVideo && cameraStreamDead()) reopenCamera();
+  if (camVideo && (camFault || cameraStreamDead())) reopenCamera();
 };
 $("reBtn").onclick = () => show("capture");
 $("labelGood").onclick = () => setHumanLabel("good");
@@ -2772,11 +2804,11 @@ function cameraStreamDead() {
   return !!(camTrack && (camTrack.readyState === "ended" || camTrack.muted));
 }
 // 重開相機(先還回舊串流再開新的)。必須在使用者手勢內呼叫,iOS 才肯給鏡頭。
-function reopenCamera() { stopCamera(); initCamera(true); }
+function reopenCamera() { blackWatch = { since: null, attempts: 0 }; stopCamera(); initCamera(true); }
 document.addEventListener("click", () => {
   if (!currentTier) return;
   if (!camVideo) initCamera(true);
-  else if (cameraStreamDead()) reopenCamera(); // 提示字承諾的「點畫面重新開啟」
+  else if (camFault || cameraStreamDead()) reopenCamera(); // 提示字承諾的「點畫面重新開啟」
 });
 
 // ── 離開頁面就把相機還回去(2026-08-06)──────────────────────────────────

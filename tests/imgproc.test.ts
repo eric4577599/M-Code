@@ -70,6 +70,9 @@ import {
   SHOT_FRESHNESS,
   SHOT_FRESHNESS_LABEL,
   SLOW_SHUTTER_MS,
+  isBlackFrame,
+  stepBlackWatch,
+  BLACK_FRAME_LIMITS,
 } from "../demo/imgproc.js";
 
 // 產生單色 RGBA 影像
@@ -3113,5 +3116,55 @@ describe("aggregateParameters — 逐條參數聚合", () => {
   it("空輸入不丟例外", () => {
     expect(aggregateParameters([], [])).toEqual([]);
     expect(aggregateParameters(undefined, undefined)).toEqual([]);
+  });
+});
+
+describe("預覽黑幀偵測", () => {
+  const rgba = (n: number, v: number) => new Uint8ClampedArray(n * 4).map((_, i) => (i % 4 === 3 ? 255 : v));
+
+  it("全 0 的畫面是黑幀", () => {
+    expect(isBlackFrame(rgba(100, 0))).toBe(true);
+  });
+
+  it("鏡頭被遮住的暗畫面(有雜訊,高於 peakMax)不算黑幀", () => {
+    expect(isBlackFrame(rgba(100, 20))).toBe(false);
+  });
+
+  it("只有少數像素有亮度也不算黑幀(peak 守門)", () => {
+    const d = rgba(100, 0); d[40] = 200;
+    expect(isBlackFrame(d)).toBe(false);
+  });
+
+  it("空資料不能說是黑", () => {
+    expect(isBlackFrame(new Uint8ClampedArray(0))).toBe(false);
+    expect(isBlackFrame(undefined)).toBe(false);
+  });
+
+  const H = BLACK_FRAME_LIMITS.holdMs;
+  it("黑幀未滿 holdMs 不動作,滿了才重開", () => {
+    let r = stepBlackWatch(null, true, 1000);
+    expect(r.action).toBe("none");
+    r = stepBlackWatch(r.watch, true, 1000 + H - 1);
+    expect(r.action).toBe("none");
+    r = stepBlackWatch(r.watch, true, 1000 + H);
+    expect(r.action).toBe("reopen");
+    expect(r.watch.attempts).toBe(1);
+  });
+
+  it("中間出現一張非黑幀就清零(含重開次數)", () => {
+    let r = stepBlackWatch(null, true, 0);
+    r = stepBlackWatch(r.watch, true, H);          // reopen,attempts=1
+    r = stepBlackWatch(r.watch, false, H + 10);    // 恢復
+    expect(r.watch).toEqual({ since: null, attempts: 0 });
+    expect(r.action).toBe("none");
+  });
+
+  it("連續重開 maxReopens 次仍黑 → giveup,之後不再重複 reopen", () => {
+    let r = { watch: null as any, action: "none" };
+    let t = 0; const seen: string[] = [];
+    for (let k = 0; k < 40; k++) { r = stepBlackWatch(r.watch, true, t); seen.push(r.action); t += 1000; }
+    expect(seen.filter((a) => a === "reopen").length).toBe(BLACK_FRAME_LIMITS.maxReopens);
+    expect(seen.includes("giveup")).toBe(true);
+    expect(seen.lastIndexOf("reopen")).toBeLessThan(seen.indexOf("giveup"));
   });
 });

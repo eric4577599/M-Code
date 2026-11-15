@@ -2459,3 +2459,41 @@ export function persistScans(storage, user, scans, header) {
   if (write(slim)) return { ok: true, dropped: true };
   return { ok: false, dropped: true };
 }
+
+// ── 預覽黑幀偵測(2026-11-15)──────────────────────────────────────────────
+// 實機事故:新版(1080p 預覽)連拍時預覽偶爾全黑,重整頁面才好。此時 track 仍是 live、
+// 沒有 mute,既有的「串流已死」判斷看不到它,只能靠畫面內容本身偵測。
+// 判準刻意嚴格:iOS 的黑畫面是**全 0**,鏡頭被手遮住的暗畫面仍有雜訊,不該被當成故障。
+export const BLACK_FRAME_LIMITS = Object.freeze({
+  meanMax: 3,        // 平均亮度(0–255)上限
+  peakMax: 16,       // 任一像素任一通道的上限
+  holdMs: 3000,      // 連續全黑多久才動作(吃掉相機切換瞬間的黑幀)
+  maxReopens: 3,     // 連續自動重開幾次仍黑就放棄、改請使用者處理
+});
+// 一張 RGBA 影像是不是全黑。輸入:rgba(Uint8ClampedArray)、可選的門檻;輸出:布林。
+// 空陣列回 false(沒有資料不能說是黑)。
+export function isBlackFrame(rgba, limits = BLACK_FRAME_LIMITS) {
+  if (!rgba || rgba.length < 4) return false;
+  let sum = 0, n = 0, peak = 0;
+  for (let i = 0; i + 2 < rgba.length; i += 4) {
+    const r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
+    const m = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    if (m > peak) { peak = m; if (peak > limits.peakMax) return false; }
+    sum += (r + g + b) / 3; n++;
+  }
+  return n > 0 && sum / n <= limits.meanMax;
+}
+// 黑幀監看的狀態機(純函式,不碰時鐘與 DOM)。
+// 輸入:watch = { since:number|null, attempts:number }、這一刻是否全黑、現在時間(ms)、可選門檻;
+// 輸出:{ watch, action },action 為 "none" | "reopen" | "giveup"。
+// 規則:非黑 → 清零(含 attempts,代表真的恢復);全黑 → 起算,連續滿 holdMs 才動作;
+// 動作為 reopen 時 attempts+1 並重新起算(重開後新串流要重新計時),attempts 用完 → giveup。
+// giveup 之後維持 giveup 狀態不再重複動作,直到出現非黑幀。
+export function stepBlackWatch(watch, black, now, limits = BLACK_FRAME_LIMITS) {
+  const w = watch || { since: null, attempts: 0 };
+  if (!black) return { watch: { since: null, attempts: 0 }, action: "none" };
+  const since = w.since == null ? now : w.since;
+  if (now - since < limits.holdMs) return { watch: { since, attempts: w.attempts }, action: "none" };
+  if (w.attempts >= limits.maxReopens) return { watch: { since, attempts: w.attempts }, action: "giveup" };
+  return { watch: { since: null, attempts: w.attempts + 1 }, action: "reopen" };
+}
