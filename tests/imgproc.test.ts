@@ -71,6 +71,7 @@ import {
   SHOT_FRESHNESS_LABEL,
   SLOW_SHUTTER_MS,
   isBlackFrame,
+  maxElementNonUniformity,
   stepBlackWatch,
   BLACK_FRAME_LIMITS,
 } from "../demo/imgproc.js";
@@ -3166,5 +3167,140 @@ describe("預覽黑幀偵測", () => {
     expect(seen.filter((a) => a === "reopen").length).toBe(BLACK_FRAME_LIMITS.maxReopens);
     expect(seen.includes("giveup")).toBe(true);
     expect(seen.lastIndexOf("reopen")).toBeLessThan(seen.indexOf("giveup"));
+  });
+});
+
+// ══ DEF 輸入量法實驗(defMode,2026-11-15)═══════════════════════════════════════
+// 只換「在哪個剖面上量反射不均」:預設 legacy 必須與先前逐位元相同;iso 要抹平極細亮點、
+// 但**不得抹平真缺陷**(後者是這個實驗最容易壞掉的方向 —— 抹過頭等於放行不良品)。
+describe("DEF 量法實驗(defMode)", () => {
+  const DIGITS = "14712345678907";
+  const LIGHT = 235, DARK = 20, PPM = 9.7, H = 21, QUIET = 10;
+  const widths = Array.from(itfNominalPattern(DIGITS)! as Uint8Array, (v: number) => (v ? 2.5 : 1));
+
+  /** 面積覆蓋率取樣的 ITF-14,回傳每個元素的 x 範圍,供測試挑暗寬條下手。 */
+  function build() {
+    const total = widths.reduce((a, b) => a + b, 0);
+    const W = Math.ceil((total + QUIET * 2) * PPM) + 2;
+    const edges: number[] = []; let x = QUIET * PPM;
+    for (const wd of widths) { edges.push(x); x += wd * PPM; }
+    edges.push(x);
+    const row = new Float64Array(W).fill(LIGHT);
+    for (let px = 0; px < W; px++) {
+      let cov = 0;
+      for (let i = 0; i < widths.length; i += 2) cov += Math.max(0, Math.min(px + 1, edges[i + 1]!) - Math.max(px, edges[i]!));
+      row[px] = LIGHT + (DARK - LIGHT) * Math.min(1, cov);
+    }
+    const gray = new Uint8ClampedArray(W * H);
+    for (let y = 0; y < H; y++) for (let px = 0; px < W; px++) gray[y * W + px] = Math.round(row[px]!);
+    // 第一個「寬的暗條」(偶數索引、寬度 2.5)
+    let wideIdx = -1;
+    for (let i = 0; i < widths.length; i += 2) if (widths[i] === 2.5) { wideIdx = i; break; }
+    return { gray, W, roi: { x0: 0, y0: 0, x1: W, y1: H }, wide: { x0: edges[wideIdx]!, x1: edges[wideIdx + 1]! } };
+  }
+  const run = (gray: Uint8ClampedArray, W: number, roi: object, defMode?: string) =>
+    roi1DMetrology(gray, W, roi, { sym: "ITF14", text: DIGITS, ...(defMode ? { defMode } : {}) });
+  const worst = (r: { scanlines: { maxElementReflectanceNonUniformity: number }[] }) =>
+    Math.max(...r.scanlines.map((s) => s.maxElementReflectanceNonUniformity));
+
+  it("預設(不傳)與 legacy 逐位元相同,且掃描線不帶 defLegacy", () => {
+    const s = build();
+    const a = run(s.gray, s.W, s.roi), b = run(s.gray, s.W, s.roi, "legacy");
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    expect("defLegacy" in a.scanlines[0]).toBe(false);
+  });
+
+  it("未知的 defMode 值一律當 legacy(不得因拼錯而悄悄換量法)", () => {
+    const s = build();
+    expect(JSON.stringify(run(s.gray, s.W, s.roi, "ISO"))).toBe(JSON.stringify(run(s.gray, s.W, s.roi)));
+  });
+
+  it("iso:每條掃描線附 defLegacy,且等於 legacy 的值(供 A/B 對照)", () => {
+    const s = build();
+    const a = run(s.gray, s.W, s.roi), b = run(s.gray, s.W, s.roi, "iso");
+    expect(b.scanlines.length).toBe(a.scanlines.length);
+    b.scanlines.forEach((sl: { defLegacy: number }, i: number) =>
+      expect(sl.defLegacy).toBe(a.scanlines[i].maxElementReflectanceNonUniformity));
+  });
+
+  it("**乾淨圖**:iso 的 DEF 輸入不高於 legacy,且接近 0(邊界過渡像素不算缺陷)", () => {
+    const s = build();
+    const leg = worst(run(s.gray, s.W, s.roi)), iso = worst(run(s.gray, s.W, s.roi, "iso"));
+    expect(iso).toBeLessThanOrEqual(leg);
+    expect(iso).toBeLessThan(0.05);
+  });
+
+  it("**單列極細亮點**(1 px × 1 列,肉眼不可見的纖維):legacy 被放大成大缺陷,iso 抹平", () => {
+    const s = build();
+    const g = new Uint8ClampedArray(s.gray);
+    const cx = Math.round((s.wide.x0 + s.wide.x1) / 2);
+    // 第 5 條掃描線取樣列:floor(H × 4.5 / 10)
+    const y = Math.floor((H * 4.5) / 10);
+    g[y * s.W + cx] = LIGHT;
+    const leg = worst(run(g, s.W, s.roi)), iso = worst(run(g, s.W, s.roi, "iso"));
+    expect(leg).toBeGreaterThan(0.6);
+    expect(iso).toBeLessThan(0.2);
+  });
+
+  it("**真缺陷不得被抹平**:貫穿全部列、寬 1 模組、變淺但未越過門檻的缺陷,iso 仍要量到", () => {
+    // 值取 110(< GT = 127.5):條仍是條,元素數不變,掃描線不會因「元素數對不上」被作廢 ——
+    // 若改成純白缺口,條會被切成兩段、整條掃描線作廢,測試會空轉(worst 變 -Infinity)。
+    const s = build();
+    const g = new Uint8ClampedArray(s.gray);
+    const c0 = Math.round((s.wide.x0 + s.wide.x1) / 2 - PPM / 2);
+    for (let y = 0; y < H; y++) for (let x = c0; x < c0 + Math.round(PPM); x++) g[y * s.W + x] = 110;
+    const leg = worst(run(g, s.W, s.roi)), iso = worst(run(g, s.W, s.roi, "iso"));
+    expect(Number.isFinite(iso)).toBe(true);
+    expect(leg).toBeGreaterThan(0.3);
+    expect(iso).toBeGreaterThan(0.3);            // ISO 判 F 的區間(ERN/SC > 0.3 ⇒ ERN > 0.3×0.84)
+    expect(iso).toBeGreaterThan(leg * 0.7);      // 且沒有被抹掉一大半
+  });
+
+  it("maxElementNonUniformity:向內縮會略過縮到不剩像素的元素", () => {
+    const prof = [200, 20, 20, 200, 200, 20, 20, 200];
+    expect(maxElementNonUniformity(prof, [0.5, 3.5], 0)).toBeGreaterThan(0.6);   // 含兩側高值
+    expect(maxElementNonUniformity(prof, [0.5, 3.5], 1)).toBe(0);               // 只剩內側兩個 20
+    expect(maxElementNonUniformity(prof, [1, 2], 5)).toBe(0);                   // 縮光了
+  });
+});
+
+describe("roiPhotometric 的 mergeRuns 實驗(同類相鄰 run 合併)", () => {
+  // 一條掃描線重複 H 列:亮 20 | 暗 5 | 亮 1(纖維亮點)| 暗 15 | 亮 20 | 暗 12 | 亮 20
+  const build = (speck: boolean) => {
+    const seg: number[] = [];
+    const push = (n: number, v: number) => { for (let i = 0; i < n; i++) seg.push(v); };
+    push(20, 220); push(5, 20); push(1, speck ? 220 : 20); push(15, 20); push(20, 220); push(12, 20); push(20, 220);
+    const W = seg.length, H = 10, g = new Uint8ClampedArray(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) g[y * W + x] = seg[x]!;
+    return { g, W, H };
+  };
+  const ec = (speck: boolean, mergeRuns?: boolean) => {
+    const { g, W, H } = build(speck);
+    return roiPhotometric(g, W, { x0: 0, y0: 0, x1: W, y1: H }, 10, mergeRuns === undefined ? {} : { mergeRuns }).edgeContrasts as number[];
+  };
+
+  it("**重現 bug**:條內 1 px 亮點被濾掉後,相鄰兩段暗 run 的「邊緣對比」≈ 0(預設行為,維持不變)", () => {
+    expect(Math.min(...ec(true))).toBeLessThan(0.01);
+  });
+
+  it("mergeRuns:同類相鄰合併後,最小邊緣對比回到真實的暗|亮邊(約 0.78)", () => {
+    const v = Math.min(...ec(true, true));
+    expect(v).toBeGreaterThan(0.7);
+  });
+
+  it("沒有亮點時 mergeRuns 與預設結果完全相同(不得改動乾淨影像的讀數)", () => {
+    expect(ec(false, true)).toEqual(ec(false));
+  });
+
+  it("只合併同類:真正低對比的暗|亮邊仍照實回報,不被合併吃掉", () => {
+    const seg: number[] = [];
+    const push = (n: number, v: number) => { for (let i = 0; i < n; i++) seg.push(v); };
+    push(20, 235); push(8, 20); push(20, 235); push(8, 20); push(6, 118); push(20, 235);   // 118 與門檻附近的暗|亮邊
+    const W = seg.length, H = 10, g = new Uint8ClampedArray(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) g[y * W + x] = seg[x]!;
+    const roi = { x0: 0, y0: 0, x1: W, y1: H };
+    const a = roiPhotometric(g, W, roi, 10, {}).edgeContrasts as number[];
+    const b = roiPhotometric(g, W, roi, 10, { mergeRuns: true }).edgeContrasts as number[];
+    expect(b).toEqual(a);   // 沒有同類相鄰 → 合併不改任何事
   });
 });

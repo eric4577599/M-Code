@@ -678,7 +678,8 @@ function logShot(grade, acceptance, entry) {
         // 挑幀與取幀時序的文字留痕(沿用結果頁 / PDF 的同一批字串,不另外發明欄位)
         candidates: { frameCompare: s.frameCompare, frameFallback: s.frameFallback,
           shotTiming: s.shotTiming, shotGate: s.shotGate, staleShot: s.staleShot,
-          roiSample: s.roiSample, roiScale: s.roiScale, rectify: s.rectify } },
+          roiSample: s.roiSample, roiScale: s.roiScale, rectify: s.rectify,
+          defMode: s.defMode || "legacy" } },
       gate: s.gateChecks || [],
       geometry: { symbology: state.symbology, pxPerModule: s.pxPerModule,
         tiltDeg: hasTilt ? state.gate.tilt : null, tiltSource: s.tiltSource || "",
@@ -1093,6 +1094,17 @@ function rectifyRoi(zx, kx, ky, rg, photo) {
 // 調高的代價也要一併衡量:Android 走 L1 時照片可達 4032 寬,上限翻倍等於 getImageData
 // 從 3.1MB 變 12.6MB、ZXing 掃描面積四倍。
 const DECODE_MAX_W = 1024;
+// DEF 輸入量法實驗(2026-11-15,docs/report20261115-1.md):預設 "legacy" = 與先前完全相同。
+// 以網址 ?def=iso 切到 ISO 式(孔徑 + 排除邊界過渡),?def=legacy 切回;選擇存 localStorage,
+// 之後不必每次帶參數。**不改任何門檻與映射**。結果頁與拍照條件紀錄都會標明用的是哪一種,
+// 兩種量法的資料不可混在同一批裡比較。
+const DEF_MODE = (() => {
+  try {
+    const q = new URLSearchParams(location.search).get("def");
+    if (q === "iso" || q === "legacy") localStorage.setItem("mcode.defMode", q);
+    return localStorage.getItem("mcode.defMode") === "iso" ? "iso" : "legacy";
+  } catch (e) { return "legacy"; }
+})();
 // 記憶體護欄(規格 §3.1):解碼與 ROI 定位跑「降取樣版(≤DECODE_MAX_W 寬)」,
 // 定出的 ROI 座標再依比例放大回全解析度,只對放大後的 ROI 取像素做光度與幾何量測。
 // 取降取樣版(small)的整張灰階。輸入:無(用閉包外的 small);輸出:灰階陣列或 null。
@@ -1213,7 +1225,8 @@ function inspectReal(photo) {
   const pmGray = (oneD && plan.useRectified) ? rg.gray : gray;
   const pmW = (oneD && plan.useRectified) ? rg.w : gw;
   const pmRoi = (oneD && plan.useRectified) ? { x0: 0, y0: 0, x1: rg.w, y1: rg.h } : roi;
-  const pm = roiPhotometric(pmGray, pmW, pmRoi);
+  // 實驗開關同一個(?def=iso):同時啟用「同類相鄰 run 合併」,見 imgproc.js roiPhotometric 的說明
+  const pm = roiPhotometric(pmGray, pmW, pmRoi, 10, { mergeRuns: DEF_MODE === "iso" });
   if (lastShotInfo) lastShotInfo.photometricBase = (oneD && plan.useRectified) ? "未矯正 ROI" : "同幾何";
   // 透視傾角(規格 §3.3 · 2026-08-03 裁示):先試 getSettings().focalLength 走單應矩陣
   // 實算,不可得則退回 quadGeometry 的臂長差代理值並在結果頁標註為代理。
@@ -1266,7 +1279,8 @@ function inspectReal(photo) {
     //   B 模組寬被量化成整數像素 —— 等級追隨的是「每模組像素數的小數部分」而非印刷品質
     //     (實測 5.5 px/模組 → F、14.2 px → A,同一張完美圖只是換個距離拍)。
     // 幾何吃正射影像(gray),光度仍走未矯正 ROI(裁示 D3),兩者互不影響。
-    const g1 = roi1DMetrology(gray, gw, roi, { sym, text: zx ? zx.text : "" });
+    const g1 = roi1DMetrology(gray, gw, roi, { sym, text: zx ? zx.text : "", defMode: DEF_MODE });
+    if (lastShotInfo) lastShotInfo.defMode = DEF_MODE;
     scanlineCount = g1.scanlines.length;
     // 等級成因需要**逐條**的資料(規格 §3.8):總分是「每條取最差,再平均」,
     // 而 GradeResult.parameters 只回報第 1 條 —— 拿它當「等級原因」會講錯。
@@ -1527,6 +1541,8 @@ function renderShotRead(shot) {
       : cell("快門延遲", ms + " ms", ms < SLOW_SHUTTER_MS ? "good" : "poor",
              ms < SLOW_SHUTTER_MS ? "" : "偏慢"),
   ];
+  // 非預設量法要看得見(實驗資料不可與 legacy 混在一起比較)
+  if (shot.defMode === "iso") cells.push(cell("量法(實驗)", "ISO 式:缺陷孔徑 + 邊緣合併", "", "與預設量法的等級不可互比"));
   box.innerHTML = cells.join("");
   box.hidden = false;
 }

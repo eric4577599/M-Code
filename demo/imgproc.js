@@ -160,7 +160,7 @@ export function scanlineRuns(row, t) {
  * edgeContrasts=每條掃描線上「相鄰 run 平均亮度差」的最小值(0–1)。
  * 輸入:灰階、寬、ROI、掃描線數;輸出 PhotometricProxyInputs 形狀的物件。
  */
-export function roiPhotometric(gray, w, roi, scanlines = 10) {
+export function roiPhotometric(gray, w, roi, scanlines = 10, opts = {}) {
   const r = roiSlice(gray, w, roi);
   const t = otsu(r.data);
   let lSum = 0, lN = 0, dSum = 0, dN = 0;
@@ -179,7 +179,23 @@ export function roiPhotometric(gray, w, roi, scanlines = 10) {
   for (let k = 0; k < scanlines; k++) {
     const y = Math.floor((r.h * (k + 0.5)) / scanlines);
     const row = r.data.subarray(y * r.w, (y + 1) * r.w);
-    const runs = scanlineRuns(row, t).filter((x) => x.len >= 2);
+    let runs = scanlineRuns(row, t).filter((x) => x.len >= 2);
+    // opts.mergeRuns(實驗,預設關):濾掉 1 px 短 run 之後,原本被它隔開的兩段**同類**(同為暗或同為亮)
+    // 會變成相鄰,而兩段平均亮度幾乎相同 → 「邊緣對比」≈ 0 → ECmin / MOD 被壓成 F。
+    // 同類相鄰不是邊,合併後再算。實例(牛皮紙直印,真實照片):條內 1 px 纖維亮點使相鄰暗 run
+    // 平均 22.4 / 22.0,對比 0.0016。**只合併同類**,真正的低對比邊(暗|亮)仍照實回報。
+    if (opts && opts.mergeRuns) {
+      const merged = [];
+      for (const r of runs) {
+        const last = merged[merged.length - 1];
+        if (last && last.dark === r.dark) {
+          const n = last.len + r.len;
+          last.mean = (last.mean * last.len + r.mean * r.len) / n;
+          last.len = n;
+        } else merged.push({ len: r.len, dark: r.dark, mean: r.mean });
+      }
+      runs = merged;
+    }
     let minEdge = 1;
     for (let i = 1; i < runs.length; i++) {
       const c = Math.abs(runs[i].mean - runs[i - 1].mean) / 255;
@@ -1794,13 +1810,20 @@ export function roi1DMetrology(gray, w, roi, opts = {}) {
   const kind = ONE_D_KIND[opts.sym] || "modular";
   const nScan = opts.scanlines || 10;
   const apX = opts.apertureX === undefined ? GEOMETRY_APERTURE_X : opts.apertureX;
+  // DEF 輸入的量法(2026-11-15 實驗,預設 "legacy" = 與先前逐位元相同):
+  //   "legacy":原始單列剖面、含邊界過渡像素、取元素內 max−min。
+  //   "iso"   :ISO 15416 式 —— 沿 y 方向取 ±孔徑/2 的列平均(圓孔徑在兩個方向都平均)、
+  //             再過 x 方向孔徑、並把每個元素向內縮(排除邊界過渡)後才取 max−min。
+  // 依據與數據見 docs/report20261115-1.md。**只改 DEF 的輸入量,不改任何門檻、不改映射。**
+  const defMode = opts.defMode === "iso" ? "iso" : "legacy";
   const r = roiSlice(gray, w, roi);
   const nominalPat = kind === "twoWidth" ? itfNominalPattern(opts.text) : null;
   const expected = nominalPat ? nominalPat.length : null;
 
-  const rows = [];
+  const rows = [], rowYs = [];
   for (let k = 0; k < nScan; k++) {
     const y = Math.floor((r.h * (k + 0.5)) / nScan);
+    rowYs.push(y);
     rows.push(Float64Array.from(r.data.subarray(y * r.w, (y + 1) * r.w)));
   }
 
@@ -1820,14 +1843,15 @@ export function roi1DMetrology(gray, w, roi, opts = {}) {
   const modules = [];
   let bwrSum = 0, bwrN = 0, matched = 0, marginWorst = Infinity, elemResidualWorst = 0;
 
-  for (const row of rows) {
+  for (let ri = 0; ri < rows.length; ri++) {
+    const row = rows[ri];
     const prof = apDiam > 1.05 ? apertureProfile(row, apDiam) : row;
     const gt = gtOf(prof);
     const edges = subpixelEdges(prof, gt);
     if (edges.length < 5) { continue; }
     const meas = [];
     for (let i = 1; i < edges.length; i++) meas.push(edges[i] - edges[i - 1]);
-    // 暗元素的反射不均(DEF 輸入):沿用原語意,量在**未經孔徑**的原始剖面上
+    // 暗元素的反射不均(DEF 輸入):legacy 沿用原語意,量在**未經孔徑**的原始剖面上
     let maxDef = 0;
     for (let i = 0; i < meas.length; i += 2) {
       const a = Math.ceil(edges[i]), b = Math.floor(edges[i + 1]);
@@ -1835,6 +1859,23 @@ export function roi1DMetrology(gray, w, roi, opts = {}) {
       for (let x = a; x <= b && x < row.length; x++) { if (row[x] < lo) lo = row[x]; if (row[x] > hi) hi = row[x]; }
       if (hi >= lo) { const nu = (hi - lo) / 255; if (nu > maxDef) maxDef = nu; }
     }
+    // iso 實驗:元素(邊界)仍由上面的 edges 決定,只換「在哪個剖面上量反射不均」。
+    // 保留 legacy 值供 A/B 對照(寫進掃描線物件的 defLegacy,grade.ts 不讀)。
+    const defLegacy = maxDef;
+    if (defMode === "iso") {
+      const hy = Math.max(0, Math.floor(apDiam / 2));
+      const y0 = Math.max(0, rowYs[ri] - hy), y1 = Math.min(r.h - 1, rowYs[ri] + hy);
+      const avg = new Float64Array(r.w);
+      for (let yy = y0; yy <= y1; yy++) {
+        const base = yy * r.w;
+        for (let x = 0; x < r.w; x++) avg[x] += r.data[base + x];
+      }
+      const nRows = y1 - y0 + 1;
+      for (let x = 0; x < r.w; x++) avg[x] /= nRows;
+      const prof2 = apDiam > 1.05 ? apertureProfile(avg, apDiam) : avg;
+      maxDef = maxElementNonUniformity(prof2, edges, apDiam / 2 + 1);
+    }
+    const defExtra = defMode === "iso" ? { defLegacy } : {};
 
     if (kind === "twoWidth") {
       // S5 元素數驗證:對不上就是數錯了,該掃描線作廢(不硬湊一個等級出來)
@@ -1854,7 +1895,7 @@ export function roi1DMetrology(gray, w, roi, opts = {}) {
       if (bn && sn) { bwrSum += (bs / bn - ss / sn) / f.narrow; bwrN++; }
       // margin 直接就是 DEC:令 tolerance=0.5、deviation=(1−margin)×0.5 ⇒ DEC = margin
       out.push({ maxWidthDeviation: (1 - Math.max(0, f.margin)) * 0.5, tolerance: 0.5,
-                 maxElementReflectanceNonUniformity: maxDef });
+                 maxElementReflectanceNonUniformity: maxDef, ...defExtra });
     } else {
       // S5 元素數驗證(模組型):元素數必須符合 Code 128 的固定結構,
       // 且捨入後的總模組數要對得回去。任一條不成立就是數錯了 → 該掃描線作廢。
@@ -1887,7 +1928,7 @@ export function roi1DMetrology(gray, w, roi, opts = {}) {
       if (bn && sn) { bwrSum += (bs / bn - ss / sn) / f.module; bwrN++; }
       if (1 - worst / 0.5 < marginWorst) marginWorst = 1 - worst / 0.5;
       out.push({ maxWidthDeviation: worst, tolerance: 0.5,
-                 maxElementReflectanceNonUniformity: maxDef });
+                 maxElementReflectanceNonUniformity: maxDef, ...defExtra });
     }
   }
 
@@ -1904,6 +1945,25 @@ export function roi1DMetrology(gray, w, roi, opts = {}) {
     // 留著是為了讓「E2SE 有沒有真的擋掉污染」變成可斷言的事實(見規格 §3.5)。
     elementResidualWorst: kind === "modular" ? elemResidualWorst : null,
   };
+}
+
+/**
+ * 暗元素的反射不均(ERN)。輸入:剖面、元素邊界(次像素,偶數索引起算的 [e0,e1] 為暗元素)、
+ * 向內縮的像素數;輸出:所有暗元素中 (max−min)/255 的最大值。
+ * 向內縮是為了排除邊界過渡像素 —— 邊緣不是缺陷,但現行 legacy 量法會把它算進去
+ * (實例:暗條邊界第一個像素 = 89,條內其餘 = 2–12,單這一點就讓該元素 ERN = 0.37)。
+ * 縮到不剩像素的元素略過。純函式。
+ */
+export function maxElementNonUniformity(prof, edges, insetPx) {
+  let mx = 0;
+  for (let i = 0; i + 1 < edges.length; i += 2) {
+    const a = Math.ceil(edges[i] + insetPx), b = Math.floor(edges[i + 1] - insetPx);
+    if (b < a) continue;
+    let lo = 255, hi = 0;
+    for (let x = a; x <= b && x < prof.length; x++) { if (prof[x] < lo) lo = prof[x]; if (prof[x] > hi) hi = prof[x]; }
+    if (hi >= lo) { const nu = (hi - lo) / 255; if (nu > mx) mx = nu; }
+  }
+  return mx;
 }
 
 /** 單條剖面的全域門檻 GT = (Rmax + Rmin) / 2(ISO 15416 的定義)。 */
