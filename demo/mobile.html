@@ -305,14 +305,63 @@
   .loginNote { font-size:11px; color:#64748b; line-height:1.6; margin-top:22px; border-top:1px solid #1e293b; padding-top:12px; }
 
   /* 真手機:去掉「手機框中框」,填滿螢幕、隱藏假狀態列 */
-  @media (max-width: 500px) {
+  /* 條件擴充(2026-11-15):原本只有 max-width:500px,iPhone **橫向**寬 852 → 手機框仍在,
+     只剩 390px 寬的窄欄、相機區 153px 高、快門在螢幕外要捲才按得到(實機回報「橫拿無法拍照」)。
+     橫向矮螢幕(高 ≤520)一律視為真手機。桌面預覽(視窗高 >520)不受影響。 */
+  @media (max-width: 500px), (orientation: landscape) and (max-height: 520px) {
     body { padding:0; background:#0b1220; }
     .phone { width:100%; max-width:100%; min-height:100vh; border:0; border-radius:0; box-shadow:none; }
     .statusbar { display:none; }
+
+    /* ── 拍攝頁一頁操作:整個畫面剛好一屏,相機區吃剩餘高度,不必捲動 ──
+       只在拍攝頁固定高度(body[data-view]);清單/結果/說明頁仍照常捲動。 */
+    body[data-view="capture"] .phone { height:100vh; height:100dvh; min-height:0; }
+    body[data-view="capture"] #v-capture { min-height:0; overflow:hidden; }
+    #v-capture .capSetup { display:flex; flex-wrap:wrap; align-items:center; }
+    #v-capture .capSetup .selrow { flex:1 1 100%; padding:6px 12px 2px; }
+    #v-capture .capSetup .profSel { flex:1 1 0; min-width:0; padding:2px 6px 2px 12px; }
+    #v-capture .capSetup .profSel + .profSel { padding:2px 12px 2px 6px; }
+    #v-capture .capSetup .profSel select { padding:7px 8px; font-size:13px; }
+    #v-capture .capSetup .fld { margin:0; }
+    #v-capture .capSetup .fld label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); } /* 保留給讀屏,畫面上以 placeholder 代替 */
+    #v-capture .capSetup .fld input { padding:7px 8px; font-size:13px; }
+    body[data-view="capture"] #v-capture .hud { flex:1 1 0; min-height:0; margin:6px 12px; padding:10px; }
+    #v-capture .frame { min-height:0; }
+    #v-capture .lights { grid-template-columns:repeat(4,1fr); gap:5px; padding:2px 12px 0; }
+    #v-capture .light { padding:4px 2px; font-size:10.5px; line-height:1.25; border-radius:9px; }
+    #v-capture .light .dot { width:8px; height:8px; margin:0 auto 2px; }
+    #v-capture .gateNote { padding:3px 14px 0; font-size:10px; line-height:1.3; }
+    #v-capture .shutterWrap { margin-top:0; padding:6px 12px; gap:4px; }
+    #v-capture .shutter { width:64px; height:64px; }
+    #v-capture .quickRow { padding:0 12px 6px; }
+    #v-capture .quickRow button { padding:7px 0; font-size:12.5px; }
+    #v-capture .demoPick { padding:0 14px 6px; }
+    /* 相機狀態含裝置 label,可能很長:允許任意處斷行並限制高度,不得撐破一屏 */
+    #v-capture .camStatus { overflow-wrap:anywhere; font-size:10.5px; line-height:1.3; max-height:3.9em; overflow:hidden; }
+  }
+
+  /* 橫向:左相機、右控制欄(整頁一屏,快門永遠在手指可及處) */
+  @media (orientation: landscape) and (max-height: 520px) {
+    .appbar { padding:4px 12px; }
+    .appbar .s { display:none; }
+    .appbar .t { font-size:13px; }
+    body[data-view="capture"] #v-capture {
+      display:grid; grid-template-columns:minmax(0,1fr) 300px; grid-template-rows:auto 1fr;
+      grid-template-areas:"cam setup" "cam ctl"; }
+    body[data-view="capture"] #v-capture:not(.active) { display:none; }
+    #v-capture .hud { grid-area:cam; }
+    body[data-view="capture"] #v-capture .hud { margin:6px 0 6px 10px; }
+    #v-capture .capSetup { grid-area:setup; align-content:flex-start; }
+    #v-capture .capSetup .profSel,
+    #v-capture .capSetup .profSel + .profSel { flex:1 1 100%; padding:2px 12px; }
+    #v-capture .capCtl { grid-area:ctl; display:flex; flex-direction:column; min-height:0; overflow-y:auto; }
+    #v-capture .capCtl .shutterWrap { flex-direction:row; flex-wrap:wrap; justify-content:center; padding:4px 12px; }
+    #v-capture .capCtl .capMode { flex:1 1 100%; justify-content:center; }
+    #v-capture .shutter { width:56px; height:56px; border-width:4px; margin:0 18px 0 12px; }
   }
 </style>
 </head>
-<body>
+<body data-view="capture">
 <div class="phone">
   <div class="statusbar"><span>9:41</span><span>▦ ▦ 100%</span></div>
   <div class="appbar">
@@ -324,6 +373,7 @@
 
   <!-- ════ 拍攝 ════ -->
   <div class="view active" id="v-capture">
+    <div class="capSetup">
     <div class="selrow">
       <div class="seg" id="seg-stage"></div>
       <div class="seg" id="seg-std" title="允收標準檔位:高標=現行門檻(預設);標準=GS1 規格表列的最低等級(目前僅 GS1-128 由 B 降為 C)。皆為相對代理值"></div>
@@ -339,6 +389,7 @@
     <div class="profSel">
       <div class="fld" style="margin-bottom:0"><label for="f-expected-gtin">預期 GTIN</label><input type="text" id="f-expected-gtin" placeholder="選填，例：14712345678907"></div>
     </div>
+    </div><!-- /capSetup -->
 
     <div class="hud">
       <span class="stateTag" id="stateTag">SCANNING</span>
@@ -350,6 +401,7 @@
       <div class="camStatus" id="camStatus">開啟相機中…</div>
     </div>
 
+    <div class="capCtl">
     <div class="lights" id="lights"></div>
     <p class="gateNote" id="gateNote"></p>
 
@@ -373,6 +425,7 @@
       <summary>示範情境（無相機時用）</summary>
       <div class="row" id="scenarios"></div>
     </details>
+    </div><!-- /capCtl -->
   </div>
 
   <!-- ════ 結果 ════ -->
@@ -2618,6 +2671,7 @@ $("listItems").addEventListener("click", (e) => {
 function show(v) {
   document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
   $("v-"+v).classList.add("active");
+  document.body.dataset.view = v; // 供 CSS 只在拍攝頁固定一屏高度(其餘頁照常捲動)
   // 被 display:none 藏過的 video 在 iOS 上不會自動續播,回到拍攝頁一定要叫醒(見 resumePreview)
   if (v === "capture") resumePreview();
 }
