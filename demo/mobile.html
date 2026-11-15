@@ -555,6 +555,7 @@ import {
   barBandExtent,
   summarizeShotGate,
   isBlackFrame, stepBlackWatch,
+  moduleCenterModulation, photometricWithModuleModulation,
   SCAN_STORE_KEY, restoreScans, persistScans,
 } from "./imgproc.js";
 
@@ -681,7 +682,7 @@ function logShot(grade, acceptance, entry) {
         candidates: { frameCompare: s.frameCompare, frameFallback: s.frameFallback,
           shotTiming: s.shotTiming, shotGate: s.shotGate, staleShot: s.staleShot,
           roiSample: s.roiSample, roiScale: s.roiScale, rectify: s.rectify,
-          defMode: s.defMode || "" } },
+          defMode: s.defMode || "", mod2d: s.mod2d || "" } },
       gate: s.gateChecks || [],
       geometry: { symbology: state.symbology, pxPerModule: s.pxPerModule,
         tiltDeg: hasTilt ? state.gate.tilt : null, tiltSource: s.tiltSource || "",
@@ -1257,7 +1258,22 @@ function inspectReal(photo) {
     tilt = t;
     return t;
   };
-  const photometric = { rLight: pm.rLight, rDark: pm.rDark, rDarkMin: pm.rDarkMin, edgeContrasts: pm.edgeContrasts };
+  let photometric = { rLight: pm.rLight, rDark: pm.rDark, rDarkMin: pm.rDarkMin, edgeContrasts: pm.edgeContrasts };
+  // 2D 的 MOD(新版量法,docs/report20261115-4.md):掃描線法是 1D 概念,在牛皮紙直印 QR 上被邊緣碎段與
+  // 紙紋拉到 D/F;新版改成逐模組中心取樣(吃矯正後影像 + 模組數 N)。**只換 MOD 的輸入**,SC / Rmin /
+  // FPD / GNU、映射與門檻一行不動。未矯正或沒有 N(例如 v1 QR 的補點路徑)就沿用掃描線法並在紀錄標明。
+  if (is2D(sym) && lastShotInfo) {
+    if (state.defMode !== "iso") lastShotInfo.mod2d = "舊版:掃描線法";
+    else if (plan.useRectified && rect && rect.dimension) {
+      const mm = moduleCenterModulation(gray, gw, gh, rect.dimension);
+      if (mm) {
+        photometric = photometricWithModuleModulation(photometric, mm);
+        const pct = (x) => (x * 100).toFixed(1) + "%";
+        lastShotInfo.mod2d = { q: +mm.q.toFixed(2), median: +mm.median.toFixed(2), n: mm.n,
+          ge50: pct(mm.atLevel[0].frac), ge30: pct(mm.atLevel[2].frac), px: +mm.px.toFixed(1), N: rect.dimension };
+      } else lastShotInfo.mod2d = "逐模組取樣失敗:沿用掃描線法";
+    } else lastShotInfo.mod2d = "未矯正或無模組數:沿用掃描線法";
+  }
   let grade;
   let scanlineCount = null; // 1D 實際取得的可用掃描線數(2D 維持 null,可量測性判定不看它)
   // 本張是否真的量到 px/module(稽核 A-01)。唯一設真處在下方 1D 的 if (g1.modulePx) 內,
@@ -1554,6 +1570,11 @@ function renderShotRead(shot) {
   // 非預設量法要看得見(實驗資料不可與 legacy 混在一起比較)
   // 量法只對 1D 有意義(lastShotInfo.defMode 只在 1D 量測路徑設定);2D / 不可量測沒有這個欄位就不顯示,
   // 不可補一個預設值 —— 沒量過的東西不能標成「新版」或「舊版」。
+  if (shot.mod2d && typeof shot.mod2d === "object") {
+    cells.push(cell("2D 調變(逐模組)", shot.mod2d.q.toFixed(2),
+      shot.mod2d.q >= 0.5 ? "good" : "poor",
+      `中位數 ${shot.mod2d.median.toFixed(2)} · ≥0.5 佔 ${shot.mod2d.ge50} · ${shot.mod2d.px} px/module`));
+  } else if (typeof shot.mod2d === "string") cells.push(cell("2D 調變", "掃描線法", "", shot.mod2d));
   if (shot.defMode === "legacy") cells.push(cell("量法", "舊版", "", "與新版的等級不可互比"));
   else if (shot.defMode === "iso") cells.push(cell("量法", "新版", "", "與舊版的等級不可互比"));
   box.innerHTML = cells.join("");

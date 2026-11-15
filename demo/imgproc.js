@@ -2557,3 +2557,71 @@ export function stepBlackWatch(watch, black, now, limits = BLACK_FRAME_LIMITS) {
   if (w.attempts >= limits.maxReopens) return { watch: { since, attempts: w.attempts }, action: "giveup" };
   return { watch: { since: null, attempts: w.attempts + 1 }, action: "reopen" };
 }
+
+// ── 2D 的調變(MOD)改為逐模組中心取樣(2026-11-15 實驗,新版量法;docs/report20261115-4.md)───────────
+// 現行 2D 沿用 1D 的 ECmin:在 10 條橫向掃描線上量相鄰 run 平均亮度差的最小值。真實 QR(牛皮紙直印、
+// 16–18 px/module)上它被邊緣過渡碎段與紙紋拉到 D/F,而逐模組調變 5% 分位數 0.64–0.69、中位數 0.88。
+// 2D 的調變本來就是**每個模組中心**的反射偏離全域門檻的程度:mod = 2·|R − GT| / (Rmax − Rmin)。
+//
+// 符號等級**不是取最差的那個模組**:ISO/IEC 15415 的 MOD 等級取決於「有多少模組不達標、糾錯容量吸得掉嗎」
+// (公開二手資料,**未對照標準全文**)。沒有碼字對映表時的代理值:容許最差的一小部分模組,取該比例處的分位數。
+// 容許比例 1% 的推導:QR M 級約 10% 的碼字可糾正(v5-M:26 個糾錯碼字 → 13/134),每碼字 8 個模組,
+// 壞模組若隨機分佈,壞碼字機率 1−(1−f)^8 = 10% → f ≈ 1.3%,取 1%。**這是代理,不是 ISO 計算。**
+// 已知限制:沒有「預期顏色」(不知道哪些模組本該是暗的),故被誤判成反色的模組看起來調變反而高。
+export const MODULATION_TOLERATED_FRACTION = 0.01;
+/** ISO 15415 的模組分級帶(公開二手資料):≥0.5=4、≥0.4=3、≥0.3=2、≥0.2=1、其餘 0。僅供診斷顯示,不參與評級。 */
+export const MODULATION_LEVELS = Object.freeze([0.5, 0.4, 0.3, 0.2]);
+
+/**
+ * 逐模組中心取樣的調變統計。輸入:矯正後灰階(模組格剛好鋪滿整張)、寬、高、每邊模組數 N、
+ * 選項 { fraction(容許比例) };輸出 null(輸入不合理)或 { n, sc, gt, q, min, median, atLevel:[…], px }。
+ * 取樣:每個模組中心 ±max(1, 0.2 模組) 的方塊平均 —— 避開邊緣過渡像素。
+ * Rmax / Rmin 取模組值的 98% / 2% 分位數(對少數極端值穩健)。純函式。
+ */
+export function moduleCenterModulation(gray, w, h, N, opts = {}) {
+  if (!gray || !(N >= 10) || !(w >= N * 2) || !(h >= N * 2)) return null;
+  const fraction = opts.fraction === undefined ? MODULATION_TOLERATED_FRACTION : opts.fraction;
+  const cw = w / N, ch = h / N;
+  const rx = Math.max(1, Math.floor(cw * 0.2)), ry = Math.max(1, Math.floor(ch * 0.2));
+  const vals = new Float64Array(N * N);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const cx = Math.round((i + 0.5) * cw), cy = Math.round((j + 0.5) * ch);
+      let sum = 0, n = 0;
+      for (let dy = -ry; dy <= ry; dy++) {
+        const y = cy + dy; if (y < 0 || y >= h) continue;
+        for (let dx = -rx; dx <= rx; dx++) {
+          const x = cx + dx; if (x < 0 || x >= w) continue;
+          sum += gray[y * w + x]; n++;
+        }
+      }
+      vals[j * N + i] = n ? sum / n : 0;
+    }
+  }
+  const sorted = Float64Array.from(vals).sort();
+  const pick = (f, arr) => arr[Math.min(arr.length - 1, Math.max(0, Math.floor(f * (arr.length - 1))))];
+  const rMin = pick(0.02, sorted), rMax = pick(0.98, sorted);
+  const span = rMax - rMin;
+  if (!(span > 0)) return null;
+  const gt = (rMax + rMin) / 2;
+  const mods = new Float64Array(N * N);
+  for (let k = 0; k < mods.length; k++) mods[k] = Math.min(1, (2 * Math.abs(vals[k] - gt)) / span);
+  const ms = Float64Array.from(mods).sort();
+  const atLevel = MODULATION_LEVELS.map((L) => {
+    let c = 0; for (let k = 0; k < ms.length; k++) if (ms[k] >= L) c++;
+    return { level: L, frac: c / ms.length };
+  });
+  return { n: N * N, sc: span / 255, gt, q: pick(fraction, ms), min: ms[0], median: pick(0.5, ms), atLevel, px: cw };
+}
+
+/**
+ * 把逐模組調變換成評級用的光度輸入。輸入:roiPhotometric 的輸出 pm、moduleCenterModulation 的輸出;
+ * 輸出:新的 photometric —— edgeContrasts 改成 [q × SC],使 grade.ts 的 MOD = min(edgeContrasts)/SC 剛好等於 q。
+ * SC 退化(≤0)或沒有統計時原樣回傳。不改 pm 本身。純函式。
+ */
+export function photometricWithModuleModulation(pm, mm) {
+  if (!pm || !mm) return pm;
+  const sc = Math.max(0, Math.min(1, pm.rLight - pm.rDark));
+  if (!(sc > 0)) return pm;
+  return { ...pm, edgeContrasts: [mm.q * sc] };
+}

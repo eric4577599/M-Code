@@ -72,6 +72,9 @@ import {
   SLOW_SHUTTER_MS,
   isBlackFrame,
   maxElementNonUniformity,
+  moduleCenterModulation,
+  photometricWithModuleModulation,
+  MODULATION_TOLERATED_FRACTION,
   stepBlackWatch,
   BLACK_FRAME_LIMITS,
 } from "../demo/imgproc.js";
@@ -3302,5 +3305,70 @@ describe("roiPhotometric 的 mergeRuns 實驗(同類相鄰 run 合併)", () => {
     const a = roiPhotometric(g, W, roi, 10, {}).edgeContrasts as number[];
     const b = roiPhotometric(g, W, roi, 10, { mergeRuns: true }).edgeContrasts as number[];
     expect(b).toEqual(a);   // 沒有同類相鄰 → 合併不改任何事
+  });
+});
+
+describe("2D 逐模組調變(新版量法)", () => {
+  const N = 21, PX = 12, W = N * PX;
+  const DARK = 30, LIGHT = 210;
+  /** 棋盤格式的 N×N 模組;mutate 可改個別模組值;blur 為 3×3 方塊平均次數(模擬邊緣過渡) */
+  function grid(mutate?: (v: number[][]) => void, blur = 0) {
+    const m: number[][] = Array.from({ length: N }, (_, j) => Array.from({ length: N }, (_, i) => ((i * 7 + j * 3) % 2 ? DARK : LIGHT)));
+    mutate && mutate(m);
+    let g = new Float64Array(W * W);
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) g[y * W + x] = m[Math.floor(y / PX)]![Math.floor(x / PX)]!;
+    for (let b = 0; b < blur; b++) {
+      const o = new Float64Array(g.length);
+      for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+        let s = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const yy = y + dy, xx = x + dx; if (yy >= 0 && yy < W && xx >= 0 && xx < W) { s += g[yy * W + xx]!; n++; } }
+        o[y * W + x] = s / n;
+      }
+      g = o;
+    }
+    return g;
+  }
+  const run = (g: Float64Array) => moduleCenterModulation(g, W, W, N)!;
+
+  it("乾淨的深淺模組:q ≈ 1、全部模組都達 0.5 以上", () => {
+    const r = run(grid());
+    expect(r.q).toBeGreaterThan(0.95);
+    expect(r.atLevel[0].frac).toBe(1);
+  });
+
+  it("邊緣過渡(模糊)不影響模組中心的調變 —— 這正是掃描線法會被拉低的地方", () => {
+    const r = run(grid(undefined, 2));
+    expect(r.q).toBeGreaterThan(0.9);
+  });
+
+  it("**少數壞模組被容許**:1 個模組落在門檻上(調變 0),q 不變", () => {
+    const r = run(grid((m) => { m[10]![10] = (DARK + LIGHT) / 2; }));
+    expect(r.min).toBeLessThan(0.05);          // 那個壞模組確實量到了
+    expect(r.q).toBeGreaterThan(0.95);         // 但在 1% 容許之內
+    expect(MODULATION_TOLERATED_FRACTION).toBe(0.01);
+  });
+
+  it("**成片的壞模組不得被容許**(守門:若改成只看最差一個或容許太多,這條會失敗)", () => {
+    // 約 10% 的模組變淡到門檻附近
+    const r = run(grid((m) => { for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) if ((i * 5 + j * 3) % 10 === 0) m[j]![i] = (DARK + LIGHT) / 2 + 4; }));
+    expect(r.q).toBeLessThan(0.15);
+    expect(r.atLevel[0].frac).toBeLessThan(0.95);
+  });
+
+  it("輸入不合理回 null(不硬給數字)", () => {
+    const g = grid();
+    expect(moduleCenterModulation(g, W, W, 0)).toBeNull();
+    expect(moduleCenterModulation(g, W, W, 5)).toBeNull();
+    expect(moduleCenterModulation(null as never, W, W, N)).toBeNull();
+    expect(moduleCenterModulation(new Float64Array(W * W).fill(100), W, W, N)).toBeNull();   // 全平:無對比
+  });
+
+  it("photometricWithModuleModulation:grade.ts 的 MOD = min(edgeContrasts)/SC 剛好等於 q", () => {
+    const pm = { rLight: 0.8, rDark: 0.1, rDarkMin: 0.05, edgeContrasts: [0.01, 0.5], threshold: 100 };
+    const out = photometricWithModuleModulation(pm, { q: 0.6 } as never);
+    expect(Math.min(...out.edgeContrasts) / (pm.rLight - pm.rDark)).toBeCloseTo(0.6, 9);
+    expect(pm.edgeContrasts).toEqual([0.01, 0.5]);                       // 不改原物件
+    expect(photometricWithModuleModulation(pm, null as never)).toBe(pm);  // 沒統計 → 原樣
+    expect(photometricWithModuleModulation({ ...pm, rLight: 0.1 }, { q: 0.6 } as never).edgeContrasts).toEqual(pm.edgeContrasts); // SC 退化 → 原樣
   });
 });
