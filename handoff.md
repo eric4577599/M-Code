@@ -1,6 +1,6 @@
 # Handoff — M-Code(瓦楞箱條碼 / QR 品質檢驗核心庫)
 
-> 最後更新:2026-11-13
+> 最後更新:2026-11-15
 
 ## Current Task
 
@@ -21,6 +21,41 @@
 不要再手打三步(A-13)。
 
 > git 與上線狀態一律現查,本檔不記快照:`git log origin/main..HEAD --oneline` / `git status --short`。
+
+## 2026-11-15 新增(最新,先看這裡)
+
+> 現況一律現查:`git log origin/main..HEAD --oneline`、`git status --short`、
+> `npx vitest run --reporter=dot | tail -3`、`curl -s https://m-code.ericchh.work/demo/sw.js | grep VERSION`。本節不記快照。
+
+**這輪做了什麼(全部有報告,細節看報告,不在這裡重複)**
+- 結果頁證據圖 960px(清單縮圖仍 320px)、串流死掉時點畫面/重新拍攝會重開相機、直式「低於請求的 1920」誤報修正
+  → `report20261114-1.md`(追加各節)。
+- **預覽黑幀偵測**(真機連拍已觀察到一次自動恢復)、**拍攝頁一屏操作**(橫向:左相機右控制欄;橫拿原本無法拍照是因為手機外框 + 快門在螢幕外)
+  → 同上報告。
+- **目視正常卻 F/D 的原因分析** → `report20261115-1.md`;**DEF/MOD 量法實驗 `?def=iso`(預設關)** → `report20261115-2.md`。
+
+**最重要的結論(別再重推一遍)**
+1. 直式結構上到不了 px/module ≥ 8(條碼填滿 95% 寬仍只有 7.5);橫式條碼佔寬 65% 即 ≥ 8(真實照片組圖,**非真機橫拍**)。
+2. F/D 的主因是**同一顆纖維亮點造成兩個假 F**:DEF(單列原始剖面、含邊緣像素、取最大)與 MOD(濾掉 1px run 後同類相鄰 run 被當成邊,對比 0.0016)。
+   實驗量法(`?def=iso`)在同一張真實照片上 F → C/C/D/C。**預設行為逐位元不變、門檻與映射一行未動。**
+3. 沒有真實 verifier 對照 → 不能說「M-Code 整體過嚴」。實驗量法可能放鬆真缺陷,**漏判率未知**。iso 之後的下一個限制是 **DEC**(C/D)。
+
+**Next Step(順序為建議,等 Eric 決定)**
+1. **Eric 真機**:用 `?def=iso` 對同一批箱子與 legacy 對拍(結果頁、拍照條件紀錄會標示量法);橫拿拍一次看版面與 px/module。
+2. **取得真值**:同批樣品拿到真實 verifier 數字(哪怕 5–10 張)。沒有它,過嚴/過鬆都是猜。
+3. 良 30 + 人造不良 30 實拍(`spec20261113-1.md`)→ `scripts/ng-rate.mjs`:**要驗 iso 量法的漏判率**。實拍前先決定用哪種量法與拍法,兩者資料不可互比。
+4. DEC 是否也有同類假 F(尚未查)。
+5. 拍照模式(`<input capture>` 用原生相機拍全解析度)是否要做 —— 已列選項,Eric 未決。
+
+**仍待 Eric**:`git push`(兩個 docs/feat commit 視現查而定,push 須明確同意);平常那個 Safari 分頁卡舊 Service Worker 沒更新、沒橫幅,
+原因未查(私密分頁是新版)—— 若下次上線又不更新,代表橫幅流程有漏洞,需查;`docs/inbox/` 是否進版控。
+
+**本輪踩到、值得記的坑**
+- **Chrome 擴充功能會斷線**。替代:無頭 Chrome + DevTools 協定(`--headless=new --remote-debugging-port=9333`),用 Node 22 內建 `WebSocket` 寫 ~30 行 CDP 客戶端即可,**不必裝任何套件**;
+  裝置模擬用 `Emulation.setDeviceMetricsOverride`。每次驗 demo 改動**換新埠**(舊埠的 Service Worker 會餵舊 HTML,本輪又踩到一次)。
+- **合成條碼不能當解碼門檻的量測工具**(`mobile.html` 的 DECODE_MAX_W 註解早就警告)。本輪合成 ITF-14 橫向 1920 解不出、真實 GS1-128 全數解得出 —— **以真實照片組圖為準**。
+- macOS 的 `sed -i` 要帶備份後綴;一串 `&&` 裡 sed 失敗會讓後面全部沒跑(本輪因此多繞一圈)。
+- 預期 GTIN 的 placeholder 文字被 `expected-gtin-sync` 守門測試鎖住 —— 改版面時別動它。
 
 ## 2026-11-13 新增(最新,先看這裡)
 
