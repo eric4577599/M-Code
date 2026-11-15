@@ -377,7 +377,7 @@
     <div class="capSetup">
     <div class="selrow">
       <div class="seg" id="seg-stage"></div>
-      <div class="seg" id="seg-def" title="量法開關:預設=與先前相同;實驗=缺陷孔徑平均 + 邊緣同類合併(僅供對照,不改任何門檻;兩種量法的等級不可互比)"></div>
+      <div class="seg" id="seg-def" title="量法開關:新版(預設)=缺陷孔徑平均 + 邊緣同類合併;舊版=原始量法。不改任何門檻;兩種量法的等級不可互比"></div>
       <div class="seg" id="seg-std" title="允收標準檔位:高標=現行門檻(預設);標準=GS1 規格表列的最低等級(目前僅 GS1-128 由 B 降為 C)。皆為相對代理值"></div>
     </div>
     <div class="profSel"><select id="profile"></select></div>
@@ -681,7 +681,7 @@ function logShot(grade, acceptance, entry) {
         candidates: { frameCompare: s.frameCompare, frameFallback: s.frameFallback,
           shotTiming: s.shotTiming, shotGate: s.shotGate, staleShot: s.staleShot,
           roiSample: s.roiSample, roiScale: s.roiScale, rectify: s.rectify,
-          defMode: s.defMode || "legacy" } },
+          defMode: s.defMode || "" } },
       gate: s.gateChecks || [],
       geometry: { symbology: state.symbology, pxPerModule: s.pxPerModule,
         tiltDeg: hasTilt ? state.gate.tilt : null, tiltSource: s.tiltSource || "",
@@ -786,17 +786,20 @@ const SAMPLE_DATA = {
 
 // 允收標準檔位(高標 / 標準)。預設高標;選擇存 localStorage,讀寫失敗不影響使用。
 const STD_KEY = "mcode.acceptanceProfile";
-// 量法實驗(2026-11-15,docs/report20261115-1.md / -2.md):"legacy"(預設,與先前完全相同)| "iso"。
-// 可由畫面上的「量法」開關或網址 ?def=iso / ?def=legacy 切換;選擇存 localStorage。
+// 量法(2026-11-15,docs/report20261115-1.md / -2.md):內部值 "legacy" = 舊版(原始量法)| "iso" = 新版
+// (缺陷孔徑平均 + 邊緣同類合併)。**Eric 2026-11-15 裁示:預設改用新版**;舊版保留可切換。
+// 可由畫面上的「量法」開關或網址 ?def=iso / ?def=legacy 切換;選擇存 localStorage(未選過 = 新版)。
+// 內部值沿用 "iso" 只為相容已存的設定與紀錄,畫面文案一律叫「新版 / 舊版」—— 不得出現 ISO / 合規字樣(定位護欄)。
 // **不改任何門檻與映射。** 結果頁與拍照條件紀錄都會標明用的是哪一種,兩種量法的資料不可混在同一批裡比較。
+// 注意:新版對真缺陷的漏判率尚未用實拍驗證(只有單元測試守一種真缺陷)。
 const DEF_KEY = "mcode.defMode";
-const DEF_MODES = [["legacy", "量法:預設"], ["iso", "量法:實驗"]];
+const DEF_MODES = [["legacy", "量法:舊版"], ["iso", "量法:新版"]];
 function loadDefMode() {
   try {
     const q = new URLSearchParams(location.search).get("def");
     if (q === "iso" || q === "legacy") localStorage.setItem(DEF_KEY, q);
-    return localStorage.getItem(DEF_KEY) === "iso" ? "iso" : "legacy";
-  } catch (e) { return "legacy"; }
+    return localStorage.getItem(DEF_KEY) === "legacy" ? "legacy" : "iso";
+  } catch (e) { return "iso"; }
 }
 function persistDefMode() { try { localStorage.setItem(DEF_KEY, state.defMode); } catch (e) {} }
 const loadStdProfile = () => { try { const v = localStorage.getItem(STD_KEY); return ACCEPTANCE_PROFILES.some(([id]) => id === v) ? v : DEFAULT_ACCEPTANCE_PROFILE; } catch (e) { return DEFAULT_ACCEPTANCE_PROFILE; } };
@@ -1549,9 +1552,10 @@ function renderShotRead(shot) {
              ms < SLOW_SHUTTER_MS ? "" : "偏慢"),
   ];
   // 非預設量法要看得見(實驗資料不可與 legacy 混在一起比較)
-  cells.push(shot.defMode === "iso"
-    ? cell("量法", "實驗(ISO 式)", "", "與預設量法的等級不可互比")
-    : cell("量法", "預設", "", ""));
+  // 量法只對 1D 有意義(lastShotInfo.defMode 只在 1D 量測路徑設定);2D / 不可量測沒有這個欄位就不顯示,
+  // 不可補一個預設值 —— 沒量過的東西不能標成「新版」或「舊版」。
+  if (shot.defMode === "legacy") cells.push(cell("量法", "舊版", "", "與新版的等級不可互比"));
+  else if (shot.defMode === "iso") cells.push(cell("量法", "新版", "", "與舊版的等級不可互比"));
   box.innerHTML = cells.join("");
   box.hidden = false;
 }
