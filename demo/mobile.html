@@ -318,7 +318,8 @@
     body[data-view="capture"] .phone { height:100vh; height:100dvh; min-height:0; }
     body[data-view="capture"] #v-capture { min-height:0; overflow:hidden; }
     #v-capture .capSetup { display:flex; flex-wrap:wrap; align-items:center; }
-    #v-capture .capSetup .selrow { flex:1 1 100%; padding:6px 12px 2px; }
+    #v-capture .capSetup .selrow { flex:1 1 100%; padding:6px 12px 2px; flex-wrap:wrap; gap:4px 6px; overflow-x:visible; }
+    #v-capture .capSetup .seg button { padding:5px 9px; font-size:11.5px; }
     #v-capture .capSetup .profSel { flex:1 1 0; min-width:0; padding:2px 6px 2px 12px; }
     #v-capture .capSetup .profSel + .profSel { padding:2px 12px 2px 6px; }
     #v-capture .capSetup .profSel select { padding:7px 8px; font-size:13px; }
@@ -376,6 +377,7 @@
     <div class="capSetup">
     <div class="selrow">
       <div class="seg" id="seg-stage"></div>
+      <div class="seg" id="seg-def" title="量法開關:預設=與先前相同;實驗=缺陷孔徑平均 + 邊緣同類合併(僅供對照,不改任何門檻;兩種量法的等級不可互比)"></div>
       <div class="seg" id="seg-std" title="允收標準檔位:高標=現行門檻(預設);標準=GS1 規格表列的最低等級(目前僅 GS1-128 由 B 降為 C)。皆為相對代理值"></div>
     </div>
     <div class="profSel"><select id="profile"></select></div>
@@ -784,9 +786,22 @@ const SAMPLE_DATA = {
 
 // 允收標準檔位(高標 / 標準)。預設高標;選擇存 localStorage,讀寫失敗不影響使用。
 const STD_KEY = "mcode.acceptanceProfile";
+// 量法實驗(2026-11-15,docs/report20261115-1.md / -2.md):"legacy"(預設,與先前完全相同)| "iso"。
+// 可由畫面上的「量法」開關或網址 ?def=iso / ?def=legacy 切換;選擇存 localStorage。
+// **不改任何門檻與映射。** 結果頁與拍照條件紀錄都會標明用的是哪一種,兩種量法的資料不可混在同一批裡比較。
+const DEF_KEY = "mcode.defMode";
+const DEF_MODES = [["legacy", "量法:預設"], ["iso", "量法:實驗"]];
+function loadDefMode() {
+  try {
+    const q = new URLSearchParams(location.search).get("def");
+    if (q === "iso" || q === "legacy") localStorage.setItem(DEF_KEY, q);
+    return localStorage.getItem(DEF_KEY) === "iso" ? "iso" : "legacy";
+  } catch (e) { return "legacy"; }
+}
+function persistDefMode() { try { localStorage.setItem(DEF_KEY, state.defMode); } catch (e) {} }
 const loadStdProfile = () => { try { const v = localStorage.getItem(STD_KEY); return ACCEPTANCE_PROFILES.some(([id]) => id === v) ? v : DEFAULT_ACCEPTANCE_PROFILE; } catch (e) { return DEFAULT_ACCEPTANCE_PROFILE; } };
 const state = {
-  stdProfile: loadStdProfile(),
+  stdProfile: loadStdProfile(), defMode: loadDefMode(),
   symbology:"AUTO", profileId:SEED_SUBSTRATE_PROFILES[0].id, processStage:"OUTBOUND",
   // 只留 decoded(情境模擬要「掃到」的內容)。原本還有一個 expected,而它唯一的來源
   // 就是 decoded / zx.text —— 拿自己比自己,比對結果結構上恆為 true(稽核 A-02)。
@@ -834,6 +849,7 @@ function seg(el, items, key, after) {
 function initSelectors() {
   seg($("seg-stage"), STAGES, "processStage");
   seg($("seg-std"), ACCEPTANCE_PROFILES, "stdProfile", persistStdProfile);
+  seg($("seg-def"), DEF_MODES, "defMode", persistDefMode);
   $("profile").innerHTML = SEED_SUBSTRATE_PROFILES.map(p => `<option value="${p.id}">${p.name}</option>`).join("");
   $("profile").value = state.profileId;
   $("profile").onchange = () => { state.profileId = $("profile").value; recompute(); };
@@ -842,6 +858,7 @@ function persistStdProfile() { try { localStorage.setItem(STD_KEY, state.stdProf
 function render() {
   seg($("seg-stage"), STAGES, "processStage");
   seg($("seg-std"), ACCEPTANCE_PROFILES, "stdProfile", persistStdProfile);
+  seg($("seg-def"), DEF_MODES, "defMode", persistDefMode);
 }
 
 // HUD symbol mock: 1D bars or 2D matrix
@@ -1094,17 +1111,7 @@ function rectifyRoi(zx, kx, ky, rg, photo) {
 // 調高的代價也要一併衡量:Android 走 L1 時照片可達 4032 寬,上限翻倍等於 getImageData
 // 從 3.1MB 變 12.6MB、ZXing 掃描面積四倍。
 const DECODE_MAX_W = 1024;
-// DEF 輸入量法實驗(2026-11-15,docs/report20261115-1.md):預設 "legacy" = 與先前完全相同。
-// 以網址 ?def=iso 切到 ISO 式(孔徑 + 排除邊界過渡),?def=legacy 切回;選擇存 localStorage,
-// 之後不必每次帶參數。**不改任何門檻與映射**。結果頁與拍照條件紀錄都會標明用的是哪一種,
-// 兩種量法的資料不可混在同一批裡比較。
-const DEF_MODE = (() => {
-  try {
-    const q = new URLSearchParams(location.search).get("def");
-    if (q === "iso" || q === "legacy") localStorage.setItem("mcode.defMode", q);
-    return localStorage.getItem("mcode.defMode") === "iso" ? "iso" : "legacy";
-  } catch (e) { return "legacy"; }
-})();
+
 // 記憶體護欄(規格 §3.1):解碼與 ROI 定位跑「降取樣版(≤DECODE_MAX_W 寬)」,
 // 定出的 ROI 座標再依比例放大回全解析度,只對放大後的 ROI 取像素做光度與幾何量測。
 // 取降取樣版(small)的整張灰階。輸入:無(用閉包外的 small);輸出:灰階陣列或 null。
@@ -1226,7 +1233,7 @@ function inspectReal(photo) {
   const pmW = (oneD && plan.useRectified) ? rg.w : gw;
   const pmRoi = (oneD && plan.useRectified) ? { x0: 0, y0: 0, x1: rg.w, y1: rg.h } : roi;
   // 實驗開關同一個(?def=iso):同時啟用「同類相鄰 run 合併」,見 imgproc.js roiPhotometric 的說明
-  const pm = roiPhotometric(pmGray, pmW, pmRoi, 10, { mergeRuns: DEF_MODE === "iso" });
+  const pm = roiPhotometric(pmGray, pmW, pmRoi, 10, { mergeRuns: state.defMode === "iso" });
   if (lastShotInfo) lastShotInfo.photometricBase = (oneD && plan.useRectified) ? "未矯正 ROI" : "同幾何";
   // 透視傾角(規格 §3.3 · 2026-08-03 裁示):先試 getSettings().focalLength 走單應矩陣
   // 實算,不可得則退回 quadGeometry 的臂長差代理值並在結果頁標註為代理。
@@ -1279,8 +1286,8 @@ function inspectReal(photo) {
     //   B 模組寬被量化成整數像素 —— 等級追隨的是「每模組像素數的小數部分」而非印刷品質
     //     (實測 5.5 px/模組 → F、14.2 px → A,同一張完美圖只是換個距離拍)。
     // 幾何吃正射影像(gray),光度仍走未矯正 ROI(裁示 D3),兩者互不影響。
-    const g1 = roi1DMetrology(gray, gw, roi, { sym, text: zx ? zx.text : "", defMode: DEF_MODE });
-    if (lastShotInfo) lastShotInfo.defMode = DEF_MODE;
+    const g1 = roi1DMetrology(gray, gw, roi, { sym, text: zx ? zx.text : "", defMode: state.defMode });
+    if (lastShotInfo) lastShotInfo.defMode = state.defMode;
     scanlineCount = g1.scanlines.length;
     // 等級成因需要**逐條**的資料(規格 §3.8):總分是「每條取最差,再平均」,
     // 而 GradeResult.parameters 只回報第 1 條 —— 拿它當「等級原因」會講錯。
@@ -1542,7 +1549,9 @@ function renderShotRead(shot) {
              ms < SLOW_SHUTTER_MS ? "" : "偏慢"),
   ];
   // 非預設量法要看得見(實驗資料不可與 legacy 混在一起比較)
-  if (shot.defMode === "iso") cells.push(cell("量法(實驗)", "ISO 式:缺陷孔徑 + 邊緣合併", "", "與預設量法的等級不可互比"));
+  cells.push(shot.defMode === "iso"
+    ? cell("量法", "實驗(ISO 式)", "", "與預設量法的等級不可互比")
+    : cell("量法", "預設", "", ""));
   box.innerHTML = cells.join("");
   box.hidden = false;
 }
@@ -2719,12 +2728,16 @@ renderCapMode();
 $("shutter").onclick = () => {
   inspect().catch((e) => { console.warn("inspect 失敗", e); setCamStatus("檢驗失敗，請重試", "warn"); });
 };
-$("back").onclick = () => {
+// 回取景頁(「重新拍攝」與「再拍一張」共用)。2026-11-15 實機:兩個按鈕按下去都會**先黑屏**一段才恢復 ——
+// 含 <video> 的拍攝頁被 display:none 藏起來時 iOS 會暫停它。與其等自癒,按下去(本身就是使用者手勢)
+// 就直接重開相機,畫面一開始就是「開啟相機中…」而不是黑屏。沒有相機(示範模式)時不動。
+function retake() {
   show("capture");
-  // 回取景頁時串流若已死就直接重開(這次點擊本身就是使用者手勢),不讓使用者面對黑畫面
-  if (camVideo && (camFault || cameraStreamDead())) reopenCamera();
-};
-$("reBtn").onclick = () => show("capture");
+  if (camVideo) reopenCamera();
+  else if (currentTier) initCamera(true);
+}
+$("back").onclick = retake;
+$("reBtn").onclick = retake;
 $("labelGood").onclick = () => setHumanLabel("good");
 $("labelBad").onclick = () => setHumanLabel("bad");
 $("logCopyBtn").onclick = copyLog;
